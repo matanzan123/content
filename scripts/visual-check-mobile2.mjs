@@ -1,0 +1,14 @@
+import { chromium } from "playwright";
+import path from "node:path";
+const outDir = path.resolve("scratch-screens");
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+await page.goto("http://localhost:3000", { waitUntil: "networkidle" });
+await page.screenshot({ path: path.join(outDir, "hero-mobile-closed.png") });
+await page.click('button[aria-label="Open menu"]');
+await page.waitForTimeout(200);
+await page.screenshot({ path: path.join(outDir, "hero-mobile-open.png") });
+console.log("ERRORS", JSON.stringify(errors));
+await browser.close();

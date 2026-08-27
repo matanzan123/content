@@ -1,0 +1,18 @@
+import { chromium } from "playwright";
+import path from "node:path";
+const outDir = path.resolve("scratch-screens");
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+await page.goto("http://localhost:3000", { waitUntil: "networkidle" });
+await page.evaluate(() => window.scrollTo(0, 500));
+await page.waitForTimeout(150);
+await page.hover("text=Set Up Payouts");
+await page.waitForTimeout(350);
+await page.screenshot({ path: path.join(outDir, "card-hover.png") });
+await page.hover("text=Start Earning Today");
+await page.waitForTimeout(250);
+await page.screenshot({ path: path.join(outDir, "cta-hover.png") });
+console.log("ERRORS", JSON.stringify(errors));
+await browser.close();

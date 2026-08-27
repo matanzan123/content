@@ -1,0 +1,17 @@
+import { chromium } from "playwright";
+import path from "node:path";
+const outDir = path.resolve("scratch-screens");
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+await page.goto("http://localhost:3000", { waitUntil: "networkidle" });
+await page.click('button[role="switch"]');
+await page.waitForTimeout(300);
+await page.screenshot({ path: path.join(outDir, "brand-top.png") });
+await page.evaluate(() => window.scrollTo(0, 400));
+await page.waitForTimeout(200);
+await page.screenshot({ path: path.join(outDir, "brand-scrolled.png") });
+console.log("ERRORS", JSON.stringify(errors));
+await browser.close();
