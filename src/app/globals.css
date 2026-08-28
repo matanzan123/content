@@ -170,3 +170,14 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .mosaic-col-up, .mosaic-col-down { animation: none; }
 }
+
+/* Restrained shimmer across the active case study's CPM result bar. */
+@keyframes cpm-shimmer {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(500%); }
+}
+.animate-cpm-shimmer { animation: cpm-shimmer 3.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-cpm-shimmer { animation: none; }
+}

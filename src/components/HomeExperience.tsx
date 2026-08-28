@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ActiveCreatorsStrip } from "./ActiveCreatorsStrip";
 import { BrandCredibility } from "./BrandCredibility";
 import { BrandProtection } from "./BrandProtection";
+import { BrandResults } from "./BrandResults";
 import { CTASocialProof } from "./CTASocialProof";
 import { FAQSection } from "./FAQSection";
 import { Footer } from "./Footer";
@@ -19,7 +20,7 @@ import type { Role } from "./RoleToggle";
 /**
  * Brand realm — review build, assembled section by section.
  *
- * Approved so far: Hero -> Join 200+ Profitable Brands -> Why Verification
+ * Approved so far: Hero -> Join 200+ Brands -> Why Verification -> Results. Why Verification
  * Matters. `HowItWorks` ("Three Steps To Launch") is deliberately NOT rendered
  * here; its component is untouched and still used by the creator realm, so
  * restoring it is a one-line change once its final position is decided. The
@@ -39,6 +40,7 @@ export function HomeExperience() {
         <Hero role={role} onRoleChange={setRole} />
         <BrandCredibility />
         <WhyVerificationMatters />
+        <BrandResults />
       </div>
     );
   }
