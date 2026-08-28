@@ -8,12 +8,14 @@ const NAV_BY_ROLE: Record<Role, { label: string; href: string }[]> = {
   creator: [
     { label: "For Brands", href: "/brand" },
     { label: "Discover", href: "/discover" },
+    { label: "FAQs", href: "/faqs" },
     { label: "Agencies", href: "/agencies" },
     { label: "Contact", href: "/contact" },
   ],
   brand: [
     { label: "For Creators", href: "/" },
     { label: "Discover", href: "/discover" },
+    { label: "FAQs", href: "/faqs" },
     { label: "Agencies", href: "/agencies" },
     { label: "Contact", href: "/contact" },
   ],

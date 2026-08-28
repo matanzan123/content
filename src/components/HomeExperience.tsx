@@ -29,8 +29,8 @@ import type { Role } from "./RoleToggle";
 const PARKED_BRAND_SECTIONS = [BrandProtection] as const;
 void PARKED_BRAND_SECTIONS;
 
-export function HomeExperience() {
-  const [role, setRole] = useState<Role>("creator");
+export function HomeExperience({ initialRole = "creator" }: { initialRole?: Role } = {}) {
+  const [role, setRole] = useState<Role>(initialRole);
   const isBrand = role === "brand";
 
   if (isBrand) {
