@@ -45,6 +45,9 @@ function SocialIcon({ label }: { label: string }) {
 export function Footer({ role }: { role: Role }) {
   const isBrand = role === "brand";
   const cta = isBrand ? { label: "Launch a Campaign", href: "/onboarding?type=brand" } : { label: "Become a Creator", href: "/onboarding?type=creator" };
+  const description = isBrand
+    ? "Launch campaigns, discover creators, and pay only for verified results — trusted by 200+ growing brands scaling organic reach."
+    : "Create, post, and get paid for content that performs — trusted by tens of thousands of creators and hundreds of growing brands.";
 
   return (
     <footer className="relative overflow-hidden bg-surface-inverse pt-20">
@@ -64,7 +67,7 @@ export function Footer({ role }: { role: Role }) {
               </span>
             </div>
             <p className="mt-4 max-w-xs text-[13.5px] leading-relaxed text-ink-inverse-soft">
-              Create, post, and get paid for content that performs — trusted by tens of thousands of creators and hundreds of growing brands.
+              {description}
             </p>
             <Link
               href={cta.href}
@@ -116,7 +119,9 @@ export function Footer({ role }: { role: Role }) {
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
               <span className="text-[13.5px] text-ink-inverse-soft">All systems operational</span>
             </div>
-            <p className="mt-4 text-[13.5px] text-ink-inverse-soft">6,200+ creators active right now</p>
+            <p className="mt-4 text-[13.5px] text-ink-inverse-soft">
+              {isBrand ? "180+ campaigns live right now" : "6,200+ creators active right now"}
+            </p>
           </div>
         </div>
 

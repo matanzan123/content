@@ -5,14 +5,21 @@ const BRAND_LOGOS = [
   { name: "Northwind", code: "NW", gradient: "linear-gradient(135deg, var(--accent), var(--accent-2))" },
   { name: "Solace", code: "SL", gradient: "linear-gradient(135deg, var(--accent-violet), var(--accent-cyan))" },
   { name: "Fernway", code: "FW", gradient: "linear-gradient(135deg, var(--accent-cyan), var(--accent-2))" },
+  { name: "Roast House", code: "RH", gradient: "linear-gradient(135deg, var(--accent-warm), var(--accent-violet))" },
+  { name: "Aftershock", code: "AS", gradient: "linear-gradient(135deg, var(--accent), var(--accent-cyan))" },
+  { name: "Bloom Labs", code: "BL", gradient: "linear-gradient(135deg, var(--accent-violet), var(--accent-2))" },
+  { name: "Live Circuit", code: "LC", gradient: "linear-gradient(135deg, var(--accent-cyan), var(--accent))" },
+  { name: "Wave Collective", code: "WC", gradient: "linear-gradient(135deg, var(--accent-2), var(--accent-cyan))" },
 ];
 
-// Deterministic mix of avatar photos and occasional brand-logo tiles, so the
-// strip reads as "real people + a few brand partners", not decoration.
-function buildStrip(count: number) {
+// Creator mode: mostly faces, a few brand tiles mixed in.
+// Brand mode: mostly brand tiles, a few faces mixed in — inverted ratio so
+// each mode's strip actually communicates who is populating it.
+function buildStrip(count: number, isBrand: boolean) {
   const items: { type: "avatar" | "brand"; seed: number }[] = [];
   for (let i = 0; i < count; i++) {
-    items.push(i > 0 && i % 6 === 0 ? { type: "brand", seed: i } : { type: "avatar", seed: i });
+    const isBrandTile = isBrand ? i % 3 !== 0 : i > 0 && i % 6 === 0;
+    items.push({ type: isBrandTile ? "brand" : "avatar", seed: i });
   }
   return items;
 }
@@ -50,7 +57,7 @@ function Tile({ type, seed }: { type: "avatar" | "brand"; seed: number }) {
 
 export function ActiveCreatorsStrip({ role }: { role: Role }) {
   const isBrand = role === "brand";
-  const items = buildStrip(30);
+  const items = buildStrip(30, isBrand);
 
   return (
     <section
@@ -66,10 +73,10 @@ export function ActiveCreatorsStrip({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          Active {role === "brand" ? "Brands" : "Creators"}
+          Active {isBrand ? "Brands" : "Creators"}
         </p>
         <p className={["text-[13px] font-semibold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
-          6,200+ online right now
+          {isBrand ? "180+ campaigns live right now" : "6,200+ online right now"}
         </p>
       </div>
 

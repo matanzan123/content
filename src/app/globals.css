@@ -75,6 +75,30 @@ body {
   font-family: var(--font-body);
 }
 
+/*
+  Brand-mode palette realm — a deliberately different dark visual world from
+  the creator side's blue/violet/cyan. Warm near-black with our own
+  amber/copper accent system (own hex values, not sampled from any
+  reference). Every existing dark-mode component already paints itself from
+  these same custom properties, so wrapping the brand-mode section tree in
+  this class re-themes the whole page without duplicating component code.
+*/
+.realm-brand {
+  --accent: #d9762e;
+  --accent-ink: #7a3a10;
+  --accent-soft: #f6e3d1;
+  --accent-2: #e8944f;
+  --accent-cyan: #e0ab3a;
+  --accent-violet: #b5541f;
+  --accent-warm: #e0ab3a;
+
+  --surface-inverse: #140f0c;
+  --surface-inverse-raised: #201811;
+  --ink-inverse: #f7f0e8;
+  --ink-inverse-soft: #b8a696;
+  --line-inverse: #362920;
+}
+
 @keyframes gentle-float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
@@ -109,4 +133,40 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .marquee-track { animation: none; }
+}
+
+/* Restrained motion for the brand mosaic — a few tiles drift, the stat glow breathes. */
+@keyframes tile-drift {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -9px, 0); }
+}
+@keyframes glow-breathe {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 0.92; transform: scale(1.07); }
+}
+.animate-drift { animation: tile-drift 6.2s ease-in-out infinite; }
+.animate-drift-slow { animation: tile-drift 7.8s ease-in-out infinite; animation-delay: 1.1s; }
+.animate-drift-slower { animation: tile-drift 9s ease-in-out infinite; animation-delay: 2.3s; }
+.animate-glow { animation: glow-breathe 5.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-drift, .animate-drift-slow, .animate-drift-slower, .animate-glow { animation: none; }
+}
+
+/* Brand mosaic columns drift slowly in opposite directions so tiles keep
+   entering and leaving the masked window — the 'live network' feel. Each
+   column renders its tiles twice, so -50% is a seamless loop. */
+@keyframes mosaic-up {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(0, -50%, 0); }
+}
+@keyframes mosaic-down {
+  from { transform: translate3d(0, -50%, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+.mosaic-col-up { animation: mosaic-up var(--drift, 48s) linear infinite; }
+.mosaic-col-down { animation: mosaic-down var(--drift, 54s) linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mosaic-col-up, .mosaic-col-down { animation: none; }
 }

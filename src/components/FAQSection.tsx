@@ -19,6 +19,8 @@ const FAQS: Record<Role, { q: string; a: string }[]> = {
     { q: "Can I set my own budget and rate?", a: "Yes, you control your total budget and your per-thousand-view rate when you launch a campaign." },
     { q: "How do I review submissions?", a: "Every submission appears in your dashboard for approval, with automatic flags for suspicious activity." },
     { q: "Can agencies manage campaigns on our behalf?", a: "Yes, verified agencies can manage multiple brand campaigns from a single account." },
+    { q: "Can I add more budget to a campaign that's already live?", a: "Yes, you can top up an active campaign's budget at any time without creating a new one — creators keep submitting against the same brief." },
+    { q: "What happens if a submission looks suspicious?", a: "It's automatically held for manual review before any payout is issued, so unusual view activity never gets billed to your budget." },
   ],
 };
 

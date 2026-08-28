@@ -34,29 +34,48 @@ export function Header({ role }: { role: Role }) {
     <header className="sticky top-4 z-40 mx-4 sm:mx-5">
       <div
         className={[
-          "mx-auto max-w-[1600px] border shadow-[var(--shadow-card)] backdrop-blur transition-[colors,border-radius] duration-200",
+          "relative mx-auto max-w-[1600px] border backdrop-blur-xl transition-[colors,border-radius] duration-200",
           mobileOpen ? "rounded-[28px]" : "rounded-[var(--radius-token-pill)]",
           isBrand
-            ? "border-white/10 bg-surface-inverse-raised/90"
-            : "border-line bg-surface/90",
+            ? "border-white/[0.09] bg-[color-mix(in_srgb,var(--surface-inverse-raised)_82%,transparent)] shadow-[0_20px_50px_-18px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.04)]"
+            : "border-line bg-surface/90 shadow-[var(--shadow-card)]",
         ].join(" ")}
       >
-        <div className="flex items-center justify-between px-5 py-3">
-          <Link href="/" className="flex items-center gap-2.5" onClick={() => setMobileOpen(false)}>
-            <span className="flex h-9 w-9 items-center justify-center rounded-[var(--radius-token-sm)] bg-accent text-white">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        {isBrand && (
+          <span
+            className="pointer-events-none absolute inset-x-10 top-0 h-px"
+            style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.28), transparent)" }}
+          />
+        )}
+        <div className="flex items-center justify-between gap-4 px-5 py-[11px]">
+          <Link href="/" className="flex shrink-0 items-center gap-2.5" onClick={() => setMobileOpen(false)}>
+            <span
+              className="relative flex h-[38px] w-[38px] items-center justify-center overflow-hidden rounded-[11px] text-white"
+              style={{
+                background: "linear-gradient(140deg, var(--accent), var(--accent-violet))",
+                boxShadow:
+                  "inset 0 1px 0 rgba(255,255,255,0.3), 0 4px 12px -3px color-mix(in srgb, var(--accent) 65%, transparent)",
+              }}
+            >
+              <span
+                className="pointer-events-none absolute inset-0"
+                style={{ background: "linear-gradient(180deg, rgba(255,255,255,0.24), transparent 62%)" }}
+              />
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="relative">
                 <path
-                  d="M4 12L10 6M4 12L10 18M4 12H20"
-                  stroke="currentColor"
-                  strokeWidth="2.4"
-                  strokeLinecap="round"
+                  d="M12 2.9l7.8 4.3v9.6L12 21.1l-7.8-4.3V7.2L12 2.9z"
+                  fill="white"
+                  fillOpacity="0.22"
+                  stroke="white"
+                  strokeWidth="1.7"
                   strokeLinejoin="round"
                 />
+                <path d="M10.4 9.2l5 2.8-5 2.8V9.2z" fill="white" />
               </svg>
             </span>
             <span
               className={[
-                "font-[var(--font-display)] text-[13px] font-extrabold uppercase leading-[1.05] tracking-tight",
+                "font-[var(--font-display)] text-[12.5px] font-extrabold uppercase leading-[1.12] tracking-[0.005em]",
                 isBrand ? "text-ink-inverse" : "text-ink",
               ].join(" ")}
             >
@@ -66,16 +85,16 @@ export function Header({ role }: { role: Role }) {
             </span>
           </Link>
 
-          <nav className="hidden items-center gap-7 md:flex">
+          <nav className="hidden items-center gap-0.5 md:flex">
             {nav.map((item) => (
               <Link
                 key={item.label}
                 href={item.href}
                 className={[
-                  "text-[14px] font-medium transition-colors",
+                  "rounded-[var(--radius-token-pill)] px-4 py-2 text-[14px] font-medium transition-colors",
                   isBrand
-                    ? "text-ink-inverse-soft hover:text-ink-inverse"
-                    : "text-ink-soft hover:text-ink",
+                    ? "text-ink-inverse-soft hover:bg-white/[0.07] hover:text-ink-inverse"
+                    : "text-ink-soft hover:bg-surface-sunken hover:text-ink",
                 ].join(" ")}
               >
                 {item.label}
@@ -85,11 +104,22 @@ export function Header({ role }: { role: Role }) {
 
           <div className="flex items-center gap-2">
             <Link
+              href="/login"
+              className={[
+                "hidden rounded-[var(--radius-token-pill)] px-3.5 py-2 text-[13.5px] font-medium transition-colors lg:inline-flex",
+                isBrand
+                  ? "text-ink-inverse-soft hover:bg-white/[0.07] hover:text-ink-inverse"
+                  : "text-ink-soft hover:bg-surface-sunken hover:text-ink",
+              ].join(" ")}
+            >
+              Sign in
+            </Link>
+            <Link
               href={cta.href}
               className={[
-                "hidden items-center gap-2 rounded-[var(--radius-token-pill)] px-4 py-2.5 text-[13px] font-semibold transition-colors sm:inline-flex",
+                "hidden items-center gap-1.5 rounded-[var(--radius-token-pill)] px-5 py-2.5 text-[13.5px] font-bold tracking-[-0.005em] transition-colors sm:inline-flex",
                 isBrand
-                  ? "bg-white text-ink hover:bg-white/90"
+                  ? "bg-white text-ink shadow-[0_6px_18px_-6px_rgba(0,0,0,0.65)] hover:bg-white/90"
                   : "bg-ink text-white hover:bg-ink/90",
               ].join(" ")}
             >

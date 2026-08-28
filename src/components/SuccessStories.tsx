@@ -4,38 +4,34 @@ import Image from "next/image";
 import { useRef, useState } from "react";
 import type { Role } from "./RoleToggle";
 
-type Story = { name: string; quote: string; result: string; photo: number };
+type CreatorStory = { name: string; quote: string; result: string; photo: number };
+type BrandStory = { company: string; code: string; gradient: string; contact: string; views: string; spent: string; cpm: string; campaignSeed: string };
 
-const STORIES: Record<Role, Story[]> = {
-  creator: [
-    { name: "Amara Torres", quote: "I posted three clips in my first week and the payout landed exactly on schedule.", result: "$3,240 in 30 days", photo: 21 },
-    { name: "Devon Iwu", quote: "No followers, no portfolio — just picked a campaign and started posting.", result: "$1,180 first month", photo: 52 },
-    { name: "Priya Nair", quote: "The trust score actually unlocked bigger campaigns once I built it up.", result: "$6,900 lifetime", photo: 44 },
-    { name: "Lucas Ferreira", quote: "Payout protection made me comfortable posting for a brand I'd never heard of.", result: "$2,410 in 45 days", photo: 61 },
-    { name: "Sena Okafor", quote: "I clip in my downtime between classes — it adds up faster than I expected.", result: "$890 part-time", photo: 29 },
-  ],
-  brand: [
-    { name: "Northwind — Marketing Lead", quote: "We had verified creators posting within a day of launching the campaign.", result: "1.2M organic views", photo: 15 },
-    { name: "Solace — Growth Team", quote: "Payout protection meant we only ever paid for verified performance.", result: "$0.09 CPM average", photo: 33 },
-    { name: "Fernway — Founder", quote: "It replaced three separate agency relationships for a fraction of the cost.", result: "210 creators onboarded", photo: 8 },
-    { name: "Roast House — Brand Manager", quote: "The approval workflow made quality control genuinely easy to manage.", result: "68% approval rate", photo: 47 },
-    { name: "Bloom Labs — CMO", quote: "We finally have organic content that doesn't feel like an ad.", result: "4.1M total reach", photo: 60 },
-  ],
-};
+const CREATOR_STORIES: CreatorStory[] = [
+  { name: "Amara Torres", quote: "I posted three clips in my first week and the payout landed exactly on schedule.", result: "$3,240 in 30 days", photo: 21 },
+  { name: "Devon Iwu", quote: "No followers, no portfolio — just picked a campaign and started posting.", result: "$1,180 first month", photo: 52 },
+  { name: "Priya Nair", quote: "The trust score actually unlocked bigger campaigns once I built it up.", result: "$6,900 lifetime", photo: 44 },
+  { name: "Lucas Ferreira", quote: "Payout protection made me comfortable posting for a brand I'd never heard of.", result: "$2,410 in 45 days", photo: 61 },
+  { name: "Sena Okafor", quote: "I clip in my downtime between classes — it adds up faster than I expected.", result: "$890 part-time", photo: 29 },
+];
+
+const BRAND_STORIES: BrandStory[] = [
+  { company: "Northwind", code: "NW", gradient: "linear-gradient(135deg, var(--accent), var(--accent-2))", contact: "Marketing Lead", views: "1.2M", spent: "$4,800", cpm: "$0.09 CPM", campaignSeed: "neonrift" },
+  { company: "Solace", code: "SL", gradient: "linear-gradient(135deg, var(--accent-violet), var(--accent-cyan))", contact: "Growth Team", views: "3.1M", spent: "$6,240", cpm: "$0.11 CPM", campaignSeed: "solaceaudio" },
+  { company: "Fernway", code: "FW", gradient: "linear-gradient(135deg, var(--accent-cyan), var(--accent-2))", contact: "Founder", views: "1.4M", spent: "$2,980", cpm: "$0.07 CPM", campaignSeed: "fernwayfit" },
+  { company: "Roast House", code: "RH", gradient: "linear-gradient(135deg, var(--accent-warm), var(--accent-violet))", contact: "Brand Manager", views: "5.6M", spent: "$9,840", cpm: "$0.14 CPM", campaignSeed: "roasthouse" },
+  { company: "Bloom Labs", code: "BL", gradient: "linear-gradient(135deg, var(--accent-violet), var(--accent-cyan))", contact: "CMO", views: "2.3M", spent: "$4,120", cpm: "$0.10 CPM", campaignSeed: "bloomskincare" },
+];
 
 const CLONE = 2;
 const CARD_W = 320;
 const GAP = 24;
 
 export function SuccessStories({ role }: { role: Role }) {
-  const stories = STORIES[role];
   const isBrand = role === "brand";
+  const stories = isBrand ? BRAND_STORIES : CREATOR_STORIES;
   const total = stories.length;
 
-  // Extended track: [clone of last 2] + [real stories] + [clone of first 2].
-  // trackIndex walks this extended array; when it lands in a cloned region we
-  // silently (no transition) snap it back to the equivalent real position —
-  // that's what makes next/prev feel circular with no visible reset.
   const extended = [...stories.slice(-CLONE), ...stories, ...stories.slice(0, CLONE)];
   const [trackIndex, setTrackIndex] = useState(CLONE);
   const [smooth, setSmooth] = useState(true);
@@ -75,7 +71,7 @@ export function SuccessStories({ role }: { role: Role }) {
     >
       <div
         className="pointer-events-none absolute -left-24 top-10 h-96 w-96 rounded-full opacity-25 blur-3xl"
-        style={{ background: "radial-gradient(closest-side, var(--accent-cyan), transparent 70%)" }}
+        style={{ background: `radial-gradient(closest-side, var(--accent-cyan), transparent 70%)` }}
       />
 
       <div className="relative mx-auto max-w-[1240px] text-center">
@@ -85,7 +81,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          Success Stories
+          {isBrand ? "Results" : "Success Stories"}
         </p>
         <h2
           className={[
@@ -93,7 +89,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse" : "text-ink",
           ].join(" ")}
         >
-          See How {isBrand ? "Brands" : "Creators"} Are Winning
+          {isBrand ? "See What Brands Have Achieved" : "See How Creators Are Winning"}
         </h2>
         <p
           className={[
@@ -101,7 +97,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          Real results from real {isBrand ? "brands" : "creators"} already on the platform.
+          {isBrand ? "Real campaign performance from brands already scaling with us." : "Real results from real creators already on the platform."}
         </p>
       </div>
 
@@ -110,7 +106,7 @@ export function SuccessStories({ role }: { role: Role }) {
         tabIndex={0}
         role="region"
         aria-roledescription="carousel"
-        aria-label="Success stories"
+        aria-label={isBrand ? "Brand results" : "Success stories"}
         onKeyDown={onKeyDown}
         onTouchStart={(e) => (touchStartX.current = e.touches[0].clientX)}
         onTouchEnd={(e) => {
@@ -129,14 +125,54 @@ export function SuccessStories({ role }: { role: Role }) {
           >
             {extended.map((s, i) => {
               const dist = Math.abs(i - trackIndex);
+              const cardStyle = { width: CARD_W, marginRight: GAP, opacity: dist === 0 ? 1 : dist === 1 ? 0.45 : 0.15, transform: `scale(${dist === 0 ? 1 : 0.88})` };
+
+              if (isBrand) {
+                const b = s as BrandStory;
+                return (
+                  <div key={`${b.company}-${i}`} className="shrink-0 transition-all duration-500" style={cardStyle}>
+                    <div className="relative h-[400px] overflow-hidden rounded-[28px] border border-white/10 bg-surface-inverse-raised shadow-[0_30px_60px_-15px_rgba(0,0,0,0.55)]">
+                      <div className="relative h-[170px] w-full overflow-hidden">
+                        <Image src={`https://picsum.photos/seed/${b.campaignSeed}/640/400`} alt="" fill unoptimized className="object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-surface-inverse-raised via-transparent to-black/20" />
+                        <span
+                          className="absolute right-3 top-3 rounded-full px-3 py-1 text-[11px] font-black text-white shadow-sm"
+                          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
+                        >
+                          {b.cpm}
+                        </span>
+                      </div>
+                      <div className="p-5">
+                        <div className="flex items-center gap-2.5">
+                          <span className="flex h-9 w-9 items-center justify-center rounded-xl text-[11px] font-black text-white" style={{ background: b.gradient }}>
+                            {b.code}
+                          </span>
+                          <div>
+                            <p className="text-[14px] font-extrabold text-ink-inverse">{b.company}</p>
+                            <p className="text-[11px] text-ink-inverse-soft">{b.contact}</p>
+                          </div>
+                        </div>
+                        <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-4">
+                          <div>
+                            <p className="text-[10px] text-ink-inverse-soft">Total Views</p>
+                            <p className="font-[var(--font-display)] text-[16px] font-black text-ink-inverse">{b.views}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-ink-inverse-soft">Spent</p>
+                            <p className="font-[var(--font-display)] text-[16px] font-black text-ink-inverse">{b.spent}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              const c = s as CreatorStory;
               return (
-                <div
-                  key={`${s.name}-${i}`}
-                  className="shrink-0 transition-all duration-500"
-                  style={{ width: CARD_W, marginRight: GAP, opacity: dist === 0 ? 1 : dist === 1 ? 0.45 : 0.15, transform: `scale(${dist === 0 ? 1 : 0.88})` }}
-                >
+                <div key={`${c.name}-${i}`} className="shrink-0 transition-all duration-500" style={cardStyle}>
                   <div className="relative h-[400px] overflow-hidden rounded-[28px] shadow-[0_30px_60px_-15px_rgba(20,21,26,0.4)]">
-                    <Image src={`https://i.pravatar.cc/640?img=${s.photo}`} alt={s.name} fill unoptimized className="object-cover" />
+                    <Image src={`https://i.pravatar.cc/640?img=${c.photo}`} alt={c.name} fill unoptimized className="object-cover" />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/0" />
                     <span className="absolute right-4 top-4 flex h-11 w-11 items-center justify-center rounded-full bg-white/20 backdrop-blur-sm">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -148,10 +184,10 @@ export function SuccessStories({ role }: { role: Role }) {
                         className="inline-block rounded-full px-3 py-1 text-[11px] font-black text-white shadow-sm"
                         style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
                       >
-                        {s.result}
+                        {c.result}
                       </span>
-                      <p className="mt-3 text-[15px] font-medium leading-snug text-white">“{s.quote}”</p>
-                      <p className="mt-2 text-[13px] font-bold text-white/80">{s.name}</p>
+                      <p className="mt-3 text-[15px] font-medium leading-snug text-white">“{c.quote}”</p>
+                      <p className="mt-2 text-[13px] font-bold text-white/80">{c.name}</p>
                     </div>
                   </div>
                 </div>
@@ -190,7 +226,7 @@ export function SuccessStories({ role }: { role: Role }) {
         <div className="mt-6 flex items-center justify-center gap-2">
           {stories.map((s, i) => (
             <button
-              key={s.name}
+              key={isBrand ? (s as BrandStory).company : (s as CreatorStory).name}
               type="button"
               aria-label={`Go to story ${i + 1}`}
               onClick={() => goToReal(i)}
