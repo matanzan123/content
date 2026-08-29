@@ -2,17 +2,20 @@
 
 import Image from "next/image";
 import { useRef, useState } from "react";
+import { useT } from "@/i18n/provider";
+import type { Dictionary } from "@/i18n/dictionaries/en";
 import type { Role } from "./RoleToggle";
 
-type CreatorStory = { name: string; quote: string; result: string; photo: number };
+type StoryKey = keyof Dictionary["home"]["stories"]["quotes"];
+type CreatorStory = { name: string; key: StoryKey; photo: number; quote?: string; result?: string };
 type BrandStory = { company: string; code: string; gradient: string; contact: string; views: string; spent: string; cpm: string; campaignSeed: string };
 
 const CREATOR_STORIES: CreatorStory[] = [
-  { name: "Amara Torres", quote: "I posted three clips in my first week and the payout landed exactly on schedule.", result: "$3,240 in 30 days", photo: 21 },
-  { name: "Devon Iwu", quote: "No followers, no portfolio — just picked a campaign and started posting.", result: "$1,180 first month", photo: 52 },
-  { name: "Priya Nair", quote: "The trust score actually unlocked bigger campaigns once I built it up.", result: "$6,900 lifetime", photo: 44 },
-  { name: "Lucas Ferreira", quote: "Payout protection made me comfortable posting for a brand I'd never heard of.", result: "$2,410 in 45 days", photo: 61 },
-  { name: "Sena Okafor", quote: "I clip in my downtime between classes — it adds up faster than I expected.", result: "$890 part-time", photo: 29 },
+  { name: "Amara Torres", key: "amara", photo: 21 },
+  { name: "Devon Iwu", key: "devon", photo: 52 },
+  { name: "Priya Nair", key: "priya", photo: 44 },
+  { name: "Lucas Ferreira", key: "lucas", photo: 61 },
+  { name: "Sena Okafor", key: "sena", photo: 29 },
 ];
 
 const BRAND_STORIES: BrandStory[] = [
@@ -223,18 +226,24 @@ export function SuccessStories({ role }: { role: Role }) {
           </svg>
         </button>
 
-        <div className="mt-6 flex items-center justify-center gap-2">
+        <div className="mt-6 flex items-center justify-center">
           {stories.map((s, i) => (
             <button
               key={isBrand ? (s as BrandStory).company : (s as CreatorStory).name}
               type="button"
               aria-label={`Go to story ${i + 1}`}
+              aria-current={i === activeReal}
               onClick={() => goToReal(i)}
-              className={[
-                "h-2 rounded-full transition-all duration-300",
-                i === activeReal ? "w-6 bg-accent" : isBrand ? "w-2 bg-white/20" : "w-2 bg-line",
-              ].join(" ")}
-            />
+              className="flex h-6 w-6 items-center justify-center rounded-full"
+            >
+              <span
+                aria-hidden="true"
+                className={[
+                  "block h-2 rounded-full transition-all duration-300",
+                  i === activeReal ? "w-6 bg-accent" : isBrand ? "w-2 bg-white/20" : "w-2 bg-line",
+                ].join(" ")}
+              />
+            </button>
           ))}
         </div>
       </div>

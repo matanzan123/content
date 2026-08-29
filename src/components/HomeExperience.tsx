@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { ActiveCreatorsStrip } from "./ActiveCreatorsStrip";
 import { BrandCredibility } from "./BrandCredibility";
+import { BrandFAQ } from "./BrandFAQ";
+import { BrandFooter } from "./BrandFooter";
 import { BrandProtection } from "./BrandProtection";
 import { BrandResults } from "./BrandResults";
 import { CTASocialProof } from "./CTASocialProof";
@@ -18,16 +20,15 @@ import { WhyVerificationMatters } from "./WhyVerificationMatters";
 import type { Role } from "./RoleToggle";
 
 /**
- * Brand realm — review build, assembled section by section.
+ * Brand realm — the full page, assembled section by section and approved in
+ * that order: Hero -> Join 200+ Brands -> Why Verification -> Results ->
+ * Protection -> FAQ -> Footer. The footer is the end of the page; nothing
+ * renders after it.
  *
- * Approved so far: Hero -> Join 200+ Brands -> Why Verification -> Results. Why Verification
- * Matters. `HowItWorks` ("Three Steps To Launch") is deliberately NOT rendered
- * here; its component is untouched and still used by the creator realm, so
- * restoring it is a one-line change once its final position is decided. The
- * sections below are parked the same way.
+ * `HowItWorks` ("Three Steps To Launch") is deliberately NOT rendered here; its
+ * component is untouched and still used by the creator realm, so restoring it
+ * is a one-line change if a position for it is ever decided.
  */
-const PARKED_BRAND_SECTIONS = [BrandProtection] as const;
-void PARKED_BRAND_SECTIONS;
 
 export function HomeExperience({ initialRole = "creator" }: { initialRole?: Role } = {}) {
   const [role, setRole] = useState<Role>(initialRole);
@@ -35,29 +36,36 @@ export function HomeExperience({ initialRole = "creator" }: { initialRole?: Role
 
   if (isBrand) {
     return (
-      <div className="realm-brand">
+      <div className="realm-brand flex flex-1 flex-col">
         <Header role={role} />
-        <Hero role={role} onRoleChange={setRole} />
-        <BrandCredibility />
-        <WhyVerificationMatters />
-        <BrandResults />
+        <main id="main-content" className="flex-1">
+          <Hero role={role} onRoleChange={setRole} />
+          <BrandCredibility />
+          <WhyVerificationMatters />
+          <BrandResults />
+          <BrandProtection />
+          <BrandFAQ />
+        </main>
+        <BrandFooter />
       </div>
     );
   }
 
   // Creator realm — approved light flow, unchanged.
   return (
-    <div>
+    <div className="flex flex-1 flex-col">
       <Header role={role} />
-      <Hero role={role} onRoleChange={setRole} />
-      <HowItWorks role={role} />
-      <TrustSection role={role} />
-      <ActiveCreatorsStrip role={role} />
-      <CTASocialProof role={role} variant="first" />
-      <PopularCampaigns role={role} />
-      <SuccessStories role={role} />
-      <CTASocialProof role={role} variant="second" />
-      <FAQSection role={role} />
+      <main id="main-content" className="flex-1">
+        <Hero role={role} onRoleChange={setRole} />
+        <HowItWorks role={role} />
+        <TrustSection role={role} />
+        <ActiveCreatorsStrip role={role} />
+        <CTASocialProof role={role} variant="first" />
+        <PopularCampaigns role={role} />
+        <SuccessStories role={role} />
+        <CTASocialProof role={role} variant="second" />
+        <FAQSection role={role} />
+      </main>
       <Footer role={role} />
     </div>
   );

@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import type { Role } from "./RoleToggle";
 
 const NAV = [
@@ -9,8 +9,9 @@ const NAV = [
 ];
 
 const PAGES = [
-  { label: "Privacy Policy", href: "/privacy" },
-  { label: "Terms of Service", href: "/terms" },
+  { label: "Privacy Policy", href: "/privacy-policy" },
+  { label: "Terms of Service", href: "/terms-of-service" },
+  { label: "Accessibility", href: "/accessibility" },
   { label: "Brand Kit", href: "/brand-kit" },
   { label: "Careers", href: "/careers" },
 ];
@@ -44,7 +45,9 @@ function SocialIcon({ label }: { label: string }) {
 
 export function Footer({ role }: { role: Role }) {
   const isBrand = role === "brand";
-  const cta = isBrand ? { label: "Launch a Campaign", href: "/onboarding?type=brand" } : { label: "Become a Creator", href: "/onboarding?type=creator" };
+  const cta = isBrand
+    ? { label: "Launch a Campaign", href: "/contact" }
+    : { label: "Become a Creator", href: "/onboarding?type=creator" };
   const description = isBrand
     ? "Launch campaigns, discover creators, and pay only for verified results — trusted by 200+ growing brands scaling organic reach."
     : "Create, post, and get paid for content that performs — trusted by tens of thousands of creators and hundreds of growing brands.";

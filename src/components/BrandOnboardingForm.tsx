@@ -42,7 +42,7 @@ function validate(values: Fields) {
 }
 
 const FIELD_BASE =
-  "w-full rounded-[var(--radius-token-md)] border border-line bg-surface-sunken px-4 py-3 text-[14px] text-ink outline-none transition-colors placeholder:text-ink-soft/70 focus:border-accent focus:bg-surface focus:ring-4 focus:ring-accent-soft";
+  "w-full rounded-[var(--radius-token-md)] border border-line bg-surface-sunken px-4 py-3 text-[14px] text-ink outline-none transition-colors placeholder:text-ink-soft focus:border-accent focus:bg-surface focus:ring-4 focus:ring-accent-soft aria-[invalid=true]:border-red-600";
 
 const CHEVRON_BG =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b5d68' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\")";
@@ -50,7 +50,11 @@ const CHEVRON_BG =
 function Label({ htmlFor, children }: { htmlFor: string; children: React.ReactNode }) {
   return (
     <label htmlFor={htmlFor} className="block text-[13px] font-semibold text-ink">
-      {children} <span className="text-accent">*</span>
+      {children}{" "}
+      <span className="text-accent" aria-hidden="true">
+        *
+      </span>
+      <span className="sr-only">(required)</span>
     </label>
   );
 }
@@ -58,7 +62,12 @@ function Label({ htmlFor, children }: { htmlFor: string; children: React.ReactNo
 function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
-    <p id={id} className="mt-1.5 text-[12.5px] font-medium text-red-600">
+    <p id={id} role="alert" className="mt-1.5 flex items-start gap-1.5 text-[12.5px] font-medium text-red-700">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="mt-px shrink-0">
+        <circle cx="12" cy="12" r="9.2" stroke="currentColor" strokeWidth="1.9" />
+        <path d="M12 7.4v5.4" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
+        <circle cx="12" cy="16.4" r="1.15" fill="currentColor" />
+      </svg>
       {message}
     </p>
   );
@@ -81,7 +90,11 @@ export function BrandOnboardingForm() {
     e.preventDefault();
     const nextErrors = validate(values);
     setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
+    const firstBad = (Object.keys(nextErrors) as (keyof Fields)[])[0];
+    if (firstBad) {
+      document.getElementById(firstBad)?.focus();
+      return;
+    }
     // Placeholder build — no backend yet. Swap for a route handler when one exists.
     setSubmitted(true);
   }
@@ -144,6 +157,7 @@ export function BrandOnboardingForm() {
               placeholder="Jordan Reyes"
               value={values.name}
               onChange={update("name")}
+              required
               aria-invalid={!!errors.name}
               aria-describedby={errors.name ? "name-error" : undefined}
               className={`mt-2 ${FIELD_BASE}`}
@@ -161,6 +175,7 @@ export function BrandOnboardingForm() {
               placeholder="you@company.com"
               value={values.email}
               onChange={update("email")}
+              required
               aria-invalid={!!errors.email}
               aria-describedby={errors.email ? "email-error" : undefined}
               className={`mt-2 ${FIELD_BASE}`}
@@ -178,6 +193,7 @@ export function BrandOnboardingForm() {
               placeholder="https://company.com"
               value={values.website}
               onChange={update("website")}
+              required
               aria-invalid={!!errors.website}
               aria-describedby={errors.website ? "website-error" : undefined}
               className={`mt-2 ${FIELD_BASE}`}
@@ -192,6 +208,7 @@ export function BrandOnboardingForm() {
               name="goal"
               value={values.goal}
               onChange={update("goal")}
+              required
               aria-invalid={!!errors.goal}
               aria-describedby={errors.goal ? "goal-error" : undefined}
               className={`mt-2 appearance-none bg-[length:16px] bg-[right_1rem_center] bg-no-repeat pr-11 ${FIELD_BASE}`}
@@ -214,6 +231,7 @@ export function BrandOnboardingForm() {
               name="budget"
               value={values.budget}
               onChange={update("budget")}
+              required
               aria-invalid={!!errors.budget}
               aria-describedby={errors.budget ? "budget-error" : undefined}
               className={`mt-2 appearance-none bg-[length:16px] bg-[right_1rem_center] bg-no-repeat pr-11 ${FIELD_BASE}`}

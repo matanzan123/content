@@ -1,5 +1,7 @@
 "use client";
 
+import { useT } from "@/i18n/provider";
+
 type Role = "creator" | "brand";
 
 export function RoleToggle({
@@ -12,18 +14,25 @@ export function RoleToggle({
   theme: "light" | "dark";
 }) {
   const isBrand = role === "brand";
+  const t = useT();
 
   return (
     <button
       type="button"
       role="switch"
       aria-checked={isBrand}
-      aria-label={`Switch to ${isBrand ? "creator" : "brand"} view`}
+      aria-label={isBrand ? t.roleToggle.toCreator : t.roleToggle.toBrand}
       onClick={() => onChange(isBrand ? "creator" : "brand")}
       className={[
-        "inline-flex h-[38px] items-center gap-2 rounded-[var(--radius-token-pill)] bg-accent pl-[3px] pr-3.5",
+        "inline-flex h-[38px] items-center gap-2 rounded-[var(--radius-token-pill)] pl-[3px] pr-3.5",
         theme === "dark" ? "shadow-[0_0_0_1px_rgba(255,255,255,0.15)]" : "",
       ].join(" ")}
+      style={{
+        // The copper accent is too light for white 15px bold text, so the dark
+        // realm deepens it just enough to clear 4.5:1. Creator stays as approved.
+        background:
+          theme === "dark" ? "color-mix(in srgb, var(--accent) 78%, #170b02)" : "var(--accent)",
+      }}
     >
       <span className="relative h-[32px] w-[54px] shrink-0 rounded-full bg-white/25">
         <span
@@ -38,7 +47,7 @@ export function RoleToggle({
         </span>
       </span>
       <span className="whitespace-nowrap text-[15px] font-bold uppercase tracking-wide text-white">
-        Tap
+        {t.roleToggle.tap}
       </span>
     </button>
   );

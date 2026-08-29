@@ -1,4 +1,7 @@
-import Link from "next/link";
+"use client";
+
+import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import type { Role } from "./RoleToggle";
 import { TrustAvatars } from "./TrustAvatars";
 
@@ -113,7 +116,7 @@ function DashboardArt() {
           {[6, 10, 7, 13, 9, 15].map((h, i) => (
             <span key={i} className="w-1.5 rounded-sm bg-accent-cyan" style={{ height: h }} />
           ))}
-          <span className="ml-1 text-[10px] font-bold text-emerald-500">+18%</span>
+          <span className="ml-1 text-[10px] font-bold text-emerald-700">+18%</span>
         </div>
       </div>
     </div>
@@ -155,7 +158,34 @@ const ART: Record<string, () => React.JSX.Element> = {
 };
 
 export function HowItWorks({ role }: { role: Role }) {
-  const copy = COPY[role];
+  const t = useT();
+  const localized =
+    role === "creator"
+      ? {
+          eyebrow: t.home.howItWorks.eyebrow,
+          heading: t.home.howItWorks.heading,
+          subtitle: t.home.howItWorks.subtitle,
+          ctaLabel: t.home.howItWorks.cta,
+          trustLabel: t.home.howItWorks.trust,
+          steps: [
+            { title: t.home.howItWorks.steps.twoTitle, description: t.home.howItWorks.steps.twoBody },
+            { title: t.home.howItWorks.steps.oneTitle, description: t.home.howItWorks.steps.oneBody },
+            { title: t.home.howItWorks.steps.threeTitle, description: t.home.howItWorks.steps.threeBody },
+          ],
+        }
+      : null;
+  const base = COPY[role];
+  const copy = localized
+    ? {
+        ...base,
+        eyebrow: localized.eyebrow,
+        heading: localized.heading,
+        subtitle: localized.subtitle,
+        cta: { ...base.cta, label: localized.ctaLabel },
+        trustLabel: localized.trustLabel,
+        steps: base.steps.map((step, i) => ({ ...step, ...localized.steps[i] })),
+      }
+    : base;
   const isBrand = role === "brand";
 
   return (

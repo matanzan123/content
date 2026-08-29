@@ -2,7 +2,7 @@
 
 import { useCallback, useId, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
 
 /* ==========================================================================
@@ -335,7 +335,7 @@ function Carousel() {
           </svg>
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center">
           {CASES.map((c, i) => (
             <button
               key={c.seeds[0]}
@@ -343,13 +343,18 @@ function Carousel() {
               aria-label={`Go to case study ${i + 1}`}
               aria-current={i === active}
               onClick={() => setActive(i)}
-              className="rounded-full transition-all duration-300"
-              style={{
-                width: i === active ? 26 : 8,
-                height: 8,
-                background: i === active ? "#ffffff" : "rgba(255,255,255,0.24)",
-              }}
-            />
+              className="flex h-6 w-6 items-center justify-center rounded-full"
+            >
+              <span
+                aria-hidden="true"
+                className="block rounded-full transition-all duration-300"
+                style={{
+                  width: i === active ? 26 : 8,
+                  height: 8,
+                  background: i === active ? "#ffffff" : "rgba(255,255,255,0.24)",
+                }}
+              />
+            </button>
           ))}
         </div>
 
@@ -388,7 +393,7 @@ function CtaBlock() {
   return (
     <div className="mt-12 flex flex-col items-center gap-5">
       <Link
-        href="/onboarding?type=brand"
+        href="/contact"
         className="group inline-flex items-center gap-2.5 rounded-[var(--radius-token-pill)] px-10 py-[19px] text-[17px] font-bold tracking-[-0.005em] text-white transition-all duration-200 hover:-translate-y-1"
         style={{
           background: "linear-gradient(135deg, var(--accent), var(--accent-violet))",

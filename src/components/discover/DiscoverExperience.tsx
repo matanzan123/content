@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import {
   CATEGORIES,
   CONTENT_TYPES,
@@ -32,6 +32,7 @@ function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -45,9 +46,16 @@ function Dropdown({
   return (
     <div ref={ref} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape" || !open) return;
+          setOpen(false);
+          triggerRef.current?.focus();
+        }}
         aria-expanded={open}
+        aria-haspopup="listbox"
         className={[
           "inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] border px-4 py-2 text-[13.5px] font-medium transition-colors",
           value
@@ -65,6 +73,11 @@ function Dropdown({
 
       {open && (
         <div
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            setOpen(false);
+            triggerRef.current?.focus();
+          }}
           className={[
             "absolute right-0 z-30 mt-2 min-w-[180px] overflow-hidden rounded-[var(--radius-token-md)] border py-1 shadow-[var(--shadow-float)]",
             isBrand ? "border-white/10 bg-surface-inverse-raised" : "border-line bg-surface",
@@ -167,18 +180,24 @@ function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean 
 
       {items.length > 1 && (
         <>
-          <div className="absolute bottom-7 left-1/2 flex -translate-x-1/2 gap-1.5">
+          <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2">
             {items.map((item, i) => (
               <button
                 key={item.id}
                 type="button"
                 aria-label={`Go to slide ${i + 1}`}
+                aria-current={i === index}
                 onClick={() => setIndex(i)}
-                className={[
-                  "h-1.5 rounded-full transition-all",
-                  i === index ? "w-6 bg-white" : "w-1.5 bg-white/40 hover:bg-white/70",
-                ].join(" ")}
-              />
+                className="flex h-6 w-6 items-center justify-center rounded-full"
+              >
+                <span
+                  aria-hidden="true"
+                  className={[
+                    "block h-1.5 rounded-full transition-all",
+                    i === index ? "w-6 bg-white" : "w-1.5 bg-white/40 hover:bg-white/70",
+                  ].join(" ")}
+                />
+              </button>
             ))}
           </div>
 
@@ -265,7 +284,7 @@ export function DiscoverExperience() {
     <div className={isBrand ? "realm-brand" : undefined}>
       <Header role={role} />
 
-      <main className={["flex-1", isBrand ? "bg-surface-inverse" : "bg-surface"].join(" ")}>
+      <main id="main-content" className={["flex-1", isBrand ? "bg-surface-inverse" : "bg-surface"].join(" ")}>
         {hasCampaigns ? (
           <HeroCarousel items={heroItems} isBrand={isBrand} />
         ) : (
@@ -308,7 +327,7 @@ export function DiscoverExperience() {
               </p>
               <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
                 <Link
-                  href="/onboarding?type=brand"
+                  href="/contact"
                   className={[
                     "inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] px-6 py-3 text-[14px] font-bold transition-colors",
                     isBrand ? "bg-white text-ink hover:bg-white/90" : "bg-ink text-white hover:bg-ink/90",

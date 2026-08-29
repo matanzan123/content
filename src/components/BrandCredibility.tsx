@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import { BRAND_MARKS, BrandLogo, VerifiedTick, type BrandMark } from "./brand-kit";
 import { FOUNDERS } from "../data/brands";
+import { VERIFIED_BRANDS_ID } from "./section-anchors";
 
 /* ==========================================================================
    TILE PRIMITIVES
@@ -315,11 +316,8 @@ function LiveCounter() {
   const digits = String(count).padStart(3, "0").split("").map(Number);
 
   return (
-    <p
-      className="font-[var(--font-display)] text-[58px] font-black leading-[1] tracking-[-0.04em] text-white tabular-nums sm:text-[68px]"
-      aria-live="polite"
-      aria-label={`${count} brands`}
-    >
+    <p className="font-[var(--font-display)] text-[58px] font-black leading-[1] tracking-[-0.04em] text-white tabular-nums sm:text-[68px]">
+      <span className="sr-only">{count} brands</span>
       <span aria-hidden="true" className="inline-flex">
         {digits.map((d, i) => (
           <Digit key={i} value={d} reduced={reduced} />
@@ -629,8 +627,12 @@ const EDGE_MASK =
  */
 function Mosaic() {
   return (
+    // The columns drift on a loop, so "pausable" stops them under a pointer or
+    // keyboard focus and the whole wall is hidden from assistive tech — it is
+    // decoration, and the brands it shows are named in the copy around it.
     <div
-      className="relative mx-auto h-[560px] w-full max-w-[1160px] sm:h-[640px]"
+      aria-hidden="true"
+      className="pausable relative mx-auto h-[560px] w-full max-w-[1160px] sm:h-[640px]"
       style={{ maskImage: EDGE_MASK, WebkitMaskImage: EDGE_MASK }}
     >
       <div className="flex h-full justify-center gap-2.5 sm:gap-3">
@@ -767,7 +769,8 @@ function BrandAvatarRow() {
 export function BrandCredibility() {
   return (
     <section
-      className="relative z-10 -mt-10 overflow-hidden rounded-t-[44px] px-6 pb-20 pt-16 sm:rounded-t-[56px] sm:pt-20"
+      id={VERIFIED_BRANDS_ID}
+      className="scroll-anchor-offset relative z-10 -mt-10 overflow-hidden rounded-t-[44px] px-6 pb-20 pt-16 sm:rounded-t-[56px] sm:pt-20"
       style={{
         background:
           "linear-gradient(180deg, #1d140c 0%, color-mix(in srgb, var(--surface-inverse) 90%, #2a1d12) 32%, var(--surface-inverse) 70%)",
@@ -859,7 +862,7 @@ export function BrandCredibility() {
 
         <div className="mt-1 flex flex-col items-center gap-4">
           <Link
-            href="/onboarding?type=brand"
+            href="/contact"
             className="group inline-flex items-center gap-2.5 rounded-[var(--radius-token-pill)] px-9 py-[18px] text-[16.5px] font-bold tracking-[-0.005em] text-white transition-all duration-200 hover:-translate-y-1"
             style={{
               background: "linear-gradient(135deg, var(--accent), var(--accent-violet))",

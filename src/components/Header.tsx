@@ -1,36 +1,64 @@
 "use client";
 
-import { useState } from "react";
-import Link from "next/link";
+import { useEffect, useId, useRef, useState } from "react";
+import { Link } from "@/i18n/Link";
+import { LanguageSelector } from "./LanguageSelector";
+import { useT } from "@/i18n/provider";
+import type { Dictionary } from "@/i18n/dictionaries/en";
 import type { Role } from "./RoleToggle";
 
-const NAV_BY_ROLE: Record<Role, { label: string; href: string }[]> = {
+type NavKey = keyof Dictionary["header"]["nav"];
+
+/** Destinations are fixed; the labels come from the active dictionary. */
+const NAV_HREFS: Record<Role, { key: NavKey; href: string }[]> = {
   creator: [
-    { label: "For Brands", href: "/brand" },
-    { label: "Discover", href: "/discover" },
-    { label: "FAQs", href: "/faqs" },
-    { label: "Agencies", href: "/agencies" },
-    { label: "Contact", href: "/contact" },
+    { key: "forBrands", href: "/brand" },
+    { key: "discover", href: "/discover" },
+    { key: "faqs", href: "/faqs" },
+    { key: "agencies", href: "/agencies" },
+    { key: "contact", href: "/contact" },
   ],
   brand: [
-    { label: "For Creators", href: "/" },
-    { label: "Discover", href: "/discover" },
-    { label: "FAQs", href: "/faqs" },
-    { label: "Agencies", href: "/agencies" },
-    { label: "Contact", href: "/contact" },
+    { key: "forCreators", href: "/" },
+    { key: "discover", href: "/discover" },
+    { key: "faqs", href: "/faqs" },
+    { key: "agencies", href: "/agencies" },
+    { key: "contact", href: "/contact" },
   ],
 };
 
-const CTA_BY_ROLE: Record<Role, { label: string; href: string }> = {
-  creator: { label: "Become a Creator", href: "/onboarding?type=creator" },
-  brand: { label: "Launch Campaign", href: "/onboarding?type=brand" },
+const CTA_HREF: Record<Role, string> = {
+  creator: "/onboarding?type=creator",
+  brand: "/contact",
 };
+
+/** The logo returns you to the home of the realm you are currently in. */
+const HOME_BY_ROLE: Record<Role, string> = { creator: "/", brand: "/brand" };
 
 export function Header({ role }: { role: Role }) {
   const [mobileOpen, setMobileOpen] = useState(false);
-  const nav = NAV_BY_ROLE[role];
-  const cta = CTA_BY_ROLE[role];
+  const t = useT();
+  const nav = NAV_HREFS[role].map((item) => ({ href: item.href, label: t.header.nav[item.key] }));
+  const cta = {
+    href: CTA_HREF[role],
+    label: role === "brand" ? t.header.launchCampaign : t.header.becomeCreator,
+  };
   const isBrand = role === "brand";
+  const menuId = useId();
+  const toggleRef = useRef<HTMLButtonElement>(null);
+
+  // Escape closes the mobile menu and hands focus back to the button that
+  // opened it, so a keyboard user is never left adrift after dismissing it.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      setMobileOpen(false);
+      toggleRef.current?.focus();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileOpen]);
 
   return (
     <header className="sticky top-4 z-40 mx-4 sm:mx-5">
@@ -50,7 +78,12 @@ export function Header({ role }: { role: Role }) {
           />
         )}
         <div className="flex items-center justify-between gap-4 px-5 py-[11px]">
-          <Link href="/" className="flex shrink-0 items-center gap-2.5" onClick={() => setMobileOpen(false)}>
+          <Link
+            href={HOME_BY_ROLE[role]}
+            aria-label={t.header.logoAlt}
+            className="flex shrink-0 items-center gap-2.5"
+            onClick={() => setMobileOpen(false)}
+          >
             <span
               className="relative flex h-[38px] w-[38px] items-center justify-center overflow-hidden rounded-[11px] text-white"
               style={{
@@ -87,7 +120,7 @@ export function Header({ role }: { role: Role }) {
             </span>
           </Link>
 
-          <nav className="hidden items-center gap-0.5 md:flex">
+          <nav aria-label={t.header.primaryNav} className="hidden items-center gap-0.5 md:flex">
             {nav.map((item) => (
               <Link
                 key={item.label}
@@ -105,6 +138,7 @@ export function Header({ role }: { role: Role }) {
           </nav>
 
           <div className="flex items-center gap-2">
+            <LanguageSelector isBrand={isBrand} className="hidden sm:inline-flex" />
             <Link
               href="/login"
               className={[
@@ -114,7 +148,7 @@ export function Header({ role }: { role: Role }) {
                   : "text-ink-soft hover:bg-surface-sunken hover:text-ink",
               ].join(" ")}
             >
-              Sign in
+              {t.header.signIn}
             </Link>
             <Link
               href={cta.href}
@@ -126,7 +160,7 @@ export function Header({ role }: { role: Role }) {
               ].join(" ")}
             >
               {cta.label}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="dir-flip">
                 <path
                   d="M5 12H19M19 12L13 6M19 12L13 18"
                   stroke="currentColor"
@@ -138,9 +172,11 @@ export function Header({ role }: { role: Role }) {
             </Link>
 
             <button
+              ref={toggleRef}
               type="button"
-              aria-label={mobileOpen ? "Close menu" : "Open menu"}
+              aria-label={mobileOpen ? t.common.closeMenu : t.common.openMenu}
               aria-expanded={mobileOpen}
+              aria-controls={menuId}
               onClick={() => setMobileOpen((v) => !v)}
               className={[
                 "flex h-10 w-10 items-center justify-center rounded-[var(--radius-token-sm)] transition-colors md:hidden",
@@ -161,7 +197,9 @@ export function Header({ role }: { role: Role }) {
         </div>
 
         {mobileOpen && (
-          <div
+          <nav
+            id={menuId}
+            aria-label={t.header.mobileNav}
             className={[
               "flex flex-col gap-1 border-t px-4 py-3 md:hidden",
               isBrand ? "border-white/10" : "border-line",
@@ -192,7 +230,20 @@ export function Header({ role }: { role: Role }) {
             >
               {cta.label}
             </Link>
-          </div>
+            <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3 sm:hidden"
+              style={{ borderColor: isBrand ? "rgba(255,255,255,0.1)" : "var(--line)" }}
+            >
+              <span
+                className={[
+                  "text-[12.5px] font-semibold",
+                  isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
+                ].join(" ")}
+              >
+                {t.common.language}
+              </span>
+              <LanguageSelector isBrand={isBrand} />
+            </div>
+          </nav>
         )}
       </div>
     </header>

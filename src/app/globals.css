@@ -24,7 +24,7 @@
   --surface-inverse: #0b0b0d;
   --surface-inverse-raised: #17181c;
   --ink-inverse: #f5f5f3;
-  --ink-inverse-soft: #a3a4ac;
+  --ink-inverse-soft: #b2b3ba;
   --line-inverse: #2a2b31;
 
   --radius-sm: 0.5rem;
@@ -95,7 +95,7 @@ body {
   --surface-inverse: #140f0c;
   --surface-inverse-raised: #201811;
   --ink-inverse: #f7f0e8;
-  --ink-inverse-soft: #b8a696;
+  --ink-inverse-soft: #cabcae;
   --line-inverse: #362920;
 }
 
@@ -180,4 +180,202 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .animate-cpm-shimmer { animation: none; }
+}
+
+/* Protection section — the satin flag breathes on its mast. Rotation only, and
+   it lives on a <g> whose transform-origin is the mast, so the flag pivots
+   from the pole rather than sliding. */
+@keyframes flag-sway {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-1.4deg); }
+}
+.animate-sway { animation: flag-sway 7.5s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-sway { animation: none; }
+}
+
+/* Same-page section jumps (e.g. the brand hero's "See Verified Brands").
+   The header is a sticky pill at top:1rem, ~64px tall, so a target needs about
+   6rem of clearance or its heading lands underneath it. */
+html {
+  scroll-behavior: smooth;
+}
+.scroll-anchor-offset {
+  scroll-margin-top: 6.25rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* ==========================================================================
+   ACCESSIBILITY
+   ========================================================================== */
+
+/*
+  One focus treatment for the whole product. `:focus-visible` keeps it off for
+  mouse users, so hover design is untouched, and the offset means the ring is
+  drawn on the surface *around* a control rather than on top of it — which is
+  what keeps it visible on accent-coloured buttons in both realms.
+*/
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The white-on-dark controls in the brand header need a light ring instead. */
+.realm-brand .focus-ring-light:focus-visible,
+.focus-ring-light:focus-visible {
+  outline-color: #ffffff;
+}
+
+/* Skip link: off-screen until focused, then a real control at the top left. */
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  transform: translateY(-160%);
+  transition: transform 150ms ease-out;
+}
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skip-link { transition: none; }
+}
+
+/* --------------------------- user preferences ---------------------------- */
+
+/*
+  Text size. The product sizes type in px, so a root font-size change would do
+  nothing; `zoom` scales the rendered page and still reflows, which keeps every
+  layout intact and avoids the horizontal overflow a transform would cause.
+*/
+:root.a11y-text-large { zoom: 1.12; }
+:root.a11y-text-xlarge { zoom: 1.25; }
+
+/* Enhanced contrast: retire the muted text tiers and firm up the hairlines. */
+:root.a11y-contrast {
+  --ink-soft: #33353f;
+  --ink-inverse-soft: #e4e2de;
+  --line: #b9b9b2;
+  --line-inverse: #6d6357;
+}
+:root.a11y-contrast .realm-brand {
+  --ink-inverse-soft: #f0e6db;
+  --line-inverse: #7a6c5c;
+}
+:root.a11y-contrast :focus-visible {
+  outline-width: 4px;
+}
+
+/* Highlight links: underline every link inside the page content. */
+:root.a11y-highlight-links a:not([role="tab"]) {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 2px;
+}
+
+/*
+  Manual motion reduction — the same rules as the prefers-reduced-motion block,
+  for people whose OS setting is off but who still want the motion stopped.
+*/
+:root.a11y-reduce-motion .animate-float,
+:root.a11y-reduce-motion .animate-float-slow,
+:root.a11y-reduce-motion .animate-pulse-soft,
+:root.a11y-reduce-motion .animate-dash,
+:root.a11y-reduce-motion .animate-drift,
+:root.a11y-reduce-motion .animate-drift-slow,
+:root.a11y-reduce-motion .animate-drift-slower,
+:root.a11y-reduce-motion .animate-glow,
+:root.a11y-reduce-motion .animate-sway,
+:root.a11y-reduce-motion .animate-cpm-shimmer,
+:root.a11y-reduce-motion .marquee-track,
+:root.a11y-reduce-motion .mosaic-col-up,
+:root.a11y-reduce-motion .mosaic-col-down {
+  animation: none !important;
+}
+:root.a11y-reduce-motion {
+  scroll-behavior: auto;
+}
+:root.a11y-reduce-motion *,
+:root.a11y-reduce-motion *::before,
+:root.a11y-reduce-motion *::after {
+  transition-duration: 0.01ms !important;
+}
+
+/* Auto-scrolling decoration stops while a pointer or keyboard focus is on it. */
+.pausable:hover .mosaic-col-up,
+.pausable:hover .mosaic-col-down,
+.pausable:focus-within .mosaic-col-up,
+.pausable:focus-within .mosaic-col-down {
+  animation-play-state: paused;
+}
+.marquee-wrap:focus-within .marquee-track {
+  animation-play-state: paused;
+}
+
+/* ==========================================================================
+   BIDIRECTIONAL SUPPORT
+   ========================================================================== */
+
+/*
+  Hebrew swaps the type stack to Heebo, which covers Hebrew and Latin across the
+  same weights. Without this the Hebrew would drop to a system face while the
+  English kept its premium typography.
+*/
+:root:lang(he) {
+  --font-display: var(--font-heebo);
+  --font-body: var(--font-heebo);
+}
+
+/*
+  RTL is structural — the document carries dir="rtl" and the browser mirrors the
+  flow. These rules only handle the cases the flow cannot: physical values that
+  had to stay physical, and glyphs whose meaning is directional.
+*/
+
+/* The skip link is pinned with physical `left`; anchor it to the start edge. */
+[dir="rtl"] .skip-link {
+  left: auto;
+  right: 0.75rem;
+}
+
+/*
+  Arrows that mean "forward" and "back" point the other way in Hebrew. Anything
+  marked `dir-flip` is mirrored; play triangles, checkmarks, logos, the
+  accessibility glyph and social marks are deliberately never marked.
+*/
+[dir="rtl"] .dir-flip {
+  transform: scaleX(-1);
+}
+/* A flipped icon inside a control that also nudges on hover keeps both. */
+[dir="rtl"] .group:hover .dir-flip-nudge,
+[dir="rtl"] .group\/cta:hover .dir-flip-nudge {
+  transform: scaleX(-1) translateX(0.25rem);
+}
+
+/*
+  Latin-script tokens inside Hebrew sentences — prices, percentages, CPM, URLs,
+  handles, platform names. `unicode-bidi: isolate` keeps each one as its own
+  bidi run so "$1,250" never renders as "1,250$".
+*/
+.ltr-token {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+/* Numeric runs inside otherwise-Hebrew text. */
+:lang(he) bdi,
+:lang(he) .tabular-nums {
+  unicode-bidi: isolate;
+}
+
+/*
+  The floating accessibility button is pinned to the inline-start corner so it
+  follows the reading direction instead of landing under the scrollbar side.
+*/
+[dir="rtl"] .a11y-launcher {
+  left: auto;
+  right: 1rem;
 }

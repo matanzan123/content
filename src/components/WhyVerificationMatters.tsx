@@ -1,5 +1,5 @@
 import Image from "next/image";
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import { BRAND_MARKS, BrandLogo } from "./brand-kit";
 
 /* ==========================================================================
@@ -521,7 +521,7 @@ function CtaBlock() {
   return (
     <div className="mt-16 flex flex-col items-center gap-5">
       <Link
-        href="/onboarding?type=brand"
+        href="/contact"
         className="group inline-flex items-center gap-2.5 rounded-[var(--radius-token-pill)] px-10 py-[19px] text-[17px] font-bold tracking-[-0.005em] text-white transition-all duration-200 hover:-translate-y-1"
         style={{
           background: "linear-gradient(135deg, var(--accent), var(--accent-violet))",

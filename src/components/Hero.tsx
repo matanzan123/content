@@ -2,9 +2,10 @@
 
 import { useId } from "react";
 import Image from "next/image";
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
 import { RoleToggle, type Role } from "./RoleToggle";
+import { VERIFIED_BRANDS_ID } from "./section-anchors";
 
 const COPY: Record<
   Role,
@@ -29,8 +30,10 @@ const COPY: Record<
     trailingWord: "Brand",
     subtitle:
       "Launch a campaign and let independent creators turn it into organic short-form reach.",
-    primaryCta: { label: "Launch a Campaign", href: "/onboarding?type=brand" },
-    secondaryCta: { label: "See Verified Brands", href: "/brand" },
+    primaryCta: { label: "Launch a Campaign", href: "/contact" },
+    // Same-page jump to the "Join 200+ Profitable Brands" section. The id and
+    // its scroll offset live on that section in BrandCredibility.
+    secondaryCta: { label: "See Verified Brands", href: `#${VERIFIED_BRANDS_ID}` },
   },
 };
 

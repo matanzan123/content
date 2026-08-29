@@ -178,7 +178,7 @@ function VerifiedCard({ isBrand }: { isBrand: boolean }) {
         </div>
         <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Stand Out As Reliable</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
-          Earn a badge that shows brands you're reliable and ready to work.
+          Earn a badge that shows brands you&apos;re reliable and ready to work.
         </p>
       </div>
     </Card>
@@ -212,7 +212,7 @@ function ProtectionCard({ isBrand }: { isBrand: boolean }) {
             <path d="M3 11H21" stroke="currentColor" strokeWidth="2" />
           </svg>
           Bank •••• 4821
-          <span className="font-black text-emerald-500">$1,240.00</span>
+          <span className="font-black text-emerald-700">$1,240.00</span>
         </div>
         <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Payout Protection</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
@@ -267,7 +267,7 @@ function SubmissionCard({ isBrand }: { isBrand: boolean }) {
           </div>
           <div className="flex items-baseline justify-between">
             <span className={["text-[11px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>Earned</span>
-            <span className="font-[var(--font-display)] text-[15px] font-extrabold text-emerald-500">$212.40</span>
+            <span className="font-[var(--font-display)] text-[15px] font-extrabold text-emerald-700">$212.40</span>
           </div>
           <div className={["h-1.5 rounded-full", isBrand ? "bg-white/10" : "bg-surface-sunken"].join(" ")}>
             <div className="h-full w-4/5 rounded-full" style={{ background: "linear-gradient(90deg, var(--accent), var(--accent-violet))" }} />

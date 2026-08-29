@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import Link from "next/link";
+import { useId, useMemo, useState } from "react";
+import { Link } from "@/i18n/Link";
 import { FAQ_CATEGORIES } from "@/data/faqs";
 import { Footer } from "./Footer";
 import { Header } from "./Header";
@@ -39,6 +39,7 @@ function FAQItem({
   open: boolean;
   onToggle: () => void;
 }) {
+  const panelId = useId();
   return (
     <div
       className={[
@@ -51,9 +52,11 @@ function FAQItem({
       ].join(" ")}
     >
       <button
+        id={`${panelId}-trigger`}
         type="button"
         onClick={onToggle}
         aria-expanded={open}
+        aria-controls={panelId}
         className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
       >
         <span className={["text-[14.5px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
@@ -62,6 +65,9 @@ function FAQItem({
         <Chevron open={open} isBrand={isBrand} />
       </button>
       <div
+        id={panelId}
+        role="region"
+        aria-labelledby={`${panelId}-trigger`}
         className="grid transition-[grid-template-rows] duration-300 ease-out"
         style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
       >
@@ -109,11 +115,30 @@ export function FAQsExperience() {
     setOpenKey(null);
   }
 
+  /**
+   * Arrow-key movement across the audience tabs, per the ARIA tabs pattern:
+   * the tablist is one tab stop and Left/Right (plus Home/End) move between
+   * tabs, activating as they go.
+   */
+  function onTabKey(e: React.KeyboardEvent<HTMLButtonElement>) {
+    const order: Role[] = ["creator", "brand"];
+    const i = order.indexOf(role);
+    let next: Role | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = order[(i + 1) % order.length];
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = order[(i - 1 + order.length) % order.length];
+    else if (e.key === "Home") next = order[0];
+    else if (e.key === "End") next = order[order.length - 1];
+    if (!next) return;
+    e.preventDefault();
+    switchRole(next);
+    document.getElementById(`faq-tab-${next}`)?.focus();
+  }
+
   return (
     <div className={isBrand ? "realm-brand" : undefined}>
       <Header role={role} />
 
-      <main className={["flex-1", isBrand ? "bg-surface-inverse" : "bg-surface"].join(" ")}>
+      <main id="main-content" className={["flex-1", isBrand ? "bg-surface-inverse" : "bg-surface"].join(" ")}>
         {/* Hero */}
         <section className="relative overflow-hidden px-6 pt-16 pb-10">
           <div className="relative mx-auto max-w-[720px] text-center">
@@ -157,9 +182,13 @@ export function FAQsExperience() {
                 return (
                   <button
                     key={r}
+                    id={`faq-tab-${r}`}
                     type="button"
                     role="tab"
                     aria-selected={active}
+                    aria-controls="faq-panel"
+                    tabIndex={active ? 0 : -1}
+                    onKeyDown={onTabKey}
                     onClick={() => switchRole(r)}
                     className={[
                       "rounded-[var(--radius-token-pill)] px-6 py-2 text-[14px] font-semibold transition-colors",
@@ -243,18 +272,19 @@ export function FAQsExperience() {
               </div>
             </nav>
 
-            <div>
-              {query.trim() && (
-                <p
-                  className={[
-                    "mb-6 text-[13.5px]",
-                    isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
-                  ].join(" ")}
-                >
-                  {totalMatches} {totalMatches === 1 ? "result" : "results"} for &ldquo;
-                  {query.trim()}&rdquo;
-                </p>
-              )}
+            <div id="faq-panel" role="tabpanel" aria-labelledby={`faq-tab-${role}`} tabIndex={-1}>
+              <p
+                role="status"
+                className={[
+                  "mb-6 text-[13.5px]",
+                  query.trim() ? "" : "sr-only",
+                  isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
+                ].join(" ")}
+              >
+                {query.trim()
+                  ? `${totalMatches} ${totalMatches === 1 ? "result" : "results"} for “${query.trim()}”`
+                  : `${totalMatches} questions for ${role === "brand" ? "brands" : "creators"}`}
+              </p>
 
               {filtered.length === 0 ? (
                 <div
@@ -358,7 +388,7 @@ export function FAQsExperience() {
                 </svg>
               </Link>
               <Link
-                href={isBrand ? "/onboarding?type=brand" : "/onboarding?type=creator"}
+                href={isBrand ? "/contact" : "/onboarding?type=creator"}
                 className={[
                   "inline-flex items-center rounded-[var(--radius-token-pill)] border px-6 py-3 text-[14px] font-bold transition-colors",
                   isBrand

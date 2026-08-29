@@ -428,7 +428,9 @@ export function OnboardingWizard() {
                 )}
               </p>
               {whopError && (
-                <p className="mt-4 max-w-[320px] text-[13px] font-medium text-red-600">{whopError}</p>
+                <p role="alert" className="mt-4 max-w-[320px] text-[13px] font-medium text-red-700">
+                  {whopError}
+                </p>
               )}
             </div>
           )}
@@ -444,6 +446,10 @@ export function OnboardingWizard() {
           </button>
 
           {isLastStep && !whopHandle ? (
+            // A route handler that redirects out to Whop, so this has to be a
+            // real document navigation rather than a client-side Link — and it
+            // must not pick up a locale prefix.
+            // eslint-disable-next-line @next/next/no-html-link-for-pages
             <a
               href="/api/whop/authorize"
               className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-center text-[14px] font-bold text-white transition-colors hover:bg-ink/90"

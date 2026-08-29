@@ -1,4 +1,7 @@
-import Link from "next/link";
+"use client";
+
+import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import type { Role } from "./RoleToggle";
 import { TrustAvatars } from "./TrustAvatars";
 
@@ -30,7 +33,19 @@ const COPY: Record<"first" | "second", Record<Role, { heading: string; cta: { la
 };
 
 export function CTASocialProof({ role, variant = "first" }: { role: Role; variant?: "first" | "second" }) {
-  const copy = COPY[variant][role];
+  const t = useT();
+  const base = COPY[variant][role];
+  // Only the creator realm is localized so far; the brand copy still comes
+  // from COPY until the brand-home pass migrates it.
+  const copy =
+    role === "creator"
+      ? {
+          ...base,
+          heading: variant === "first" ? t.home.cta.firstHeading : t.home.cta.secondHeading,
+          cta: { ...base.cta, label: variant === "first" ? t.home.cta.firstCta : t.home.cta.secondCta },
+          trustLabel: t.home.cta.trust,
+        }
+      : base;
   const isBrand = role === "brand";
 
   return (

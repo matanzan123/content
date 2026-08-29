@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import { useAuth } from "./AuthProvider";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 
@@ -70,11 +70,11 @@ export function AuthGate({
 
       <p className="mt-6 text-[12.5px] leading-relaxed text-ink-soft">
         By continuing you agree to our{" "}
-        <Link href="/terms" className="font-medium text-ink underline underline-offset-2">
+        <Link href="/terms-of-service" className="font-medium text-ink underline underline-offset-2">
           Terms
         </Link>{" "}
         and{" "}
-        <Link href="/privacy" className="font-medium text-ink underline underline-offset-2">
+        <Link href="/privacy-policy" className="font-medium text-ink underline underline-offset-2">
           Privacy Policy
         </Link>
         .

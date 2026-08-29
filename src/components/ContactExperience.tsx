@@ -6,10 +6,11 @@ import { Header } from "./Header";
 
 export function ContactExperience() {
   return (
-    <>
+    <div className="flex flex-1 flex-col">
       <Header role="brand" />
 
-      <section className="relative overflow-hidden bg-surface-inverse pt-20 pb-24">
+      <main id="main-content" className="flex-1">
+        <section className="relative overflow-hidden bg-surface-inverse pt-20 pb-24">
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-x-0 top-0 h-[420px] opacity-40"
@@ -48,9 +49,10 @@ export function ContactExperience() {
             <BrandOnboardingForm />
           </div>
         </div>
-      </section>
+        </section>
+      </main>
 
       <Footer role="brand" />
-    </>
+    </div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/Link";
 import type { Campaign, Platform } from "@/data/campaigns";
 import { PlatformIcon } from "./PlatformIcon";
 

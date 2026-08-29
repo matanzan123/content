@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { Link } from "@/i18n/Link";
 import type { Role } from "./RoleToggle";
 
 const COPY: Record<Role, { eyebrow: string; heading: string; subtitle: string }> = {
@@ -142,9 +143,11 @@ function StatCell({ label, value, dark }: { label: string; value: string; dark: 
 function CampaignCard({ c, isBrand }: { c: Campaign; isBrand: boolean }) {
   const progress = Math.min(100, Math.round((c.earned / c.budget) * 100));
   return (
-    <div
+    <Link
+      href="/discover"
+      aria-label={c.title}
       className={[
-        "group cursor-pointer overflow-hidden rounded-[24px] border text-left shadow-[var(--shadow-card)] transition-all duration-300 hover:-translate-y-1.5 hover:shadow-[0_28px_60px_-18px_rgba(20,21,26,0.35)]",
+        "group block cursor-pointer overflow-hidden rounded-[24px] border text-left shadow-[var(--shadow-card)] transition-all duration-300 hover:-translate-y-1.5 hover:shadow-[0_28px_60px_-18px_rgba(20,21,26,0.35)]",
         isBrand ? "border-white/10 bg-surface-inverse-raised" : "border-line bg-surface",
       ].join(" ")}
     >
@@ -216,7 +219,7 @@ function CampaignCard({ c, isBrand }: { c: Campaign; isBrand: boolean }) {
           <StatCell label="Creators" value={c.creators} dark={isBrand} />
         </div>
       </div>
-    </div>
+    </Link>
   );
 }
 
@@ -263,7 +266,7 @@ export function PopularCampaigns({ role }: { role: Role }) {
           ))}
         </div>
 
-        <a
+        <Link
           href="/discover"
           className="mt-12 inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] px-9 py-4 text-[16px] font-bold text-white shadow-[0_16px_40px_-10px_rgba(52,87,255,0.65)] transition-all duration-200 hover:-translate-y-1 hover:shadow-[0_20px_48px_-8px_rgba(52,87,255,0.75)]"
           style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
@@ -272,7 +275,7 @@ export function PopularCampaigns({ role }: { role: Role }) {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
             <path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-        </a>
+        </Link>
       </div>
     </section>
   );

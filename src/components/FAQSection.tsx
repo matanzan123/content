@@ -1,6 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
+import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
+import type { Dictionary } from "@/i18n/dictionaries/en";
 import type { Role } from "./RoleToggle";
 
 const FAQS: Record<Role, { q: string; a: string }[]> = {
@@ -26,6 +29,8 @@ const FAQS: Record<Role, { q: string; a: string }[]> = {
 
 function FAQItem({ q, a, isBrand }: { q: string; a: string; isBrand: boolean }) {
   const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const buttonId = useId();
   return (
     <div
       className={[
@@ -38,9 +43,11 @@ function FAQItem({ q, a, isBrand }: { q: string; a: string; isBrand: boolean }) 
       ].join(" ")}
     >
       <button
+        id={buttonId}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-controls={panelId}
         className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
       >
         <span className={["text-[14.5px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{q}</span>
@@ -56,6 +63,9 @@ function FAQItem({ q, a, isBrand }: { q: string; a: string; isBrand: boolean }) 
         </span>
       </button>
       <div
+        id={panelId}
+        role="region"
+        aria-labelledby={buttonId}
         className="grid transition-[grid-template-rows] duration-300 ease-out"
         style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
       >
@@ -69,9 +79,24 @@ function FAQItem({ q, a, isBrand }: { q: string; a: string; isBrand: boolean }) 
   );
 }
 
+/** Creator questions live in the dictionary; the brand set is migrated in the
+ *  brand-home pass and still reads from FAQS. */
+function creatorItems(t: Dictionary) {
+  const f = t.home.faq.items;
+  return [
+    { q: f.paidQ, a: f.paidA },
+    { q: f.followingQ, a: f.followingA },
+    { q: f.feeQ, a: f.feeA },
+    { q: f.multipleQ, a: f.multipleA },
+    { q: f.rejectedQ, a: f.rejectedA },
+    { q: f.platformsQ, a: f.platformsA },
+  ];
+}
+
 export function FAQSection({ role }: { role: Role }) {
+  const t = useT();
   const isBrand = role === "brand";
-  const items = FAQS[role];
+  const items = isBrand ? FAQS.brand : creatorItems(t);
 
   return (
     <section
@@ -87,7 +112,7 @@ export function FAQSection({ role }: { role: Role }) {
             isBrand ? "bg-white/10 text-ink-inverse-soft" : "bg-accent-soft text-accent-ink",
           ].join(" ")}
         >
-          FAQ
+          {t.home.faq.badge}
         </span>
         <h2
           className={[
@@ -95,7 +120,7 @@ export function FAQSection({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse" : "text-ink",
           ].join(" ")}
         >
-          Your Questions, Answered
+          {t.home.faq.heading}
         </h2>
         <p
           className={[
@@ -103,7 +128,7 @@ export function FAQSection({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          Everything you need to know about how the platform works, all in one place.
+          {t.home.faq.subtitle}
         </p>
 
         <div className="mt-10 flex flex-col gap-3 text-left">
@@ -112,18 +137,18 @@ export function FAQSection({ role }: { role: Role }) {
           ))}
         </div>
 
-        <a
+        <Link
           href="/faqs"
           className={[
             "mt-8 inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] px-6 py-3 text-[14px] font-bold transition-colors",
             isBrand ? "bg-white text-ink hover:bg-white/90" : "bg-ink text-white hover:bg-ink/90",
           ].join(" ")}
         >
-          See All Questions
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+          {t.home.faq.seeAll}
+          <svg className="dir-flip" width="14" height="14" viewBox="0 0 24 24" fill="none">
             <path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-        </a>
+        </Link>
       </div>
     </section>
   );

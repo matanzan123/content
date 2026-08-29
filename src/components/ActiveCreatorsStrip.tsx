@@ -1,4 +1,7 @@
+"use client";
+
 import Image from "next/image";
+import { useT } from "@/i18n/provider";
 import type { Role } from "./RoleToggle";
 
 const BRAND_LOGOS = [
@@ -56,6 +59,7 @@ function Tile({ type, seed }: { type: "avatar" | "brand"; seed: number }) {
 }
 
 export function ActiveCreatorsStrip({ role }: { role: Role }) {
+  const t = useT();
   const isBrand = role === "brand";
   const items = buildStrip(30, isBrand);
 
@@ -73,10 +77,10 @@ export function ActiveCreatorsStrip({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          Active {isBrand ? "Brands" : "Creators"}
+          {isBrand ? t.home.activeCreators.brandsHeading : t.home.activeCreators.creatorsHeading}
         </p>
         <p className={["text-[13px] font-semibold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
-          {isBrand ? "180+ campaigns live right now" : "6,200+ online right now"}
+          {isBrand ? t.home.activeCreators.brandsLive : t.home.activeCreators.creatorsOnline}
         </p>
       </div>
 
