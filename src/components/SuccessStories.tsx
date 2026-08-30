@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useRef, useState } from "react";
-import { useT } from "@/i18n/provider";
+import { useI18n } from "@/i18n/provider";
 import type { Dictionary } from "@/i18n/dictionaries/en";
 import type { Role } from "./RoleToggle";
 
@@ -31,9 +31,11 @@ const CARD_W = 320;
 const GAP = 24;
 
 export function SuccessStories({ role }: { role: Role }) {
+  const { t, dir } = useI18n();
   const isBrand = role === "brand";
   const stories = isBrand ? BRAND_STORIES : CREATOR_STORIES;
   const total = stories.length;
+  const copy = t.home.stories;
 
   const extended = [...stories.slice(-CLONE), ...stories, ...stories.slice(0, CLONE)];
   const [trackIndex, setTrackIndex] = useState(CLONE);
@@ -84,7 +86,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          {isBrand ? "Results" : "Success Stories"}
+          {isBrand ? "Results" : copy.eyebrow}
         </p>
         <h2
           className={[
@@ -92,7 +94,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse" : "text-ink",
           ].join(" ")}
         >
-          {isBrand ? "See What Brands Have Achieved" : "See How Creators Are Winning"}
+          {isBrand ? "See What Brands Have Achieved" : copy.heading}
         </h2>
         <p
           className={[
@@ -100,7 +102,7 @@ export function SuccessStories({ role }: { role: Role }) {
             isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
           ].join(" ")}
         >
-          {isBrand ? "Real campaign performance from brands already scaling with us." : "Real results from real creators already on the platform."}
+          {isBrand ? "Real campaign performance from brands already scaling with us." : copy.subtitle}
         </p>
       </div>
 
@@ -109,7 +111,7 @@ export function SuccessStories({ role }: { role: Role }) {
         tabIndex={0}
         role="region"
         aria-roledescription="carousel"
-        aria-label={isBrand ? "Brand results" : "Success stories"}
+        aria-label={isBrand ? "Brand results" : copy.region}
         onKeyDown={onKeyDown}
         onTouchStart={(e) => (touchStartX.current = e.touches[0].clientX)}
         onTouchEnd={(e) => {
@@ -121,7 +123,14 @@ export function SuccessStories({ role }: { role: Role }) {
         }}
       >
         <div className="mx-auto h-[420px] max-w-[1240px] overflow-hidden">
+          {/* The track stays LTR in both languages. Its position is physical
+              maths — translateX, marginRight, and the swipe delta all assume a
+              left-to-right axis — so mirroring it would inverse Next/Previous
+              rather than translate anything. Only the copy inside each card
+              follows the document direction (dir below). The active card is
+              always centred, so there is no first-card-on-the-left read to fix. */}
           <div
+            dir="ltr"
             className={["flex h-full items-center", smooth ? "transition-transform duration-500 ease-out" : ""].join(" ")}
             style={{ transform: `translateX(calc(50% - ${CARD_W / 2}px - ${trackIndex * (CARD_W + GAP)}px))` }}
             onTransitionEnd={handleTransitionEnd}
@@ -133,7 +142,7 @@ export function SuccessStories({ role }: { role: Role }) {
               if (isBrand) {
                 const b = s as BrandStory;
                 return (
-                  <div key={`${b.company}-${i}`} className="shrink-0 transition-all duration-500" style={cardStyle}>
+                  <div key={`${b.company}-${i}`} dir={dir} className="shrink-0 transition-all duration-500" style={cardStyle}>
                     <div className="relative h-[400px] overflow-hidden rounded-[28px] border border-white/10 bg-surface-inverse-raised shadow-[0_30px_60px_-15px_rgba(0,0,0,0.55)]">
                       <div className="relative h-[170px] w-full overflow-hidden">
                         <Image src={`https://picsum.photos/seed/${b.campaignSeed}/640/400`} alt="" fill unoptimized className="object-cover" />
@@ -173,7 +182,7 @@ export function SuccessStories({ role }: { role: Role }) {
 
               const c = s as CreatorStory;
               return (
-                <div key={`${c.name}-${i}`} className="shrink-0 transition-all duration-500" style={cardStyle}>
+                <div key={`${c.name}-${i}`} dir={dir} className="shrink-0 transition-all duration-500" style={cardStyle}>
                   <div className="relative h-[400px] overflow-hidden rounded-[28px] shadow-[0_30px_60px_-15px_rgba(20,21,26,0.4)]">
                     <Image src={`https://i.pravatar.cc/640?img=${c.photo}`} alt={c.name} fill unoptimized className="object-cover" />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/0" />
@@ -187,9 +196,9 @@ export function SuccessStories({ role }: { role: Role }) {
                         className="inline-block rounded-full px-3 py-1 text-[11px] font-black text-white shadow-sm"
                         style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
                       >
-                        {c.result}
+                        {c.result ?? copy.results[c.key]}
                       </span>
-                      <p className="mt-3 text-[15px] font-medium leading-snug text-white">“{c.quote}”</p>
+                      <p className="mt-3 text-[15px] font-medium leading-snug text-white">“{c.quote ?? copy.quotes[c.key]}”</p>
                       <p className="mt-2 text-[13px] font-bold text-white/80">{c.name}</p>
                     </div>
                   </div>
@@ -201,7 +210,7 @@ export function SuccessStories({ role }: { role: Role }) {
 
         <button
           type="button"
-          aria-label="Previous story"
+          aria-label={isBrand ? "Previous story" : copy.previous}
           onClick={() => go(-1)}
           className={[
             "absolute left-2 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full shadow-[var(--shadow-card)] transition-colors sm:left-8",
@@ -214,7 +223,7 @@ export function SuccessStories({ role }: { role: Role }) {
         </button>
         <button
           type="button"
-          aria-label="Next story"
+          aria-label={isBrand ? "Next story" : copy.next}
           onClick={() => go(1)}
           className={[
             "absolute right-2 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full shadow-[var(--shadow-card)] transition-colors sm:right-8",
@@ -231,7 +240,7 @@ export function SuccessStories({ role }: { role: Role }) {
             <button
               key={isBrand ? (s as BrandStory).company : (s as CreatorStory).name}
               type="button"
-              aria-label={`Go to story ${i + 1}`}
+              aria-label={isBrand ? `Go to story ${i + 1}` : copy.goTo.replace("{index}", String(i + 1))}
               aria-current={i === activeReal}
               onClick={() => goToReal(i)}
               className="flex h-6 w-6 items-center justify-center rounded-full"

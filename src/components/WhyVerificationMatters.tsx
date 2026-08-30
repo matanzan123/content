@@ -1,5 +1,8 @@
+"use client";
+
 import Image from "next/image";
 import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo } from "./brand-kit";
 
 /* ==========================================================================
@@ -145,6 +148,7 @@ const ORBIT_FACES = [
 ];
 
 function ApplicantsHero() {
+  const t = useT().brand.verification;
   return (
     <div className="relative h-[248px] sm:h-[268px]">
       <span
@@ -164,7 +168,7 @@ function ApplicantsHero() {
           boxShadow: "0 16px 32px -10px color-mix(in srgb, var(--accent) 85%, transparent)",
         }}
       >
-        more applicants
+        {t.applicantsCaption}
       </span>
 
       {/* creators fill the right-hand zone top to bottom */}
@@ -380,6 +384,7 @@ function Coin({ size, x, y, z }: { size: number; x: string; y: string; z: number
 }
 
 function FeeHero() {
+  const t = useT().brand.verification;
   return (
     <div className="relative h-[222px]">
       <span
@@ -417,8 +422,8 @@ function FeeHero() {
         className="absolute bottom-0 left-0 z-[5] inline-flex items-center gap-2.5 rounded-full border border-white/[0.12] px-3.5 py-1.5"
         style={{ background: "color-mix(in srgb, var(--surface-inverse-raised) 84%, transparent)" }}
       >
-        <span className="text-[12px] font-bold text-ink-inverse-soft line-through">12%</span>
-        <span className="text-[12px] font-black text-[color:var(--accent-2)]">8% verified</span>
+        <span className="ltr-token text-[12px] font-bold text-ink-inverse-soft line-through">12%</span>
+        <span className="text-[12px] font-black text-[color:var(--accent-2)]">{t.feeVerified.replace("{rate}", "8%")}</span>
       </span>
     </div>
   );
@@ -427,12 +432,15 @@ function FeeHero() {
 /* ====================== CARD 5 — product mockup ========================= */
 
 const MOCK_ROWS = [
-  { brand: 0, name: "Season drop", views: "27.3M", pct: 82, live: true },
-  { brand: 3, name: "Winter drop", views: "4.2M", pct: 58, live: true },
-  { brand: 8, name: "Launch film", views: "1.8M", pct: 34, live: false },
+  { brand: 0, key: "seasonDrop" as const, views: "27.3M", pct: 82, live: true },
+  { brand: 3, key: "winterDrop" as const, views: "4.2M", pct: 58, live: true },
+  { brand: 8, key: "launchFilm" as const, views: "1.8M", pct: 34, live: false },
 ];
 
 function DashboardHero() {
+  const dict = useT().brand;
+  const t = dict.verification;
+  const campaigns = dict.campaigns;
   return (
     <div className="relative h-[228px]">
       <span
@@ -467,12 +475,12 @@ function DashboardHero() {
         </div>
 
         <div className="px-4 py-3.5">
-          <p className="text-[8px] font-bold uppercase tracking-[0.14em] text-[#8a7566]">Campaign performance</p>
+          <p className="text-[8px] font-bold uppercase tracking-[0.14em] text-[#8a7566]">{t.campaignPerformance}</p>
           <div className="mt-2.5 space-y-2.5">
             {MOCK_ROWS.map((r) => (
-              <div key={r.name} className="flex items-center gap-2.5">
+              <div key={r.key} className="flex items-center gap-2.5">
                 <BrandLogo mark={BRAND_MARKS[r.brand]} size={22} radius={7} />
-                <span className="w-[72px] shrink-0 truncate text-[10.5px] font-bold text-[#2d211a]">{r.name}</span>
+                <span className="w-[72px] shrink-0 truncate text-[10.5px] font-bold text-[#2d211a]">{campaigns[r.key]}</span>
                 <span className="h-[7px] flex-1 overflow-hidden rounded-full bg-black/[0.08]">
                   <span
                     className="block h-full rounded-full"
@@ -497,10 +505,10 @@ function DashboardHero() {
           boxShadow: "0 30px 50px -16px rgba(0,0,0,0.95), 0 0 44px -14px color-mix(in srgb, var(--accent) 85%, transparent)",
         }}
       >
-        <p className="text-[8px] font-bold uppercase tracking-[0.14em] text-ink-inverse-soft">Campaign balance</p>
+        <p className="text-[8px] font-bold uppercase tracking-[0.14em] text-ink-inverse-soft">{t.campaignBalance}</p>
         <div className="mt-1 flex items-baseline gap-2">
           <span className="font-[var(--font-display)] text-[26px] font-black leading-none tracking-tight text-white">$18,400</span>
-          <span className="rounded-full bg-emerald-500/[0.18] px-1.5 py-[2px] text-[9px] font-black text-emerald-300">+18.2%</span>
+          <span className="ltr-token rounded-full bg-emerald-500/[0.18] px-1.5 py-[2px] text-[9px] font-black text-emerald-300">+18.2%</span>
         </div>
       </div>
     </div>
@@ -510,6 +518,7 @@ function DashboardHero() {
 /* ============================== CTA BLOCK =============================== */
 
 function CtaBlock() {
+  const t = useT().brand.verification;
   const stack: ({ face: number } | { brand: number })[] = [
     { face: 22 },
     { brand: 0 },
@@ -529,7 +538,7 @@ function CtaBlock() {
             "0 26px 58px -12px color-mix(in srgb, var(--accent) 80%, transparent), inset 0 1px 0 rgba(255,255,255,0.26)",
         }}
       >
-        Launch My Campaign
+        {t.cta}
         <svg
           width="18"
           height="18"
@@ -559,7 +568,7 @@ function CtaBlock() {
         )}
       </span>
 
-      <p className="text-[15px] font-bold text-white">Trusted by 200+ Brands</p>
+      <p className="text-[15px] font-bold text-white">{t.trust}</p>
     </div>
   );
 }
@@ -567,6 +576,7 @@ function CtaBlock() {
 /* ================================ SECTION =============================== */
 
 export function WhyVerificationMatters() {
+  const t = useT().brand.verification;
   return (
     <section className="relative overflow-hidden bg-surface-inverse px-6 pb-24 pt-28">
       <span
@@ -589,16 +599,16 @@ export function WhyVerificationMatters() {
             style={{ background: "color-mix(in srgb, var(--surface-inverse-raised) 78%, transparent)" }}
           >
             <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent-2)" }} />
-            <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-ink-inverse-soft">Verification</span>
+            <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-ink-inverse-soft">{t.eyebrow}</span>
           </span>
           <h2 className="mx-auto mt-5 max-w-[20ch] text-balance font-[var(--font-display)] text-[40px] font-black leading-[0.98] tracking-[-0.03em] text-white sm:text-[56px]">
-            Why Verification Matters
+            {t.heading}
           </h2>
           <p
             className="mx-auto mt-4 max-w-[46ch] text-balance text-[17px] font-medium leading-[1.55]"
             style={{ color: "color-mix(in srgb, var(--ink-inverse) 80%, var(--ink-inverse-soft))" }}
           >
-            Verification turns a listing into a brand creators trust.
+            {t.subtitle}
           </p>
         </div>
 
@@ -606,16 +616,16 @@ export function WhyVerificationMatters() {
           <Card tone="amber">
             <ApplicantsHero />
             <CardCopy
-              title="Get 30% More Applicants"
-              body="Verified briefs reach more creators and are taken more seriously, so a bigger and better-matched pool applies to every campaign."
+              title={t.applicantsTitle}
+              body={t.applicantsBody}
             />
           </Card>
 
           <Card tone="rings">
             <ShieldHero />
             <CardCopy
-              title="Guaranteed Payout Insurance"
-              body="Every campaign you fund is insured end to end. Your spend is protected and creators know they will be paid."
+              title={t.insuranceTitle}
+              body={t.insuranceBody}
             />
           </Card>
         </div>
@@ -624,24 +634,24 @@ export function WhyVerificationMatters() {
           <Card tone="copper">
             <BadgeHero />
             <CardCopy
-              title="Stand Out Fast"
-              body="The verified mark sits on your profile and every brief, so creators know you are legitimate on sight."
+              title={t.standOutTitle}
+              body={t.standOutBody}
             />
           </Card>
 
           <Card tone="gold">
             <FeeHero />
             <CardCopy
-              title="Reduce Platform Fees"
-              body="Verified brands and agencies pay a lower platform fee, so more of every budget reaches creators."
+              title={t.feesTitle}
+              body={t.feesBody}
             />
           </Card>
 
           <Card tone="atmos">
             <DashboardHero />
             <CardCopy
-              title="Boost Visibility"
-              body="Priority placement in Discover puts your campaigns in front of more creators, tracked live in one place."
+              title={t.visibilityTitle}
+              body={t.visibilityBody}
             />
           </Card>
         </div>

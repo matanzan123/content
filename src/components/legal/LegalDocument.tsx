@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useT } from "@/i18n/provider";
 
 /* ==========================================================================
    LEGAL DOCUMENT SHELL
@@ -51,7 +52,7 @@ function Blocks({ blocks }: { blocks: Block[] }) {
             return (
               <p
                 key={i}
-                className="mt-5 rounded-[var(--radius-token-md)] border-l-2 border-accent bg-accent-soft/45 px-4 py-3 text-[14.5px] leading-[1.65] text-ink-soft"
+                className="mt-5 rounded-[var(--radius-token-md)] border-s-2 border-accent bg-accent-soft/45 px-4 py-3 text-[14.5px] leading-[1.65] text-ink-soft"
               >
                 {block.text}
               </p>
@@ -120,6 +121,7 @@ export function LegalDocument({
   /** Ordered part keys → switcher labels. Omit for an ungrouped document. */
   partLabels?: { key: string; label: string; tocLabel?: string }[];
 }) {
+  const t = useT();
   const numbered = useMemo(
     () => sections.map((section, i) => ({ section, number: i + 1 })),
     [sections],
@@ -188,7 +190,7 @@ export function LegalDocument({
           </h1>
           <p className="mt-4 max-w-[62ch] text-[16px] leading-[1.7] text-ink-soft">{intro}</p>
           <p className="mt-6 inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] border border-line bg-surface-sunken px-3.5 py-1.5 text-[12.5px] font-semibold text-ink-soft">
-            Last updated: {lastUpdated}
+            {t.legal.lastUpdated.replace("{date}", lastUpdated)}
           </p>
         </div>
       </section>
@@ -196,16 +198,16 @@ export function LegalDocument({
       <div className="mx-auto max-w-[1160px] px-6 pb-24 pt-10 lg:pt-14">
         <div className="lg:grid lg:grid-cols-[268px_1fr] lg:gap-14">
           {/* --------------------------- contents --------------------------- */}
-          <nav aria-label="Table of contents" className="lg:sticky lg:top-28 lg:self-start">
+          <nav aria-label={t.legal.tocNav} className="lg:sticky lg:top-28 lg:self-start">
             {/* mobile: collapsible */}
             <div className="lg:hidden">
               <button
                 type="button"
                 onClick={() => setTocOpen((v) => !v)}
                 aria-expanded={tocOpen}
-                className="flex w-full items-center justify-between rounded-[var(--radius-token-md)] border border-line bg-surface px-4 py-3 text-left text-[14px] font-bold text-ink"
+                className="flex w-full items-center justify-between rounded-[var(--radius-token-md)] border border-line bg-surface px-4 py-3 text-start text-[14px] font-bold text-ink"
               >
-                Contents
+                {t.legal.contents}
                 <svg
                   width="16"
                   height="16"
@@ -258,10 +260,10 @@ export function LegalDocument({
             {/* desktop: sticky rail */}
             <div
               ref={railRef}
-              className="hidden max-h-[calc(100vh-9rem)] overflow-y-auto pr-1 lg:block"
+              className="hidden max-h-[calc(100vh-9rem)] overflow-y-auto pe-1 lg:block"
             >
               <p className="px-3 text-[11px] font-black uppercase tracking-[0.14em] text-ink-soft">
-                Contents
+                {t.legal.contents}
               </p>
               <div className="mt-3">
                 {grouped
@@ -269,7 +271,7 @@ export function LegalDocument({
                       <div key={group.key} className="mb-4 last:mb-0">
                         <p
                           className={[
-                            "border-l-2 px-3 py-1.5 text-[10.5px] font-black uppercase tracking-[0.14em] transition-colors",
+                            "border-s-2 px-3 py-1.5 text-[10.5px] font-black uppercase tracking-[0.14em] transition-colors",
                             activePart === group.key
                               ? "border-accent text-accent-ink"
                               : "border-transparent text-ink-soft",
@@ -294,7 +296,7 @@ export function LegalDocument({
             {partLabels && (
               <div className="mb-8">
                 <nav
-                  aria-label="Jump to a part of these terms"
+                  aria-label={t.legal.jumpNav}
                   className="inline-flex flex-wrap rounded-[var(--radius-token-pill)] bg-surface-sunken p-1 ring-1 ring-line"
                 >
                   {partLabels.map(({ key, label: partLabel }) => {
@@ -311,14 +313,13 @@ export function LegalDocument({
                         ].join(" ")}
                       >
                         {partLabel}
-                        <span className="sr-only"> terms</span>
+                        <span className="sr-only">{t.legal.termsSuffix}</span>
                       </a>
                     );
                   })}
                 </nav>
                 <p className="mt-3 text-[13px] leading-relaxed text-ink-soft">
-                  The General Terms apply to everyone. The Creator and Brand parts add to them —
-                  they do not replace them, and nothing here is hidden behind a tab.
+                  {t.legal.partsNote}
                 </p>
               </div>
             )}
@@ -332,7 +333,7 @@ export function LegalDocument({
                   id={section.id}
                   className="scroll-anchor-offset font-[var(--font-display)] text-[22px] font-black leading-tight tracking-[-0.02em] text-ink sm:text-[26px]"
                 >
-                  <span className="mr-2 text-accent">{number}.</span>
+                  <span className="me-2 text-accent">{number}.</span>
                   {section.title}
                 </h2>
                 <Blocks blocks={section.blocks} />

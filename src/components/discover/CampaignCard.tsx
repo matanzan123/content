@@ -1,6 +1,7 @@
 "use client";
 
 import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import type { Campaign, Platform } from "@/data/campaigns";
 import { PlatformIcon } from "./PlatformIcon";
 
@@ -9,6 +10,7 @@ function money(n: number) {
 }
 
 export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBrand: boolean }) {
+  const t = useT().discover;
   const pct = campaign.budget > 0 ? Math.min(100, (campaign.paidOut / campaign.budget) * 100) : 0;
 
   return (
@@ -29,7 +31,7 @@ export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBran
           className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
         />
         <span className="absolute left-3 top-3 rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur">
-          {campaign.status}
+          {t.statuses[campaign.status as keyof typeof t.statuses] ?? campaign.status}
         </span>
       </div>
 
@@ -41,7 +43,7 @@ export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBran
               isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
             ].join(" ")}
           >
-            {campaign.owner}
+            <bdi>{campaign.owner}</bdi>
           </span>
           {campaign.ownerVerified && (
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-label="Verified">
@@ -58,7 +60,7 @@ export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBran
               isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
             ].join(" ")}
           >
-            {campaign.posted}
+            <bdi>{campaign.posted}</bdi>
           </span>
         </div>
 
@@ -89,8 +91,8 @@ export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBran
               isBrand ? "text-ink-inverse" : "text-ink",
             ].join(" ")}
           >
-            ${campaign.cpm.toFixed(2)}
-            <span className={isBrand ? "text-ink-inverse-soft" : "text-ink-soft"}>/1K</span>
+            <span className="ltr-token">${campaign.cpm.toFixed(2)}</span>
+            <span className={["ltr-token", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>{t.perThousand}</span>
           </span>
         </div>
 
@@ -104,7 +106,7 @@ export function CampaignCard({ campaign, isBrand }: { campaign: Campaign; isBran
               isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
             ].join(" ")}
           >
-            {money(campaign.paidOut)} of {money(campaign.budget)} paid out
+            {t.paidOutOf.replace("{paid}", money(campaign.paidOut)).replace("{total}", money(campaign.budget))}
           </p>
         </div>
       </div>

@@ -3,6 +3,8 @@
 import { useId } from "react";
 import Image from "next/image";
 import { Link } from "@/i18n/Link";
+import { Templated } from "@/i18n/Templated";
+import { useT } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
 import { RoleToggle, type Role } from "./RoleToggle";
 import { VERIFIED_BRANDS_ID } from "./section-anchors";
@@ -133,19 +135,21 @@ function GaugeCard({ value }: { value: number }) {
 }
 
 function CreatorCards() {
+  const t = useT();
+  const h = t.home.hero;
   return (
     <>
-      <MockCard label="New Creators" rotate={-10} className="left-0 top-0 h-[230px]">
+      <MockCard label={h.newCreators} rotate={-10} className="left-0 top-0 h-[230px]">
         <NetworkDiagram />
       </MockCard>
-      <MockCard label="Campaigns" rotate={5} className="left-28 top-16 h-[220px]">
+      <MockCard label={h.campaigns} rotate={5} className="left-28 top-16 h-[220px]">
         <div className="space-y-2.5">
-          <TagRow tag="Clipping" />
-          <TagRow tag="UGC" />
-          <TagRow tag="Music" />
+          <TagRow tag={h.clipping} />
+          <TagRow tag={h.ugc} />
+          <TagRow tag={h.music} />
         </div>
       </MockCard>
-      <MockCard label="Trust Score" rotate={-4} className="left-14 top-[210px] h-[165px]">
+      <MockCard label={h.trustScore} rotate={-4} className="left-14 top-[210px] h-[165px]">
         <GaugeCard value={92} />
       </MockCard>
     </>
@@ -292,6 +296,7 @@ function MiniStat({ label, value }: { label: string; value: string }) {
 
 /* ---- Card 1: live campaign (primary — strongest card in the cluster) ---- */
 function LiveCampaignBody() {
+  const t = useT().brand;
   return (
     <>
       <div className="relative mt-3 h-[116px] w-full overflow-hidden">
@@ -320,17 +325,17 @@ function LiveCampaignBody() {
           className="absolute right-3 top-3 rounded-full px-2 py-[3px] text-[8px] font-black uppercase tracking-[0.07em] text-white"
           style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
         >
-          Outdoor
+          {t.sectors.Outdoor}
         </span>
         <span className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/60 px-2 py-[3px] text-[8px] font-black uppercase tracking-[0.07em] text-emerald-300 backdrop-blur-sm">
           <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-emerald-400" />
-          Live
+          {t.hero.live}
         </span>
-        <span className="absolute bottom-2.5 right-3 rounded-[5px] bg-black/60 px-1.5 py-[2px] text-[8px] font-bold text-white/90 backdrop-blur-sm">
+        <span className="ltr-token absolute bottom-2.5 right-3 rounded-[5px] bg-black/60 px-1.5 py-[2px] text-[8px] font-bold text-white/90 backdrop-blur-sm">
           0:24
         </span>
         <span className="absolute bottom-2.5 left-3 text-[9px] font-semibold text-white/90">
-          312 creators clipping now
+          {t.hero.creatorsClipping.replace("{count}", "312")}
         </span>
       </div>
 
@@ -339,10 +344,10 @@ function LiveCampaignBody() {
           <BrandLogo mark={BRAND_MARKS[0]} size={28} radius={8} />
           <div className="min-w-0">
             <p className="flex items-center gap-1 text-[11.5px] font-bold leading-tight text-ink-inverse">
-              <span className="truncate">Northwind</span>
+              <span className="ltr-token truncate">Northwind</span>
               <VerifiedTick size={11} />
             </p>
-            <p className="text-[8.5px] leading-tight text-ink-inverse-soft">Energy drinks · Season drop</p>
+            <p className="text-[8.5px] leading-tight text-ink-inverse-soft">{t.sectors["Energy drinks"]} · {t.campaigns.seasonDrop}</p>
           </div>
           <span
             className="ml-auto shrink-0 rounded-full px-2 py-[3px] text-[9px] font-black"
@@ -351,28 +356,28 @@ function LiveCampaignBody() {
               color: "var(--accent-cyan)",
             }}
           >
-            $0.09 CPM
+            <span className="ltr-token">$0.09 CPM</span>
           </span>
         </div>
 
         <div className="mt-3.5 grid grid-cols-3 gap-1.5">
-          <MiniStat label="Approval" value="46%" />
-          <MiniStat label="Views" value="27.3M" />
-          <MiniStat label="Spend" value="$18.4K" />
+          <MiniStat label={t.hero.approval} value="46%" />
+          <MiniStat label={t.hero.views} value="27.3M" />
+          <MiniStat label={t.hero.spend} value="$18.4K" />
         </div>
 
         <div className="mt-3.5 flex items-center justify-between">
           <span className="text-[8.5px] font-semibold uppercase tracking-[0.07em] text-ink-inverse-soft">
-            Daily views
+            {t.hero.dailyViews}
           </span>
-          <span className="text-[8.5px] font-bold text-emerald-300">+18.2%</span>
+          <span className="ltr-token text-[8.5px] font-bold text-emerald-300">+18.2%</span>
         </div>
         <div className="mt-1">
           <Sparkline />
         </div>
 
         <div className="mt-3 flex items-center justify-between">
-          <span className="text-[8.5px] font-semibold uppercase tracking-[0.07em] text-ink-inverse-soft">Budget</span>
+          <span className="text-[8.5px] font-semibold uppercase tracking-[0.07em] text-ink-inverse-soft">{t.hero.budget}</span>
           <span className="text-[8.5px] font-bold text-ink-inverse">62%</span>
         </div>
         <div className="mt-1.5 h-[6px] overflow-hidden rounded-full bg-white/[0.08]">
@@ -404,6 +409,7 @@ const VB_TILES: VbTile[] = [
 ];
 
 function VerifiedBrandsBody() {
+  const t = useT().brand;
   return (
     <>
       <div className="grid grid-cols-4 gap-[7px]">
@@ -465,10 +471,10 @@ function VerifiedBrandsBody() {
             <BrandLogo mark={mark} size={22} radius={6} />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1">
-                <span className="truncate text-[10px] font-bold leading-tight text-ink-inverse">{mark.name}</span>
+                <span className="ltr-token truncate text-[10px] font-bold leading-tight text-ink-inverse">{mark.name}</span>
                 <VerifiedTick size={9} />
               </span>
-              <span className="block truncate text-[7.5px] leading-tight text-ink-inverse-soft">{mark.sector}</span>
+              <span className="block truncate text-[7.5px] leading-tight text-ink-inverse-soft">{t.sectors[mark.sector as keyof typeof t.sectors]}</span>
             </span>
             <span
               className="shrink-0 rounded-full px-1.5 py-[2px] text-[7.5px] font-black"
@@ -477,7 +483,7 @@ function VerifiedBrandsBody() {
                 color: "var(--accent-2)",
               }}
             >
-              {i === 0 ? "4 live" : "2 live"}
+              {t.hero.liveCount.replace("{count}", i === 0 ? "4" : "2")}
             </span>
           </div>
         ))}
@@ -495,7 +501,7 @@ function VerifiedBrandsBody() {
           ))}
         </span>
         <span className="text-[8.5px] font-medium text-ink-inverse-soft">
-          <span className="font-bold text-ink-inverse">+190</span> verified this quarter
+          <Templated template={t.hero.verifiedThisQuarter} value="+190" className="font-bold text-ink-inverse" />
         </span>
       </div>
     </>
@@ -504,6 +510,7 @@ function VerifiedBrandsBody() {
 
 /* ---- Card 3: moderation queue (a believable working tool) ---- */
 function ModeratorBody() {
+  const t = useT().brand;
   return (
     <>
       <div className="flex items-center gap-2.5">
@@ -511,14 +518,14 @@ function ModeratorBody() {
           <Image src="https://i.pravatar.cc/96?img=52" alt="" fill unoptimized sizes="34px" className="object-cover" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[11.5px] font-bold leading-tight text-ink-inverse">Devon Iwu</p>
-          <p className="text-[8.5px] leading-tight text-ink-inverse-soft">4 clips · submitted 2 min ago</p>
+          <p className="ltr-token truncate text-[11.5px] font-bold leading-tight text-ink-inverse">Devon Iwu</p>
+          <p className="text-[8.5px] leading-tight text-ink-inverse-soft">{t.hero.submittedAgo.replace("{count}", "4").replace("{time}", t.hero.twoMinutes)}</p>
         </div>
         <span
           className="shrink-0 rounded-full px-2 py-[3px] text-[8px] font-black uppercase tracking-[0.06em]"
           style={{ background: "color-mix(in srgb, var(--accent-warm) 18%, transparent)", color: "var(--accent-warm)" }}
         >
-          Pending
+          {t.hero.pending}
         </span>
       </div>
 
@@ -535,7 +542,7 @@ function ModeratorBody() {
             />
             <span className="absolute inset-0 bg-gradient-to-t from-black/45 to-transparent" />
             {i === 2 ? (
-              <span className="absolute inset-0 flex items-center justify-center bg-black/55 text-[11px] font-black text-white">
+              <span className="ltr-token absolute inset-0 flex items-center justify-center bg-black/55 text-[11px] font-black text-white">
                 +2
               </span>
             ) : (
@@ -552,7 +559,7 @@ function ModeratorBody() {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M5 13L10 18L19 7" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          Approve
+          {t.hero.approve}
         </span>
         <span
           className="flex h-[30px] flex-1 items-center justify-center gap-1.5 rounded-full text-[10px] font-bold ring-1 ring-inset"
@@ -574,7 +581,7 @@ function ModeratorBody() {
               strokeLinejoin="round"
             />
           </svg>
-          Flag
+          {t.hero.flag}
         </span>
       </div>
     </>
@@ -583,6 +590,7 @@ function ModeratorBody() {
 
 /* ---- Floating payout chip — present but deliberately secondary ---- */
 function PayoutChip({ className }: { className?: string }) {
+  const t = useT().brand;
   return (
     <div
       className={["relative overflow-hidden rounded-[18px] border border-white/[0.09] px-3.5 py-3", className ?? ""].join(" ")}
@@ -603,7 +611,7 @@ function PayoutChip({ className }: { className?: string }) {
           </svg>
         </span>
         <div className="min-w-0">
-          <p className="text-[9px] font-medium leading-tight text-ink-inverse-soft">Payout released</p>
+          <p className="text-[9px] font-medium leading-tight text-ink-inverse-soft">{t.hero.payoutReleased}</p>
           <p className="font-[var(--font-display)] text-[16px] font-black leading-tight tracking-tight text-ink-inverse">
             $2,480.00
           </p>
@@ -620,7 +628,7 @@ function PayoutChip({ className }: { className?: string }) {
             </span>
           ))}
         </span>
-        <span className="text-[8.5px] font-medium text-ink-inverse-soft">to 38 creators</span>
+        <span className="text-[8.5px] font-medium text-ink-inverse-soft">{t.hero.toCreators.replace("{count}", "38")}</span>
       </div>
     </div>
   );
@@ -637,23 +645,24 @@ function PayoutChip({ className }: { className?: string }) {
  *   Moderation      left  74  top 428   w 268  rot -3    scale 1    z40  (front)
  */
 function BrandComposition() {
+  const t = useT().brand;
   return (
     <div className="relative hidden h-[646px] w-full lg:block">
       <Floater className="left-[282px] top-0 w-[218px]" rotate={5.5} scale={0.97} opacity={0.96} z={10}>
-        <BrandCard label="Verified Brands" tier="back">
+        <BrandCard label={t.hero.verifiedBrands} tier="back">
           <VerifiedBrandsBody />
         </BrandCard>
       </Floater>
 
       <Floater className="left-0 top-[34px] w-[268px]" rotate={-4.5} float="normal" z={30}>
         <BrandCard
-          label="Live Campaign"
+          label={t.hero.liveCampaign}
           tier="front"
           flush
           badge={
             <span className="ml-auto flex items-center gap-1 rounded-full bg-emerald-500/[0.16] px-1.5 py-[2px] text-[7.5px] font-black uppercase tracking-[0.07em] text-emerald-300">
               <span className="h-1 w-1 animate-pulse-soft rounded-full bg-emerald-400" />
-              Running
+              {t.hero.running}
             </span>
           }
         >
@@ -666,7 +675,7 @@ function BrandComposition() {
       </Floater>
 
       <Floater className="left-[74px] top-[428px] w-[268px]" rotate={-3} z={40}>
-        <BrandCard label="Moderation Queue" tier="mid">
+        <BrandCard label={t.hero.moderationQueue} tier="mid">
           <ModeratorBody />
         </BrandCard>
       </Floater>
@@ -679,6 +688,7 @@ function BrandComposition() {
    ========================================================================== */
 
 function LiveEyebrow() {
+  const t = useT().brand;
   return (
     <span
       className="inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] border border-white/[0.08] py-[5px] pl-[5px] pr-3.5"
@@ -698,13 +708,14 @@ function LiveEyebrow() {
         ))}
       </span>
       <span className="text-[11.5px] font-medium tracking-[0.005em] text-ink-inverse-soft">
-        <span className="font-semibold text-ink-inverse">190+ verified brands</span> running campaigns now
+        <span className="font-semibold text-ink-inverse">{t.hero.verifiedRunningStrong.replace("{count}", "190")}</span> {t.hero.verifiedRunningTail}
       </span>
     </span>
   );
 }
 
 function RatingRow() {
+  const t = useT().brand;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span className="flex -space-x-2">
@@ -730,30 +741,31 @@ function RatingRow() {
           ))}
         </span>
         <span className="text-[12.5px] text-ink-inverse-soft">
-          <span className="font-semibold text-ink-inverse">4.9</span> from 2,400+ brand teams
+          <Templated template={t.hero.rating.replace("{count}", "2,400")} token="rating" value="4.9" className="font-semibold text-ink-inverse" />
         </span>
       </span>
     </div>
   );
 }
 
-const BRAND_KPIS = [
-  { value: "27.3M", label: "Qualified views delivered" },
-  { value: "190+", label: "Verified brands onboard" },
-  { value: "48h", label: "Average campaign fill" },
+const BRAND_KPIS: { value: string; key: "qualifiedViews" | "brandsOnboard" | "averageFill" }[] = [
+  { value: "27.3M", key: "qualifiedViews" },
+  { value: "190+", key: "brandsOnboard" },
+  { value: "48h", key: "averageFill" },
 ];
 
 function KpiRow() {
+  const t = useT().brand;
   return (
     <dl className="grid max-w-[500px] grid-cols-3 divide-x divide-white/[0.08] border-t border-white/[0.08] pt-5">
       {BRAND_KPIS.map((kpi, i) => (
-        <div key={kpi.label} className={i === 0 ? "pr-4" : "px-4 last:pr-0"}>
-          <dt className="sr-only">{kpi.label}</dt>
+        <div key={kpi.key} className={i === 0 ? "pe-4" : "px-4 last:pe-0"}>
+          <dt className="sr-only">{t.hero[kpi.key]}</dt>
           <dd>
             <span className="block font-[var(--font-display)] text-[22px] font-extrabold leading-none tracking-tight text-ink-inverse/90">
-              {kpi.value}
+              <span className="ltr-token">{kpi.value}</span>
             </span>
-            <span className="mt-1.5 block text-[10.5px] leading-snug text-ink-inverse-soft">{kpi.label}</span>
+            <span className="mt-1.5 block text-[10.5px] leading-snug text-ink-inverse-soft">{t.hero[kpi.key]}</span>
           </dd>
         </div>
       ))}
@@ -762,11 +774,12 @@ function KpiRow() {
 }
 
 function TrustedByStrip() {
+  const t = useT().brand;
   return (
     <div className="relative mx-auto mt-14 max-w-[1240px] border-t border-white/[0.07] px-6 pt-6">
       <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
         <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-ink-inverse-soft/70">
-          Trusted by teams at
+          {t.hero.trustedTeams}
         </p>
         <div className="flex flex-wrap items-center gap-x-7 gap-y-3.5">
           {BRAND_MARKS.slice(0, 6).map((mark) => (
@@ -776,7 +789,7 @@ function TrustedByStrip() {
             >
               <BrandLogo mark={mark} size={24} radius={7} />
               <span className="font-[var(--font-display)] text-[13px] font-bold tracking-tight text-ink-inverse transition-colors duration-200 group-hover:text-[color:var(--accent-2)]">
-                {mark.name}
+                <span className="ltr-token">{mark.name}</span>
               </span>
             </span>
           ))}
@@ -791,8 +804,20 @@ function TrustedByStrip() {
    ========================================================================== */
 
 export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Role) => void }) {
-  const copy = COPY[role];
+  const t = useT();
+  const base = COPY[role];
   const isBrand = role === "brand";
+  // COPY now supplies only the hrefs; every visible string comes from the
+  // dictionary in both realms.
+  const words = isBrand ? t.brand.hero : t.home.hero;
+  const copy = {
+    ...base,
+    headlineLead: words.headlineLead,
+    trailingWord: words.trailingWord,
+    subtitle: words.subtitle,
+    primaryCta: { ...base.primaryCta, label: words.primaryCta },
+    secondaryCta: { ...base.secondaryCta, label: words.secondaryCta },
+  };
 
   return (
     <section
@@ -873,7 +898,8 @@ export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Rol
           >
             {copy.headlineLead}
             <br />
-            As A <RoleToggle role={role} onChange={onRoleChange} theme={isBrand ? "dark" : "light"} />{" "}
+            {isBrand ? t.brand.hero.asA : t.home.hero.asA}{" "}
+            <RoleToggle role={role} onChange={onRoleChange} theme={isBrand ? "dark" : "light"} />{" "}
             {copy.trailingWord}
           </h1>
 
@@ -950,13 +976,13 @@ export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Rol
             {/* mobile keeps a real card instead of an empty column */}
             <div className="relative mx-auto max-w-[330px] pb-4 lg:hidden">
               <BrandCard
-                label="Live Campaign"
+                label={t.brand.hero.liveCampaign}
                 tier="front"
                 flush
                 badge={
                   <span className="ml-auto flex items-center gap-1 rounded-full bg-emerald-500/[0.16] px-1.5 py-[2px] text-[7.5px] font-black uppercase tracking-[0.07em] text-emerald-300">
                     <span className="h-1 w-1 animate-pulse-soft rounded-full bg-emerald-400" />
-                    Running
+                    {t.brand.hero.running}
                   </span>
                 }
                 className="w-full"

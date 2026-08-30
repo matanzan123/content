@@ -84,7 +84,9 @@ export const en = {
     rights: "All rights reserved.",
     disclaimer:
       "Placeholder branding — independent build, not affiliated with any third party.",
-    copyright: "ClipRewards ©",
+    copyright: "© {year} ClipRewards.",
+    /** The brand footer closes with the wordmark first; Creator leads with ©. */
+    brandCopyright: "ClipRewards © {year}",
   },
 
   home: {
@@ -110,6 +112,15 @@ export const en = {
       subtitle: "From your first post to your first payout, here's exactly how it works.",
       cta: "Start Earning Today",
       trust: "Trusted by 50k+ Creators",
+      step: "Step {index}",
+      /** Text drawn inside the step illustrations. */
+      art: {
+        connected: "Connected",
+        availableBalance: "Available Balance",
+        weekTotal: "{amount} this week",
+        /** Single-letter weekday initials, Monday first. */
+        weekdays: ["M", "T", "W", "T", "F", "S", "S"],
+      },
       steps: {
         oneTitle: "Post And Earn",
         oneBody: "Join campaigns, post clips, and watch your balance update live.",
@@ -136,11 +147,14 @@ export const en = {
       standOutBody: "Earn a badge that shows brands you're reliable and ready to work.",
       payoutProtection: "Payout Protection",
       protected: "Protected",
+      bank: "Bank",
+      protectionBody: "Every payout is backed and guaranteed once your work is approved.",
       latestSubmission: "Latest Submission",
+      approved: "Approved",
       earned: "Earned",
       views: "Views",
       submitTitle: "Submit With Confidence",
-      submitBody: "Every payout is backed and guaranteed once your work is approved.",
+      submitBody: "Track every submission from posted to paid, updated in real time.",
     },
     activeCreators: {
       creators: "Creators",
@@ -184,13 +198,14 @@ export const en = {
         aftershock: "Aftershock — Tour Recap Clipping",
         bloomSkincare: "Bloom Skincare — Routine Reviews",
       },
+      /** Bare durations; `ago` wraps them so only one string carries the tense. */
       posted: {
-        "3d": "3d ago",
-        "6h": "6h ago",
-        "1d": "1d ago",
-        "12h": "12h ago",
-        "2d": "2d ago",
-        "8h": "8h ago",
+        "3d": "3d",
+        "6h": "6h",
+        "1d": "1d",
+        "12h": "12h",
+        "2d": "2d",
+        "8h": "8h",
       },
     },
     stories: {
@@ -239,14 +254,86 @@ export const en = {
   },
 
   brand: {
+    /**
+     * Shared vocabulary for the mock product UI. The hero cluster, the mosaic
+     * and the case-study carousel all label the same fictional companies, so
+     * the industry, campaign and job-title words live here once rather than
+     * three times. The company names themselves stay in the components — they
+     * are proper nouns and are never translated.
+     */
+    /** Keyed by the `sector` string in src/data/brands.ts, so the dataset stays data. */
+    sectors: {
+      "Energy drinks": "Energy drinks",
+      Skincare: "Skincare",
+      "Home tech": "Home tech",
+      Headphones: "Headphones",
+      Wearables: "Wearables",
+      Streetwear: "Streetwear",
+      "Travel gear": "Travel gear",
+      "Coastal apparel": "Coastal apparel",
+      "Hot sauce": "Hot sauce",
+      Furniture: "Furniture",
+      "Plant care": "Plant care",
+      Insurance: "Insurance",
+      Florals: "Florals",
+      "Sleep & rest": "Sleep & rest",
+      Candles: "Candles",
+      "Home fragrance": "Home fragrance",
+      Grooming: "Grooming",
+      Logistics: "Logistics",
+      Outdoor: "Outdoor",
+      "Design tools": "Design tools",
+      Ceramics: "Ceramics",
+      "Audio label": "Audio label",
+      Eyewear: "Eyewear",
+      Cookware: "Cookware",
+      Furnishings: "Furnishings",
+      Wellness: "Wellness",
+      Stationery: "Stationery",
+      Pantry: "Pantry",
+      "Leather goods": "Leather goods",
+      Photography: "Photography",
+    },
+    campaigns: {
+      seasonDrop: "Season drop",
+      winterDrop: "Winter drop",
+      capsule04: "Capsule 04",
+      haloLaunch: "Halo launch",
+      streakSeason: "Streak season",
+      trailSeries: "Trail series",
+      launchFilm: "Launch film",
+      coastalEdit: "Coastal edit",
+      tallowFilm: "Tallow film",
+      nocturneLive: "Nocturne live",
+      everduskReel: "Everdusk reel",
+      brandShoot: "brand shoot",
+      lookbook: "lookbook",
+      sleepSet: "sleep set",
+      careKit: "care kit",
+      oak: "oak",
+      studioKit: "studio kit",
+      ss24: "SS-24",
+    },
+    /** Keyed by the English title in the FOUNDERS data; the company stays a name. */
+    roles: {
+      Founder: "Founder",
+      "Head of brand": "Head of brand",
+      CMO: "CMO",
+      Growth: "Growth",
+      "Brand lead": "Brand lead",
+    },
     hero: {
       headlineLead: "Reach Real Fans Fast",
       trailingWord: "Brand",
+      /** Same connector as the creator hero; kept per realm so either can change. */
+      asA: "As A",
       subtitle:
         "Launch a campaign and let independent creators turn it into organic short-form reach.",
       primaryCta: "Launch a Campaign",
       secondaryCta: "See Verified Brands",
-      verifiedRunning: "{count}+ verified brands running campaigns now",
+      /** Split so the emphasised clause keeps its own weight in both languages. */
+      verifiedRunningStrong: "{count}+ verified brands",
+      verifiedRunningTail: "running campaigns now",
       rating: "{rating} from {count}+ brand teams",
       qualifiedViews: "Qualified views delivered",
       brandsOnboard: "Verified brands onboard",
@@ -261,14 +348,16 @@ export const en = {
       approval: "Approval",
       views: "Views",
       spend: "Spend",
-      dailyViews: "Daily Views",
+      dailyViews: "Daily views",
       budget: "Budget",
       payoutReleased: "Payout released",
       toCreators: "to {count} creators",
       trustedTeams: "Trusted by teams at",
       creatorsClipping: "{count} creators clipping now",
       submittedAgo: "{count} clips · submitted {time} ago",
-      verifiedThisQuarter: "+{count} verified this quarter",
+      /** Duration token for the moderation card; `submittedAgo` supplies the tense. */
+      twoMinutes: "2 min",
+      verifiedThisQuarter: "{count} verified this quarter",
       live: "Live",
       liveCount: "{count} live",
     },
@@ -280,11 +369,40 @@ export const en = {
       justJoined: "{brand} just joined",
       brandsCount: "{count} brands",
       brandsLabel: "Brands",
-      thisMonth: "+{count} this month",
+      views: "views",
+      viewsDelivered: "views delivered",
+      avgRating: "avg brand rating",
+      avgFill: "avg campaign fill",
+      thisMonth: "{count} this month",
       cta: "Launch My Campaign",
       trust: "Trusted by 200+ Brands",
     },
-    verification: { cta: "Launch My Campaign" },
+    verification: {
+      eyebrow: "Verification",
+      heading: "Why Verification Matters",
+      subtitle: "Verification turns a listing into a brand creators trust.",
+      applicantsTitle: "Get 30% More Applicants",
+      applicantsBody:
+        "Verified briefs reach more creators and are taken more seriously, so a bigger and better-matched pool applies to every campaign.",
+      applicantsCaption: "more applicants",
+      insuranceTitle: "Guaranteed Payout Insurance",
+      insuranceBody:
+        "Every campaign you fund is insured end to end. Your spend is protected and creators know they will be paid.",
+      standOutTitle: "Stand Out Fast",
+      standOutBody:
+        "The verified mark sits on your profile and every brief, so creators know you are legitimate on sight.",
+      feesTitle: "Reduce Platform Fees",
+      feesBody:
+        "Verified brands and agencies pay a lower platform fee, so more of every budget reaches creators.",
+      feeVerified: "{rate} verified",
+      visibilityTitle: "Boost Visibility",
+      visibilityBody:
+        "Priority placement in Discover puts your campaigns in front of more creators, tracked live in one place.",
+      campaignPerformance: "Campaign performance",
+      campaignBalance: "Campaign balance",
+      cta: "Launch My Campaign",
+      trust: "Trusted by 200+ Brands",
+    },
     results: {
       badge: "Verified active brands",
       heading: "See What Brands Have Achieved",
@@ -296,6 +414,16 @@ export const en = {
       region: "Brand case studies",
       announce: "Case study {index} of {total}: {name}",
       views: "Views",
+      /** One case-study line per fictional brand; the names stay in the data. */
+      blurbs: {
+        northwind: "Performance energy brand scaled through short-form creators.",
+        orbitNine: "Streetwear label turned a lookbook into a sustained clip engine.",
+        kiteAudio: "Audio brand launched a flagship release with creator-led reviews.",
+        lumenCo: "Home tech brand built demand ahead of a retail rollout.",
+        pulseFit: "Wearables brand grew signups through daily training clips.",
+        fernway: "Travel gear brand ran a field series across six creators.",
+      },
+      totalViews: "Total views",
       spent: "Spent",
       cpm: "CPM",
       cta: "Launch My Campaign",
@@ -327,6 +455,24 @@ export const en = {
       heading: "Answers to Your Questions",
       subtitle: "What brands ask us most about budgets, verification and getting a campaign live.",
       seeAll: "See all questions",
+      items: {
+        feeQ: "What does ClipRewards charge on top of my campaign budget?",
+        feeA: "A flat platform fee on verified spend. No agency retainer, no monthly minimum, and nothing charged for creators who join a campaign but never post.",
+        flagQ: "What happens when I flag a submission?",
+        flagA: "It leaves the payable pool immediately and goes to our review team. If the flag stands, those views never bill against your budget.",
+        fakeQ: "How do you catch fake engagement?",
+        fakeA: "Every submission is scored on view velocity, audience overlap and device patterns. Anything outside normal bounds is held before it can be paid.",
+        humanQ: "Is anything actually reviewed by a person?",
+        humanA: "Yes. The automated checks decide what gets escalated, but a reviewer makes the final call on every held submission.",
+        topUpQ: "Can I add budget to a campaign that is already live?",
+        topUpA: "At any time. The brief, the creators and the submissions all stay in place — only the ceiling moves.",
+        payoutQ: "When do creators actually get paid?",
+        payoutA: "Once their views clear verification, on the next weekly payout run. You are billed against those same verified numbers, never the raw view count.",
+        badgeQ: "What does the verified brand badge mean?",
+        badgeA: "That your company details and payment method have been confirmed. Verified campaigns rank higher in Discover and draw noticeably more applicants.",
+        agencyQ: "Can an agency run campaigns on our behalf?",
+        agencyA: "Yes. A verified agency account manages several brands side by side, with separate budgets and reporting for each one.",
+      },
     },
   },
 
@@ -337,7 +483,10 @@ export const en = {
     status: "Status",
     category: "Category",
     content: "Content",
-    allOf: "All {label}",
+    /** Reset option at the top of each filter dropdown. */
+    allStatuses: "All status",
+    allCategories: "All category",
+    allContent: "All content",
     clearFilters: "Clear filters",
     featured: "Featured",
     results: "Results",
@@ -348,6 +497,8 @@ export const en = {
     previousCampaign: "Previous campaign",
     nextCampaign: "Next campaign",
     perThousandViews: "/1K views",
+    perThousand: "/1K",
+    paidOutOf: "{paid} of {total} paid out",
     emptyTitle: "No campaigns live yet",
     emptyBody:
       "Campaigns brands publish will show up here for creators to browse and join. Be the first to put one on the board.",
@@ -356,8 +507,11 @@ export const en = {
     noMatchTitle: "Nothing matches those filters",
     boardEmptyTitle: "The board is empty for now",
     noMatchBody: "Try clearing a filter or searching for something broader.",
+    boardEmptyBody: "As soon as a brand publishes a campaign it lands here. {link} about launching the first one.",
+    talkToUs: "Talk to us",
     askTeam: "ask our team directly",
-    statuses: { live: "Live", endingSoon: "Ending soon", closed: "Closed" },
+    /** Keyed by the STATUSES values in src/data/campaigns.ts. */
+    statuses: { Live: "Live", "Ending soon": "Ending soon", Closed: "Closed" },
     categories: {
       Gaming: "Gaming",
       Music: "Music",
@@ -378,7 +532,7 @@ export const en = {
 
   faqs: {
     metaTitle: "FAQs — ClipRewards",
-    badge: "Help Centre",
+    badge: "Help Center",
     heading: "Frequently Asked Questions",
     subtitle:
       "Quick answers to the questions that come up most — for the side of the marketplace you're on.",
@@ -394,13 +548,230 @@ export const en = {
     countForCreators: "{count} questions for creators",
     countForBrands: "{count} questions for brands",
     noMatchTitle: "No questions match that search",
-    noMatchBody: "Try a shorter phrase, or {link}.",
+    noMatchBody: "Try a different word, or {link}.",
     askTeam: "ask our team directly",
     stuckHeading: "Still stuck?",
     stuckBody: "If your question isn't here, send it over — a real person reads every message.",
     contactTeam: "Contact our team",
     becomeCreator: "Become a creator",
     launchCampaign: "Launch a campaign",
+
+    /** Help-centre section headings; `src/data/faqs.ts` holds only the ids. */
+    categoryTitles: {
+      earnings: "Earnings & Payouts",
+      accounts: "Account Linking & Requirements",
+      campaigns: "Campaign Participation",
+      submissions: "Video Submission Rules",
+      review: "Review Process & Status",
+      platforms: "Posting Platforms",
+      launching: "Launching a Campaign",
+      billing: "Budget & Billing",
+      creators: "Creators & Quality",
+      reviewing: "Reviewing Submissions",
+      agencies: "Agencies & Teams",
+    },
+
+    /** The 44 help-centre entries, grouped by the category they sit under. */
+    items: {
+      earnings: {
+        cut: {
+          q: "Does the platform take a cut of my earnings?",
+          a: "Yes — a flat platform fee is deducted from each creator payout. It's shown on every campaign card before you join, so the rate you see is the rate you're paid on.",
+        },
+        frequency: {
+          q: "How often do I get paid?",
+          a: "Payouts run on a weekly cycle. Each approved submission enters a short verification window, and once that window closes the earnings are released on the next run.",
+        },
+        where: {
+          q: "Where does the money actually land?",
+          a: "Into the balance of the payout account you linked during onboarding. Once it's there you withdraw on your own schedule — we don't hold it for you.",
+        },
+        missing: {
+          q: "My payout hasn't arrived. What now?",
+          a: "Two things usually explain it: your balance is still under the minimum withdrawal threshold, or the verification window on your most recent submissions hasn't closed yet. Your dashboard shows which one applies.",
+        },
+        afterEnd: {
+          q: "Do I still get paid after a campaign ends?",
+          a: "Yes. Views that accrued while the campaign was live are still counted and paid out, even if the campaign closes before the payout run.",
+        },
+        perVideoCap: {
+          q: "Is there a maximum I can earn per video?",
+          a: "Most campaigns set a per-video cap so one viral clip can't drain the whole budget. The cap is listed in the campaign brief.",
+        },
+        minViews: {
+          q: "Is there a minimum before a clip earns anything?",
+          a: "Some campaigns set a view floor a clip has to clear before it qualifies. Anything below it isn't paid, so check the brief before you post.",
+        },
+      },
+      accounts: {
+        link: {
+          q: "How do I link a social account?",
+          a: "Open your profile, go to Linked Accounts, and add the account you plan to post from. You can do this before or after joining a campaign, but a submission won't verify until the account is linked.",
+        },
+        why: {
+          q: "Why do you need my accounts linked at all?",
+          a: "It's how we confirm a submitted video is genuinely yours and read its view count. Without the link there's no way to verify a clip, so there's nothing to pay against.",
+        },
+        multiple: {
+          q: "Can I submit from more than one account?",
+          a: "Yes. Link each account separately and you can submit from all of them, including across different platforms.",
+        },
+        private: {
+          q: "Can I post from a private account?",
+          a: "No. Views on private accounts can't be independently verified, so submissions from them aren't accepted.",
+        },
+      },
+      campaigns: {
+        howItWorks: {
+          q: "How does a campaign work, start to finish?",
+          a: "Join the campaign, read its rules, post your clip to a linked account, submit the link, and wait for review. Approved clips accrue verified views and are paid on the next cycle.",
+        },
+        whoCanJoin: {
+          q: "Who can join?",
+          a: "Anyone. There's no follower requirement and no prior experience needed — plenty of campaigns are aimed squarely at new creators.",
+        },
+        followers: {
+          q: "Does my follower count change what I earn?",
+          a: "No. Payouts are calculated from verified views on the clip itself, not from the size of the account that posted it.",
+        },
+        geo: {
+          q: "Are some campaigns restricted by country?",
+          a: "Some are. Any geographic limits are stated in the campaign brief before you join.",
+        },
+        whereToFind: {
+          q: "Where do I find campaigns to join?",
+          a: "On the Discover page, which lists everything currently open along with its rate, budget, and rules.",
+        },
+        cpm: {
+          q: "What does CPM mean here?",
+          a: "It's what you earn per one thousand verified views. A campaign paying a $2 CPM pays $2 for every 1,000 views a clip is credited with.",
+        },
+      },
+      submissions: {
+        how: {
+          q: "How do I submit a video?",
+          a: "Join the campaign, make sure the posting account is linked, then use Submit Video and paste the link to your post.",
+        },
+        limit: {
+          q: "Is there a limit on how many clips I can submit?",
+          a: "No cap on quantity — submit as many as you like, as long as each one follows the campaign's rules.",
+        },
+        before: {
+          q: "Can I submit a video I posted before joining?",
+          a: "No. Only clips posted after you joined the campaign are eligible.",
+        },
+        duplicate: {
+          q: "Can the same video go to two campaigns?",
+          a: "No — each video can be submitted once. Post a separate clip for each campaign you want to enter.",
+        },
+        wrongLink: {
+          q: "I submitted the wrong link. Can I fix it?",
+          a: "Yes. Submit the correct link as a new entry; the incorrect one is dismissed at review and won't count against you.",
+        },
+      },
+      review: {
+        rejected: {
+          q: "Why was my submission rejected?",
+          a: "Almost always one of three reasons: it broke a rule in the campaign brief, the view activity looked automated, or the content wasn't appropriate for the brand. The reason appears in your dashboard.",
+        },
+        flagged: {
+          q: "What does a flagged video mean?",
+          a: "Something in the view pattern looked unusual, so the clip was routed to a person instead of being approved automatically. Flagged isn't rejected — it just takes longer.",
+        },
+        submitted: {
+          q: "My clip says 'Submitted'. Is something wrong?",
+          a: "No — that's the normal waiting state. It means the campaign owner has it in their queue and hasn't reviewed it yet.",
+        },
+        duration: {
+          q: "How long does review take?",
+          a: "Most submissions are reviewed within a few days. Flagged ones take longer because a person looks at them individually.",
+        },
+      },
+      platforms: {
+        which: {
+          q: "Which platforms can I post on?",
+          a: "It depends on the campaign — each brief lists the platforms it accepts, typically some combination of TikTok, Instagram, YouTube, and X.",
+        },
+        crossPost: {
+          q: "Can I cross-post the same clip to several platforms?",
+          a: "Only if the campaign allows it, and each post counts as its own submission from its own linked account.",
+        },
+      },
+      launching: {
+        speed: {
+          q: "How quickly can a campaign go live?",
+          a: "Usually within minutes. Once your brief and budget are submitted, the campaign appears on Discover and creators can start joining immediately.",
+        },
+        brief: {
+          q: "What belongs in the brief?",
+          a: "The assets creators can use, what they may and may not say, which platforms you accept, and any geographic limits. The tighter the brief, the less you reject later.",
+        },
+        rate: {
+          q: "Can I set my own rate?",
+          a: "Yes. You choose the total budget and the rate per thousand verified views, and you can set a per-video cap so a single clip can't consume the budget.",
+        },
+        geo: {
+          q: "Can I target specific countries?",
+          a: "Yes — geographic restrictions are set on the campaign and shown to creators before they join.",
+        },
+      },
+      billing: {
+        payingFor: {
+          q: "What am I actually paying for?",
+          a: "Verified views on submissions you approved. Rejected and flagged clips are never billed against your budget.",
+        },
+        topUp: {
+          q: "Can I add budget to a live campaign?",
+          a: "Yes, top up at any time without creating a new campaign. Creators keep submitting against the same brief.",
+        },
+        unspent: {
+          q: "What happens to budget I don't spend?",
+          a: "It stays yours. Close the campaign and the unspent balance is released back rather than being consumed.",
+        },
+        fees: {
+          q: "Are there fees on top of my budget?",
+          a: "The platform fee is taken from the creator payout side, so the budget you set is the budget that goes to distribution.",
+        },
+      },
+      creators: {
+        legitimacy: {
+          q: "How do I know creators are legitimate?",
+          a: "Every creator carries a trust score built from their verified submission history, and consistent performers earn a verified badge.",
+        },
+        gating: {
+          q: "Can I limit who joins my campaign?",
+          a: "Yes — you can gate a campaign by trust score, verification status, or region, depending on how selective you want to be.",
+        },
+        following: {
+          q: "Do creators need a big following?",
+          a: "No, and that's deliberate. You pay on verified views, so a small account that produces a clip that travels is worth exactly what it delivers.",
+        },
+      },
+      reviewing: {
+        how: {
+          q: "How do I review what creators submit?",
+          a: "Everything lands in your dashboard queue with the clip, the account it was posted from, and its current view count. You approve or reject from there.",
+        },
+        suspicious: {
+          q: "What happens to a suspicious submission?",
+          a: "It's held automatically for manual review before any payout is issued, so inflated view activity never reaches your budget.",
+        },
+        deadline: {
+          q: "Is there a deadline to review?",
+          a: "Submissions left unreviewed past the campaign's review window are handled by the default you set on the campaign — approve or reject — so creators aren't left waiting indefinitely.",
+        },
+      },
+      agencies: {
+        agency: {
+          q: "Can an agency run campaigns for us?",
+          a: "Yes. Verified agencies manage multiple brand campaigns from one account, and you keep visibility into everything they run on your behalf.",
+        },
+        seats: {
+          q: "Can several people from my team have access?",
+          a: "Yes — a brand account supports multiple seats so briefing, review, and billing don't have to sit with one person.",
+        },
+      },
+    },
   },
 
   onboarding: {
@@ -409,12 +780,13 @@ export const en = {
     gateSubtitle: "Sign in with Google to set up your profile — it takes about a minute.",
     continueWithGoogle: "Continue with Google",
     openingGoogle: "Opening Google…",
-    agreePrefix: "By continuing you agree to our",
+    /** Spacing lives in the value: Hebrew attaches "ל" to the next word with no space. */
+    agreePrefix: "By continuing you agree to our ",
     agreeTerms: "Terms",
-    agreeAnd: "and",
+    agreeAnd: " and ",
     agreePrivacy: "Privacy Policy",
     firebaseNotConfigured:
-      "Firebase isn't configured. Copy .env.example to .env.local, fill in your Firebase web-app keys, and restart the dev server.",
+      "Firebase isn't configured. Copy {example} to {local}, fill in your Firebase web-app keys, and restart the dev server.",
     signInFailed: "Sign-in failed. Please try again.",
     signInNotConfigured:
       "Google sign-in isn't configured yet — add your Firebase keys to .env.local.",
@@ -451,6 +823,10 @@ export const en = {
     doneBody: "Your creator profile is ready. Campaign matching lands here once the dashboard ships.",
     reviewAnswers: "Review my answers",
     stepOf: "Step {current} of {total}",
+    /** Profile preview card. */
+    previewName: "Your name",
+    previewUnranked: "Unranked",
+    previewJoined: "Joined {date}",
     creatorTypes: {
       "Just getting started": "Just getting started",
       Clipper: "Clipper",
@@ -472,10 +848,12 @@ export const en = {
       French: "French",
       German: "German",
       Italian: "Italian",
-      Hebrew: "Hebrew",
-      Arabic: "Arabic",
-      Hindi: "Hindi",
       Japanese: "Japanese",
+      Korean: "Korean",
+      Hindi: "Hindi",
+      Chinese: "Chinese",
+      Russian: "Russian",
+      Arabic: "Arabic",
     },
   },
 
@@ -508,7 +886,7 @@ export const en = {
     errors: {
       name: "Tell us who we're talking to.",
       email: "We need an email to reply to.",
-      emailInvalid: "That doesn't look like an email address.",
+      emailInvalid: "That doesn't look like a valid email.",
       website: "Add your company website.",
       goal: "Pick the goal closest to yours.",
       budget: "Pick a budget range.",

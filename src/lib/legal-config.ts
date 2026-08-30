@@ -37,8 +37,12 @@ export const COMPANY_REGISTRATION_NUMBER = "[COMPANY REGISTRATION NUMBER]";
 /** ISO date. Bump this whenever either document changes substantively. */
 export const LEGAL_LAST_UPDATED = "2026-08-29";
 
-export function formatLegalDate(iso: string): string {
-  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", {
+/**
+ * Presents the legal date in the reader's language. The stored value never
+ * changes — only how it is written out. English keeps the approved en-GB form.
+ */
+export function formatLegalDate(iso: string, locale: "en" | "he" = "en"): string {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString(locale === "he" ? "he-IL" : "en-GB", {
     day: "numeric",
     month: "long",
     year: "numeric",

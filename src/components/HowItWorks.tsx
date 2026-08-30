@@ -64,6 +64,7 @@ function Chip({ children, className = "" }: { children: React.ReactNode; classNa
 }
 
 function ConnectArt() {
+  const art = useT().home.howItWorks.art;
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 pb-9">
       <div className="relative flex w-full items-center justify-between px-9">
@@ -91,13 +92,14 @@ function ConnectArt() {
       </div>
       <div className="animate-float-slow flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[11px] font-bold text-ink shadow-[0_10px_24px_rgba(0,0,0,0.22)]">
         <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        Connected
+        {art.connected}
       </div>
     </div>
   );
 }
 
 function DashboardArt() {
+  const art = useT().home.howItWorks.art;
   return (
     <div className="relative flex h-full w-full items-center justify-center pb-9">
       <div className="absolute left-1/2 top-1/2 -translate-x-[86px] -translate-y-[26px] -rotate-6 rounded-xl bg-white/25 px-3.5 py-2.5 shadow-[0_8px_20px_rgba(0,0,0,0.15)] backdrop-blur-sm">
@@ -110,13 +112,13 @@ function DashboardArt() {
         </div>
       </div>
       <div className="animate-float relative left-1/2 top-1/2 -translate-x-[46px] -translate-y-1/2 rounded-xl bg-white px-4 py-3 shadow-[0_16px_32px_rgba(0,0,0,0.25)]">
-        <p className="text-[9px] font-semibold uppercase tracking-wide text-ink-soft">Available Balance</p>
-        <p className="font-[var(--font-display)] text-[19px] font-black text-ink">$2,140.00</p>
+        <p className="text-[9px] font-semibold uppercase tracking-wide text-ink-soft">{art.availableBalance}</p>
+        <p className="ltr-token font-[var(--font-display)] text-[19px] font-black text-ink">$2,140.00</p>
         <div className="mt-1.5 flex items-end gap-[3px]">
           {[6, 10, 7, 13, 9, 15].map((h, i) => (
             <span key={i} className="w-1.5 rounded-sm bg-accent-cyan" style={{ height: h }} />
           ))}
-          <span className="ml-1 text-[10px] font-bold text-emerald-700">+18%</span>
+          <span className="ltr-token ms-1 text-[10px] font-bold text-emerald-700">+18%</span>
         </div>
       </div>
     </div>
@@ -124,12 +126,13 @@ function DashboardArt() {
 }
 
 function CalendarArt() {
-  const days = ["M", "T", "W", "T", "F", "S", "S"];
+  const { weekTotal, weekdays } = useT().home.howItWorks.art;
+  const days = weekdays;
   const done = [true, true, true, true, false, false, false];
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 pb-9">
       <div className="animate-float-slow rounded-full bg-white px-3.5 py-1.5 text-[11px] font-bold text-ink shadow-[0_10px_24px_rgba(0,0,0,0.22)]">
-        $540 this week
+        {weekTotal.replace("{amount}", "$540")}
       </div>
       <div className="flex gap-1.5 rounded-xl bg-white px-3.5 py-3 shadow-[0_16px_32px_rgba(0,0,0,0.22)]">
         {days.map((d, i) => (
@@ -268,7 +271,7 @@ export function HowItWorks({ role }: { role: Role }) {
                     ].join(" ")}
                     style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-violet))" }}
                   >
-                    Step {i + 1}
+                    {t.home.howItWorks.step.replace("{index}", String(i + 1))}
                   </span>
                 </div>
                 <div className="px-6 pb-7 pt-8">

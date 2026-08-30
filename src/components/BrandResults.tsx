@@ -3,6 +3,8 @@
 import { useCallback, useId, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useI18n } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
 
 /* ==========================================================================
@@ -15,75 +17,75 @@ import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
 
 type CaseStudy = {
   brand: number;
-  blurb: string;
+  blurbKey: keyof Dictionary["brand"]["results"]["blurbs"];
   views: string;
   spent: string;
   cpm: string;
   seeds: [string, string, string];
   creator: number;
-  platform: string;
+  platformKey: keyof Dictionary["brand"]["campaigns"];
 };
 
 const CASES: CaseStudy[] = [
   {
     brand: 0,
-    blurb: "Performance energy brand scaled through short-form creators.",
+    blurbKey: "northwind",
     views: "27.3M",
     spent: "$18.4K",
     cpm: "$0.07",
     seeds: ["resNorthwindA", "resNorthwindB", "resNorthwindC"],
     creator: 14,
-    platform: "Season drop",
+    platformKey: "seasonDrop",
   },
   {
     brand: 5,
-    blurb: "Streetwear label turned a lookbook into a sustained clip engine.",
+    blurbKey: "orbitNine",
     views: "31.7M",
     spent: "$21.5K",
     cpm: "$0.06",
     seeds: ["resOrbitA", "resOrbitB", "resOrbitC"],
     creator: 49,
-    platform: "Capsule 04",
+    platformKey: "capsule04",
   },
   {
     brand: 3,
-    blurb: "Audio brand launched a flagship release with creator-led reviews.",
+    blurbKey: "kiteAudio",
     views: "12.6M",
     spent: "$9.2K",
     cpm: "$0.09",
     seeds: ["resKiteA", "resKiteB", "resKiteC"],
     creator: 36,
-    platform: "Winter drop",
+    platformKey: "winterDrop",
   },
   {
     brand: 2,
-    blurb: "Home tech brand built demand ahead of a retail rollout.",
+    blurbKey: "lumenCo",
     views: "19.1M",
     spent: "$13.8K",
     cpm: "$0.08",
     seeds: ["resLumenA", "resLumenB", "resLumenC"],
     creator: 61,
-    platform: "Halo launch",
+    platformKey: "haloLaunch",
   },
   {
     brand: 4,
-    blurb: "Wearables brand grew signups through daily training clips.",
+    blurbKey: "pulseFit",
     views: "8.4M",
     spent: "$6.1K",
     cpm: "$0.11",
     seeds: ["resPulseA", "resPulseB", "resPulseC"],
     creator: 22,
-    platform: "Streak season",
+    platformKey: "streakSeason",
   },
   {
     brand: 6,
-    blurb: "Travel gear brand ran a field series across six creators.",
+    blurbKey: "fernway",
     views: "6.9M",
     spent: "$5.4K",
     cpm: "$0.12",
     seeds: ["resFernwayA", "resFernwayB", "resFernwayC"],
     creator: 45,
-    platform: "Trail series",
+    platformKey: "trailSeries",
   },
 ];
 
@@ -104,6 +106,8 @@ function usePrefersReducedMotion() {
 /* --------------------------- the case study card ------------------------- */
 
 function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
+  const { t } = useI18n();
+  const r = t.brand.results;
   const mark = BRAND_MARKS[item.brand];
   return (
     <article
@@ -135,20 +139,20 @@ function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
           <BrandLogo mark={mark} size={44} radius={13} />
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 font-[var(--font-display)] text-[17px] font-black leading-tight tracking-tight text-white">
-              <span className="truncate">{mark.name}</span>
+              <span className="ltr-token truncate">{mark.name}</span>
               <VerifiedTick size={14} />
             </p>
-            <p className="text-[11px] leading-tight text-ink-inverse-soft">{mark.sector}</p>
+            <p className="text-[11px] leading-tight text-ink-inverse-soft">{t.brand.sectors[mark.sector as keyof typeof t.brand.sectors]}</p>
           </div>
         </div>
 
-        <p className="mt-3.5 text-[13.5px] leading-[1.5] text-ink-inverse-soft">{item.blurb}</p>
+        <p className="mt-3.5 text-[13.5px] leading-[1.5] text-ink-inverse-soft">{r.blurbs[item.blurbKey]}</p>
 
         {/* metrics */}
         <div className="mt-5 grid grid-cols-2 gap-3">
           {[
-            { k: "Total views", v: item.views },
-            { k: "Spent", v: item.spent },
+            { k: r.totalViews, v: item.views },
+            { k: r.spent, v: item.spent },
           ].map((m) => (
             <div
               key={m.k}
@@ -156,7 +160,7 @@ function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
               style={{ background: "rgba(255,255,255,0.04)" }}
             >
               <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">{m.k}</p>
-              <p className="mt-1.5 font-[var(--font-display)] text-[30px] font-black leading-none tracking-[-0.03em] text-white">
+              <p className="ltr-token mt-1.5 font-[var(--font-display)] text-[30px] font-black leading-none tracking-[-0.03em] text-white">
                 {m.v}
               </p>
             </div>
@@ -178,7 +182,7 @@ function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
             <span className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20" />
             <span className="absolute left-2.5 top-2.5 flex items-center gap-1.5 rounded-full bg-black/60 px-2 py-[3px] text-[8.5px] font-black uppercase tracking-[0.08em] text-emerald-300 backdrop-blur-sm">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              Live
+              {t.brand.hero.live}
             </span>
             <div className="absolute inset-x-2.5 bottom-2.5 flex items-center gap-2">
               <span className="relative block h-[24px] w-[24px] shrink-0 overflow-hidden rounded-full ring-2 ring-white/25">
@@ -192,7 +196,7 @@ function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
                   className="object-cover"
                 />
               </span>
-              <span className="truncate text-[10px] font-bold text-white">{item.platform}</span>
+              <span className="truncate text-[10px] font-bold text-white">{t.brand.campaigns[item.platformKey]}</span>
             </div>
           </div>
           {[item.seeds[1], item.seeds[2]].map((s) => (
@@ -229,7 +233,7 @@ function CaseCard({ item, active }: { item: CaseStudy; active: boolean }) {
             <path d="M6 18L18 6M18 6h-8M18 6v8" stroke="#07301f" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="relative font-[var(--font-display)] text-[28px] font-black leading-none tracking-[-0.02em] text-[#07301f] sm:text-[32px]">
-            {item.cpm} CPM
+            <span className="ltr-token">{item.cpm} {r.cpm}</span>
           </span>
         </div>
       </div>
@@ -247,6 +251,7 @@ const SLOT = [
 ];
 
 function Carousel() {
+  const r = useI18n().t.brand.results;
   const [active, setActive] = useState(0);
   const reduced = usePrefersReducedMotion();
   const n = CASES.length;
@@ -281,7 +286,7 @@ function Carousel() {
       tabIndex={0}
       role="group"
       aria-roledescription="carousel"
-      aria-label="Brand case studies"
+      aria-label={r.region}
       onKeyDown={onKey}
     >
       <div
@@ -325,7 +330,7 @@ function Carousel() {
       <div className="mt-7 flex items-center justify-center gap-5">
         <button
           type="button"
-          aria-label="Previous case study"
+          aria-label={r.previous}
           onClick={() => go(-1)}
           className="flex h-[46px] w-[46px] items-center justify-center rounded-full border border-white/[0.12] text-ink-inverse transition-colors hover:border-white/25 hover:bg-white/[0.07]"
           style={{ background: "color-mix(in srgb, var(--surface-inverse-raised) 80%, transparent)" }}
@@ -340,7 +345,7 @@ function Carousel() {
             <button
               key={c.seeds[0]}
               type="button"
-              aria-label={`Go to case study ${i + 1}`}
+              aria-label={r.goTo.replace("{index}", String(i + 1))}
               aria-current={i === active}
               onClick={() => setActive(i)}
               className="flex h-6 w-6 items-center justify-center rounded-full"
@@ -360,7 +365,7 @@ function Carousel() {
 
         <button
           type="button"
-          aria-label="Next case study"
+          aria-label={r.next}
           onClick={() => go(1)}
           className="flex h-[46px] w-[46px] items-center justify-center rounded-full border border-white/[0.12] text-ink-inverse transition-colors hover:border-white/25 hover:bg-white/[0.07]"
           style={{ background: "color-mix(in srgb, var(--surface-inverse-raised) 80%, transparent)" }}
@@ -372,7 +377,7 @@ function Carousel() {
       </div>
 
       <span className="sr-only" aria-live="polite">
-        Case study {active + 1} of {n}: {BRAND_MARKS[CASES[active].brand].name}
+        {r.announce.replace("{index}", String(active + 1)).replace("{total}", String(n)).replace("{name}", BRAND_MARKS[CASES[active].brand].name)}
       </span>
       <span hidden id={uid} />
     </div>
@@ -382,6 +387,7 @@ function Carousel() {
 /* -------------------------------- section -------------------------------- */
 
 function CtaBlock() {
+  const r = useI18n().t.brand.results;
   const stack: ({ face: number } | { brand: number })[] = [
     { face: 22 },
     { brand: 0 },
@@ -401,7 +407,7 @@ function CtaBlock() {
             "0 26px 58px -12px color-mix(in srgb, var(--accent) 80%, transparent), inset 0 1px 0 rgba(255,255,255,0.26)",
         }}
       >
-        Launch My Campaign
+        {r.cta}
         <svg
           width="18"
           height="18"
@@ -431,12 +437,13 @@ function CtaBlock() {
         )}
       </span>
 
-      <p className="text-[15px] font-bold text-white">Trusted by 200+ Brands</p>
+      <p className="text-[15px] font-bold text-white">{r.trust}</p>
     </div>
   );
 }
 
 export function BrandResults() {
+  const r = useI18n().t.brand.results;
   return (
     <section className="relative overflow-hidden bg-surface-inverse px-6 pb-24 pt-28">
       <span
@@ -460,17 +467,17 @@ export function BrandResults() {
           >
             <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-emerald-400" />
             <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-ink-inverse-soft">
-              Verified active brands
+              {r.badge}
             </span>
           </span>
           <h2 className="mx-auto mt-5 max-w-[22ch] text-balance font-[var(--font-display)] text-[40px] font-black leading-[0.98] tracking-[-0.03em] text-white sm:text-[56px]">
-            See What Brands Have Achieved
+            {r.heading}
           </h2>
           <p
             className="mx-auto mt-4 max-w-[52ch] text-balance text-[17px] font-medium leading-[1.55]"
             style={{ color: "color-mix(in srgb, var(--ink-inverse) 80%, var(--ink-inverse-soft))" }}
           >
-            Real campaigns, real spend, and the cost per thousand views each brand actually landed.
+            {r.subtitle}
           </p>
         </div>
 

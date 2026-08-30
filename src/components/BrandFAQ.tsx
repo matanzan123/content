@@ -2,6 +2,8 @@
 
 import { useId, useState } from "react";
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useT } from "@/i18n/provider";
 
 /* ==========================================================================
    ANSWERS TO YOUR QUESTIONS — brand realm FAQ
@@ -12,41 +14,13 @@ import { Link } from "@/i18n/Link";
    the row grows to exactly the answer's height — no measured heights, no jump
    when a long answer outgrows a guessed maximum.
    ========================================================================== */
+/** Question order is the approved page order; the text lives in the dictionary. */
+const FAQ_KEYS = ["fee", "flag", "fake", "human", "topUp", "payout", "badge", "agency"] as const;
 
-const FAQS = [
-  {
-    q: "What does ClipRewards charge on top of my campaign budget?",
-    a: "A flat platform fee on verified spend. No agency retainer, no monthly minimum, and nothing charged for creators who join a campaign but never post.",
-  },
-  {
-    q: "What happens when I flag a submission?",
-    a: "It leaves the payable pool immediately and goes to our review team. If the flag stands, those views never bill against your budget.",
-  },
-  {
-    q: "How do you catch fake engagement?",
-    a: "Every submission is scored on view velocity, audience overlap and device patterns. Anything outside normal bounds is held before it can be paid.",
-  },
-  {
-    q: "Is anything actually reviewed by a person?",
-    a: "Yes. The automated checks decide what gets escalated, but a reviewer makes the final call on every held submission.",
-  },
-  {
-    q: "Can I add budget to a campaign that is already live?",
-    a: "At any time. The brief, the creators and the submissions all stay in place — only the ceiling moves.",
-  },
-  {
-    q: "When do creators actually get paid?",
-    a: "Once their views clear verification, on the next weekly payout run. You are billed against those same verified numbers, never the raw view count.",
-  },
-  {
-    q: "What does the verified brand badge mean?",
-    a: "That your company details and payment method have been confirmed. Verified campaigns rank higher in Discover and draw noticeably more applicants.",
-  },
-  {
-    q: "Can an agency run campaigns on our behalf?",
-    a: "Yes. A verified agency account manages several brands side by side, with separate budgets and reporting for each one.",
-  },
-];
+function faqItems(t: Dictionary) {
+  const f = t.brand.faq.items;
+  return FAQ_KEYS.map((k) => ({ q: f[`${k}Q`], a: f[`${k}A`] }));
+}
 
 function Row({ q, a, open, onToggle }: { q: string; a: string; open: boolean; onToggle: () => void }) {
   const panelId = useId();
@@ -69,7 +43,7 @@ function Row({ q, a, open, onToggle }: { q: string; a: string; open: boolean; on
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex w-full items-center justify-between gap-4 px-5 py-[18px] text-left sm:px-6"
+        className="flex w-full items-center justify-between gap-4 px-5 py-[18px] text-start sm:px-6"
       >
         <span className="text-[15px] font-bold leading-snug text-white sm:text-[16px]">{q}</span>
         <span
@@ -104,7 +78,7 @@ function Row({ q, a, open, onToggle }: { q: string; a: string; open: boolean; on
       >
         <div className="overflow-hidden">
           <p
-            className="px-5 pb-5 pr-12 text-[14px] leading-[1.6] transition-opacity duration-300 sm:px-6 sm:pb-[22px] sm:pr-16"
+            className="px-5 pb-5 pe-12 text-[14px] leading-[1.6] transition-opacity duration-300 sm:px-6 sm:pb-[22px] sm:pe-16"
             style={{
               color: "color-mix(in srgb, var(--ink-inverse) 70%, var(--ink-inverse-soft))",
               opacity: open ? 1 : 0,
@@ -119,6 +93,8 @@ function Row({ q, a, open, onToggle }: { q: string; a: string; open: boolean; on
 }
 
 export function BrandFAQ() {
+  const t = useT();
+  const items = faqItems(t);
   const [openIndex, setOpenIndex] = useState<number | null>(0);
 
   return (
@@ -142,17 +118,17 @@ export function BrandFAQ() {
             }}
           >
             <span className="text-[11px] font-black uppercase tracking-[0.18em] text-[color:var(--accent-2)]">
-              FAQ
+              {t.brand.faq.badge}
             </span>
           </span>
           <h2 className="mx-auto mt-5 max-w-[16ch] text-balance font-[var(--font-display)] text-[38px] font-black leading-[1] tracking-[-0.03em] text-white sm:text-[54px]">
-            Answers to Your Questions
+            {t.brand.faq.heading}
           </h2>
           <p
             className="mx-auto mt-4 max-w-[48ch] text-balance text-[16.5px] font-medium leading-[1.55]"
             style={{ color: "color-mix(in srgb, var(--ink-inverse) 74%, var(--ink-inverse-soft))" }}
           >
-            What brands ask us most about budgets, verification and getting a campaign live.
+            {t.brand.faq.subtitle}
           </p>
         </div>
 
@@ -167,7 +143,7 @@ export function BrandFAQ() {
           }}
         >
           <div className="flex flex-col gap-2.5">
-            {FAQS.map((item, i) => (
+            {items.map((item, i) => (
               <Row
                 key={item.q}
                 q={item.q}
@@ -193,14 +169,14 @@ export function BrandFAQ() {
               className="pointer-events-none absolute inset-0 rounded-[var(--radius-token-pill)] opacity-0 transition-opacity duration-300 group-hover:opacity-100"
               style={{ boxShadow: "0 0 40px -8px color-mix(in srgb, var(--accent) 85%, transparent)" }}
             />
-            See all questions
+            {t.brand.faq.seeAll}
             <svg
               width="17"
               height="17"
               viewBox="0 0 24 24"
               fill="none"
               aria-hidden="true"
-              className="transition-transform duration-300 group-hover:translate-x-1"
+              className="dir-flip dir-flip-nudge transition-transform duration-300 group-hover:translate-x-1"
             >
               <path
                 d="M5 12h14M19 12l-6-6M19 12l-6 6"

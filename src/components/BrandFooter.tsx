@@ -1,4 +1,11 @@
+"use client";
+
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useT } from "@/i18n/provider";
+
+/** Link lists are (dictionary key, href) pairs so no label is written twice. */
+type FooterKey = keyof Dictionary["footer"];
 
 /* ==========================================================================
    BRAND FOOTER — the end of the brand page.
@@ -11,20 +18,20 @@ import { Link } from "@/i18n/Link";
    Only routes that exist are linked.
    ========================================================================== */
 
-const NAVIGATION = [
-  { label: "Discover", href: "/discover" },
-  { label: "For Creators", href: "/" },
-  { label: "For Brands", href: "/brand" },
-  { label: "FAQs", href: "/faqs" },
+const NAVIGATION: { key: FooterKey; href: string }[] = [
+  { key: "discover", href: "/discover" },
+  { key: "forCreators", href: "/" },
+  { key: "forBrands", href: "/brand" },
+  { key: "faqs", href: "/faqs" },
 ];
 
-const PAGES = [
-  { label: "Contact", href: "/contact" },
-  { label: "Sign in", href: "/login" },
-  { label: "Launch a Campaign", href: "/contact" },
-  { label: "Terms of Service", href: "/terms-of-service" },
-  { label: "Privacy Policy", href: "/privacy-policy" },
-  { label: "Accessibility", href: "/accessibility" },
+const PAGES: { key: FooterKey; href: string }[] = [
+  { key: "contact", href: "/contact" },
+  { key: "signIn", href: "/login" },
+  { key: "launchCampaign", href: "/contact" },
+  { key: "terms", href: "/terms-of-service" },
+  { key: "privacy", href: "/privacy-policy" },
+  { key: "accessibility", href: "/accessibility" },
 ];
 
 const SOCIALS = [
@@ -79,6 +86,7 @@ function FooterLink({ href, label }: { href: string; label: string }) {
 }
 
 export function BrandFooter() {
+  const t = useT();
   return (
     <footer className="relative overflow-hidden bg-[#040303]">
       <span
@@ -89,7 +97,7 @@ export function BrandFooter() {
       {/* ---------------------------- information --------------------------- */}
       <div className="relative mx-auto max-w-[1240px] px-6 pt-20 sm:pt-24">
         <div className="grid grid-cols-1 gap-12 sm:grid-cols-2 lg:grid-cols-[1.6fr_1fr_1fr_1fr]">
-          <div className="lg:pr-10">
+          <div className="lg:pe-10">
             <Link href="/brand" className="flex items-center gap-2.5">
               <span
                 className="relative flex h-[42px] w-[42px] items-center justify-center overflow-hidden rounded-[12px] text-white"
@@ -126,8 +134,7 @@ export function BrandFooter() {
               className="mt-5 max-w-[38ch] text-[14px] leading-[1.6]"
               style={{ color: "color-mix(in srgb, var(--ink-inverse) 68%, var(--ink-inverse-soft))" }}
             >
-              Launch creator campaigns, review every submission, and pay only for views that clear
-              verification. Built for brands that want reach they can audit.
+              {t.footer.brandFooterBlurb}
             </p>
 
             <span
@@ -158,13 +165,13 @@ export function BrandFooter() {
             </div>
           </div>
 
-          <Column title="Navigation">
+          <Column title={t.footer.navigation}>
             {NAVIGATION.map((item) => (
-              <FooterLink key={item.label} href={item.href} label={item.label} />
+              <FooterLink key={item.key} href={item.href} label={t.footer[item.key]} />
             ))}
           </Column>
 
-          <Column title="Socials">
+          <Column title={t.footer.socials}>
             {SOCIALS.map((s) => (
               <li key={s.label}>
                 <a
@@ -179,9 +186,9 @@ export function BrandFooter() {
             ))}
           </Column>
 
-          <Column title="Pages">
+          <Column title={t.footer.pages}>
             {PAGES.map((item) => (
-              <FooterLink key={item.label} href={item.href} label={item.label} />
+              <FooterLink key={item.key} href={item.href} label={t.footer[item.key]} />
             ))}
           </Column>
         </div>
@@ -235,10 +242,12 @@ export function BrandFooter() {
             style={{ background: "linear-gradient(180deg, rgba(4,3,3,0.55), rgba(4,3,3,0.9))" }}
           />
           <div className="relative mx-auto flex max-w-[1240px] flex-col items-center justify-between gap-2 px-6 py-6 sm:flex-row">
-            <p className="text-[13px] font-semibold text-white/85">
-              ClipRewards © {new Date().getFullYear()}
+            {/* Mark, name and year are one Latin run — isolated so bidi cannot
+                reorder them inside the Hebrew legal row. */}
+            <p className="ltr-token text-[13px] font-semibold text-white/85">
+              {t.footer.brandCopyright.replace("{year}", String(new Date().getFullYear()))}
             </p>
-            <p className="text-[13px] text-[color:var(--ink-inverse-soft)]">All rights reserved.</p>
+            <p className="text-[13px] text-[color:var(--ink-inverse-soft)]">{t.footer.rights}</p>
           </div>
         </div>
       </div>

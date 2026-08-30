@@ -1,10 +1,12 @@
 "use client";
 
+import { useT } from "@/i18n/provider";
 import { BrandOnboardingForm } from "./BrandOnboardingForm";
 import { Footer } from "./Footer";
 import { Header } from "./Header";
 
 export function ContactExperience() {
+  const t = useT().contact;
   return (
     <div className="flex flex-1 flex-col">
       <Header role="brand" />
@@ -23,16 +25,15 @@ export function ContactExperience() {
         <div className="relative mx-auto max-w-[1240px] px-6 text-center">
           <span className="inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] border border-white/10 bg-white/5 px-3.5 py-1.5 text-[12px] font-semibold text-ink-inverse-soft">
             <span className="h-1.5 w-1.5 rounded-full bg-accent-2 animate-pulse-soft" />
-            Contact
+            {t.badge}
           </span>
 
           <h1 className="mt-5 font-[var(--font-display)] text-[38px] font-black leading-[1.05] tracking-tight text-ink-inverse sm:text-[54px]">
-            Talk directly with our team
+            {t.heading}
           </h1>
 
           <p className="mx-auto mt-4 max-w-[520px] text-[15px] leading-relaxed text-ink-inverse-soft">
-            Share a few details about your brand and a campaign strategist gets back to you within
-            one business day.
+            {t.subtitle}
           </p>
         </div>
 

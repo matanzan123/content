@@ -3,7 +3,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { Templated } from "@/i18n/Templated";
+import { useT } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo, VerifiedTick, type BrandMark } from "./brand-kit";
+
+type CampaignKey = keyof Dictionary["brand"]["campaigns"];
+type CredKey = keyof Dictionary["brand"]["credibility"];
 import { FOUNDERS } from "../data/brands";
 import { VERIFIED_BRANDS_ID } from "./section-anchors";
 
@@ -31,12 +37,15 @@ function Frame({ children, className }: { children: React.ReactNode; className?:
 function LogoTile({
   mark,
   variant,
-  meta,
+  live,
 }: {
   mark: BrandMark;
   variant: "gradient" | "dark" | "outline" | "solid";
-  meta?: string;
+  live?: number;
 }) {
+  const t = useT().brand;
+  const sector = t.sectors[mark.sector as keyof typeof t.sectors];
+  const meta = live === undefined ? undefined : t.hero.liveCount.replace("{count}", String(live));
   const onColor = variant === "gradient" || variant === "solid";
   const surface =
     variant === "gradient"
@@ -127,7 +136,7 @@ function LogoTile({
                   : "font-[var(--font-display)] text-[12.5px] font-black tracking-tight",
             ].join(" ")}
           >
-            {mark.name}
+            <span className="ltr-token">{mark.name}</span>
           </p>
           <p
             className={[
@@ -135,7 +144,7 @@ function LogoTile({
               onColor ? "text-white/70" : "text-ink-inverse-soft",
             ].join(" ")}
           >
-            {meta ? `${mark.sector} · ${meta}` : mark.sector}
+            {meta ? `${sector} · ${meta}` : sector}
           </p>
         </div>
       </div>
@@ -144,6 +153,10 @@ function LogoTile({
 }
 
 function PersonTile({ img, name, role }: { img: number; name: string; role: string }) {
+  const t = useT().brand;
+  // "Founder · Northwind" — the title is copy, the company is a name.
+  const [title, company] = role.split(" · ");
+  const shown = `${t.roles[title as keyof typeof t.roles] ?? title} · ${company}`;
   return (
     <Frame>
       <Image
@@ -158,16 +171,17 @@ function PersonTile({ img, name, role }: { img: number; name: string; role: stri
       <div className="absolute inset-0 bg-gradient-to-t from-black/88 via-black/12 to-transparent" />
       <div className="absolute inset-x-0 bottom-0 p-2.5">
         <p className="flex items-center gap-1 text-[11px] font-bold leading-tight text-white">
-          <span className="truncate">{name}</span>
+          <span className="ltr-token truncate">{name}</span>
           <VerifiedTick size={10} />
         </p>
-        <p className="truncate text-[8.5px] leading-tight text-white/70">{role}</p>
+        <p className="truncate text-[8.5px] leading-tight text-white/70">{shown}</p>
       </div>
     </Frame>
   );
 }
 
-function ImageTile({ seed, brand, label }: { seed: string; brand: number; label: string }) {
+function ImageTile({ seed, brand, company, campaignKey }: { seed: string; brand: number; company: string; campaignKey: CampaignKey }) {
+  const label = `${company} · ${useT().brand.campaigns[campaignKey]}`;
   return (
     <Frame>
       <Image
@@ -188,7 +202,9 @@ function ImageTile({ seed, brand, label }: { seed: string; brand: number; label:
   );
 }
 
-function CampaignTile({ seed, brand, title, views }: { seed: string; brand: number; title: string; views: string }) {
+function CampaignTile({ seed, brand, campaignKey, views }: { seed: string; brand: number; campaignKey: CampaignKey; views: string }) {
+  const t = useT().brand;
+  const title = t.campaigns[campaignKey];
   return (
     <Frame>
       <Image
@@ -203,13 +219,13 @@ function CampaignTile({ seed, brand, title, views }: { seed: string; brand: numb
       <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/35 to-black/10" />
       <span className="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-black/60 px-1.5 py-[2px] text-[7.5px] font-black uppercase tracking-[0.08em] text-emerald-300 backdrop-blur-sm">
         <span className="h-1 w-1 animate-pulse-soft rounded-full bg-emerald-400" />
-        Live
+        {t.hero.live}
       </span>
       <div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 p-2.5">
         <BrandLogo mark={BRAND_MARKS[brand]} size={20} radius={6} />
         <div className="min-w-0">
           <p className="truncate text-[10px] font-bold leading-tight text-white">{title}</p>
-          <p className="text-[8px] leading-tight text-white/65">{views} views</p>
+          <p className="text-[8px] leading-tight text-white/65"><span className="ltr-token">{views}</span> {t.credibility.views}</p>
         </div>
       </div>
     </Frame>
@@ -217,6 +233,7 @@ function CampaignTile({ seed, brand, title, views }: { seed: string; brand: numb
 }
 
 function IdentityTile({ mark }: { mark: BrandMark }) {
+  const t = useT().brand;
   return (
     <Frame>
       <div
@@ -232,9 +249,9 @@ function IdentityTile({ mark }: { mark: BrandMark }) {
         </div>
         <div>
           <p className="truncate font-[var(--font-display)] text-[12px] font-extrabold leading-tight tracking-tight text-ink-inverse">
-            {mark.name}
+            <span className="ltr-token">{mark.name}</span>
           </p>
-          <p className="mt-0.5 truncate text-[8.5px] leading-tight text-ink-inverse-soft">{mark.sector}</p>
+          <p className="mt-0.5 truncate text-[8.5px] leading-tight text-ink-inverse-soft">{t.sectors[mark.sector as keyof typeof t.sectors]}</p>
           <div className="mt-2 flex gap-1">
             {(mark.palette ?? [mark.from, mark.to, "#2a1d12"]).map((c, i) => (
               <span
@@ -300,6 +317,7 @@ const COUNT_MAX = COUNT_START + 6;
 
 /** Ticks up occasionally, as though a brand just joined. Pauses when hidden. */
 function LiveCounter() {
+  const t = useT().brand.credibility;
   const [count, setCount] = useState(COUNT_START);
   const reduced = usePrefersReducedMotion();
 
@@ -317,7 +335,7 @@ function LiveCounter() {
 
   return (
     <p className="font-[var(--font-display)] text-[58px] font-black leading-[1] tracking-[-0.04em] text-white tabular-nums sm:text-[68px]">
-      <span className="sr-only">{count} brands</span>
+      <span className="sr-only">{t.brandsCount.replace("{count}", String(count))}</span>
       <span aria-hidden="true" className="inline-flex">
         {digits.map((d, i) => (
           <Digit key={i} value={d} reduced={reduced} />
@@ -417,7 +435,8 @@ function Column({
 }
 
 /** Small metric tile — platform activity, kept subtle and believable. */
-function MetricTile({ value, label, tone }: { value: string; label: string; tone?: "amber" | "emerald" }) {
+function MetricTile({ value, label, tone }: { value: string; label: CredKey; tone?: "amber" | "emerald" }) {
+  const shown = useT().brand.credibility[label];
   return (
     <Frame>
       <div
@@ -440,7 +459,7 @@ function MetricTile({ value, label, tone }: { value: string; label: string; tone
             {value}
           </p>
         </div>
-        <p className="text-[8.5px] font-medium leading-tight text-ink-inverse-soft">{label}</p>
+        <p className="text-[8.5px] font-medium leading-tight text-ink-inverse-soft">{shown}</p>
       </div>
     </Frame>
   );
@@ -452,19 +471,19 @@ const B = BRAND_MARKS;
 
 const logo = (i: number, h: number, live: number): ColTile => ({
   h,
-  node: <LogoTile mark={B[i]} variant={B[i].style} meta={`${live} live`} />,
+  node: <LogoTile mark={B[i]} variant={B[i].style} live={live} />,
 });
 const person = (i: number, h: number): ColTile => ({ h, node: <PersonTile {...FOUNDERS[i]} /> });
-const product = (i: number, h: number, label: string): ColTile => ({
+const product = (i: number, h: number, company: string, key: CampaignKey): ColTile => ({
   h,
-  node: <ImageTile seed={B[i].seed} brand={i} label={label} />,
+  node: <ImageTile seed={B[i].seed} brand={i} company={company} campaignKey={key} />,
 });
-const campaign = (i: number, h: number, title: string, views: string): ColTile => ({
+const campaign = (i: number, h: number, key: CampaignKey, views: string): ColTile => ({
   h,
-  node: <CampaignTile seed={`${B[i].seed}C`} brand={i} title={title} views={views} />,
+  node: <CampaignTile seed={`${B[i].seed}C`} brand={i} campaignKey={key} views={views} />,
 });
 const identity = (i: number, h: number): ColTile => ({ h, node: <IdentityTile mark={B[i]} /> });
-const metric = (h: number, value: string, label: string, tone?: "amber" | "emerald"): ColTile => ({
+const metric = (h: number, value: string, label: CredKey, tone?: "amber" | "emerald"): ColTile => ({
   h,
   node: <MetricTile value={value} label={label} tone={tone} />,
 });
@@ -473,21 +492,21 @@ const metric = (h: number, value: string, label: string, tone?: "amber" | "emera
 const COL_1: ColTile[] = [
   logo(12, 132, 6),
   person(7, 158),
-  product(13, 144, "Solace · sleep set"),
+  product(13, 144, "Solace", "sleepSet"),
   logo(14, 126, 9),
   identity(15, 138),
-  campaign(16, 130, "Tallow film", "1.4M"),
+  campaign(16, 130, "tallowFilm", "1.4M"),
   logo(17, 134, 4),
 ];
 
 const COL_2: ColTile[] = [
   person(8, 162),
   logo(6, 136, 11),
-  campaign(7, 132, "Coastal edit", "3.1M"),
+  campaign(7, 132, "coastalEdit", "3.1M"),
   identity(9, 140),
-  product(10, 150, "Vireo · care kit"),
+  product(10, 150, "Vireo", "careKit"),
   logo(11, 128, 7),
-  metric(112, "4.9", "avg brand rating"),
+  metric(112, "4.9", "avgRating"),
 ];
 
 // Inner left — sharper and brighter.
@@ -495,8 +514,8 @@ const COL_3: ColTile[] = [
   logo(0, 150, 14),
   person(0, 172),
   identity(2, 142),
-  product(7, 158, "Saltmarsh · SS-24"),
-  metric(116, "48h", "avg campaign fill"),
+  product(7, 158, "Saltmarsh", "ss24"),
+  metric(116, "48h", "avgFill"),
   logo(4, 140, 3),
   person(4, 166),
 ];
@@ -504,10 +523,10 @@ const COL_3: ColTile[] = [
 // Inner right.
 const COL_4: ColTile[] = [
   person(2, 170),
-  campaign(3, 138, "Winter drop", "4.2M"),
+  campaign(3, 138, "winterDrop", "4.2M"),
   logo(1, 148, 11),
-  product(2, 156, "Lumen Co. · brand shoot"),
-  metric(116, "27.3M", "views delivered", "emerald"),
+  product(2, 156, "Lumen Co.", "brandShoot"),
+  metric(116, "27.3M", "viewsDelivered", "emerald"),
   logo(5, 144, 9),
   person(5, 164),
 ];
@@ -515,9 +534,9 @@ const COL_4: ColTile[] = [
 const COL_5: ColTile[] = [
   logo(18, 138, 8),
   person(9, 160),
-  product(19, 148, "Cinder · studio kit"),
+  product(19, 148, "Cinder", "studioKit"),
   identity(20, 140),
-  campaign(21, 130, "Nocturne live", "2.2M"),
+  campaign(21, 130, "nocturneLive", "2.2M"),
   logo(22, 134, 5),
   person(10, 156),
 ];
@@ -526,15 +545,16 @@ const COL_5: ColTile[] = [
 const COL_6: ColTile[] = [
   identity(23, 136),
   logo(24, 128, 6),
-  product(25, 146, "Cove & Cedar · oak"),
+  product(25, 146, "Cove & Cedar", "oak"),
   person(11, 154),
   logo(26, 132, 10),
-  campaign(27, 128, "Everdusk reel", "1.9M"),
+  campaign(27, 128, "everduskReel", "1.9M"),
   logo(19, 130, 4),
 ];
 
 /** Centre anchor: the live counter, flanked by two swapping tiles the mask crops. */
 function CentreColumn() {
+  const t = useT().brand.credibility;
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3">
       <div className="h-[124px] w-full">
@@ -542,8 +562,8 @@ function CentreColumn() {
           period={9000}
           offset={2600}
           tiles={[
-            <CampaignTile key="a" seed="mosCentreA" brand={0} title="Season drop" views="27.3M" />,
-            <ImageTile key="b" seed="mosCentreB" brand={5} label="Orbit Nine · lookbook" />,
+            <CampaignTile key="a" seed="mosCentreA" brand={0} campaignKey="seasonDrop" views="27.3M" />,
+            <ImageTile key="b" seed="mosCentreB" brand={5} company="Orbit Nine" campaignKey="lookbook" />,
           ]}
         />
       </div>
@@ -585,7 +605,7 @@ function CentreColumn() {
         />
         <div className="relative flex flex-col items-center text-center">
           <LiveCounter />
-          <p className="mt-1.5 text-[10.5px] font-bold uppercase tracking-[0.22em] text-ink-inverse-soft">Brands</p>
+          <p className="mt-1.5 text-[10.5px] font-bold uppercase tracking-[0.22em] text-ink-inverse-soft">{t.brandsLabel}</p>
           {/* the mark row needs real width — below sm the centre column is too narrow for it */}
           <div className="mt-3 w-full border-t border-white/[0.08] pt-3">
             <div className="hidden items-center justify-center gap-1.5 sm:flex">
@@ -593,11 +613,11 @@ function CentreColumn() {
                 <BrandLogo key={i} mark={B[i]} size={16} radius={5} />
               ))}
               <span className="ml-0.5 whitespace-nowrap text-[9px] font-semibold text-ink-inverse-soft">
-                +18 this month
+                {t.thisMonth.replace("{count}", "+18")}
               </span>
             </div>
             <p className="text-center text-[9.5px] font-semibold text-ink-inverse-soft sm:hidden">
-              <span className="text-ink-inverse">+18</span> this month
+              <Templated template={t.thisMonth} value="+18" className="text-ink-inverse" />
             </p>
           </div>
         </div>
@@ -609,7 +629,7 @@ function CentreColumn() {
           offset={5200}
           tiles={[
             <PersonTile key="a" {...FOUNDERS[6]} />,
-            <LogoTile key="b" mark={B[3]} variant="gradient" meta="8 live" />,
+            <LogoTile key="b" mark={B[3]} variant="gradient" live={8} />,
           ]}
         />
       </div>
@@ -676,6 +696,7 @@ function Mosaic() {
 
 /** Rotating "just joined" line — the section's one overt sign of live activity. */
 function ActivityTicker() {
+  const t = useT().brand.credibility;
   const picks = [6, 13, 18, 9, 24, 20];
   const [i, setI] = useState(0);
   const reduced = usePrefersReducedMotion();
@@ -723,7 +744,7 @@ function ActivityTicker() {
               key={p}
               className="h-[16px] shrink-0 truncate whitespace-nowrap text-[12px] leading-4 text-ink-inverse-soft"
             >
-              <span className="font-semibold text-ink-inverse">{B[p].name}</span> just joined
+              <Templated template={t.justJoined} token="brand" value={B[p].name} className="font-semibold text-ink-inverse" />
             </span>
           ))}
         </span>
@@ -767,6 +788,7 @@ function BrandAvatarRow() {
 }
 
 export function BrandCredibility() {
+  const t = useT().brand.credibility;
   return (
     <section
       id={VERIFIED_BRANDS_ID}
@@ -839,17 +861,17 @@ export function BrandCredibility() {
       <div className="relative mx-auto max-w-[1240px]">
         <div className="text-center">
           <p className="font-[var(--font-display)] text-[11px] font-bold uppercase tracking-[0.2em] text-ink-inverse-soft/75">
-            Verified Network
+            {t.eyebrow}
           </p>
           <h2 className="mx-auto mt-4 max-w-[18ch] text-balance font-[var(--font-display)] text-[42px] font-black leading-[0.97] tracking-[-0.03em] text-white sm:text-[58px] lg:max-w-[30ch]">
-            Join 200+ Profitable Brands
+            {t.heading}
           </h2>
           <p
             className="mx-auto mt-4 max-w-[52ch] text-balance text-[16.5px] font-medium leading-[1.6]"
             style={{ color: "color-mix(in srgb, var(--ink-inverse) 74%, var(--ink-inverse-soft))" }}
           >
-            Verified brands win more deals and build more trust — stronger placement, more
-            applicants, and creators who actually ship.
+            {t.subtitle}
+
           </p>
           <div className="mt-6 flex justify-center">
             <ActivityTicker />
@@ -870,7 +892,7 @@ export function BrandCredibility() {
                 "0 22px 52px -12px color-mix(in srgb, var(--accent) 75%, transparent), inset 0 1px 0 rgba(255,255,255,0.24)",
             }}
           >
-            Launch My Campaign
+            {t.cta}
             <svg
               width="17"
               height="17"
@@ -890,7 +912,7 @@ export function BrandCredibility() {
           </Link>
 
           <BrandAvatarRow />
-          <p className="text-[14px] font-bold text-white">Trusted by 200+ Brands</p>
+          <p className="text-[14px] font-bold text-white">{t.trust}</p>
         </div>
       </div>
     </section>

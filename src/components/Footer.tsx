@@ -1,19 +1,26 @@
+"use client";
+
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useT } from "@/i18n/provider";
 import type { Role } from "./RoleToggle";
 
-const NAV = [
-  { label: "Discover", href: "/discover" },
-  { label: "Become a Creator", href: "/onboarding?type=creator" },
-  { label: "For Brands", href: "/brand" },
-  { label: "Blog", href: "/blog" },
+/** Link lists are (dictionary key, href) pairs so no label is written twice. */
+type FooterKey = keyof Dictionary["footer"];
+
+const NAV: { key: FooterKey; href: string }[] = [
+  { key: "discover", href: "/discover" },
+  { key: "becomeCreator", href: "/onboarding?type=creator" },
+  { key: "forBrands", href: "/brand" },
+  { key: "blog", href: "/blog" },
 ];
 
-const PAGES = [
-  { label: "Privacy Policy", href: "/privacy-policy" },
-  { label: "Terms of Service", href: "/terms-of-service" },
-  { label: "Accessibility", href: "/accessibility" },
-  { label: "Brand Kit", href: "/brand-kit" },
-  { label: "Careers", href: "/careers" },
+const PAGES: { key: FooterKey; href: string }[] = [
+  { key: "privacy", href: "/privacy-policy" },
+  { key: "terms", href: "/terms-of-service" },
+  { key: "accessibility", href: "/accessibility" },
+  { key: "brandKit", href: "/brand-kit" },
+  { key: "careers", href: "/careers" },
 ];
 
 const SOCIALS = [
@@ -44,13 +51,12 @@ function SocialIcon({ label }: { label: string }) {
 }
 
 export function Footer({ role }: { role: Role }) {
+  const t = useT();
   const isBrand = role === "brand";
   const cta = isBrand
-    ? { label: "Launch a Campaign", href: "/contact" }
-    : { label: "Become a Creator", href: "/onboarding?type=creator" };
-  const description = isBrand
-    ? "Launch campaigns, discover creators, and pay only for verified results — trusted by 200+ growing brands scaling organic reach."
-    : "Create, post, and get paid for content that performs — trusted by tens of thousands of creators and hundreds of growing brands.";
+    ? { label: t.footer.launchCampaign, href: "/contact" }
+    : { label: t.footer.becomeCreator, href: "/onboarding?type=creator" };
+  const description = isBrand ? t.footer.brandBlurb : t.footer.creatorBlurb;
 
   return (
     <footer className="relative overflow-hidden bg-surface-inverse pt-20">
@@ -77,7 +83,7 @@ export function Footer({ role }: { role: Role }) {
               className="mt-5 inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] bg-white px-5 py-2.5 text-[13px] font-bold text-ink transition-colors hover:bg-white/90"
             >
               {cta.label}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" className="dir-flip" aria-hidden="true">
                 <path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </Link>
@@ -91,12 +97,12 @@ export function Footer({ role }: { role: Role }) {
           </div>
 
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">Navigation</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">{t.footer.navigation}</p>
             <ul className="mt-4 space-y-2.5">
               {NAV.map((item) => (
-                <li key={item.label}>
+                <li key={item.key}>
                   <Link href={item.href} className="text-[13.5px] text-ink-inverse-soft transition-colors hover:text-ink-inverse">
-                    {item.label}
+                    {t.footer[item.key]}
                   </Link>
                 </li>
               ))}
@@ -104,12 +110,12 @@ export function Footer({ role }: { role: Role }) {
           </div>
 
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">Pages</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">{t.footer.pages}</p>
             <ul className="mt-4 space-y-2.5">
               {PAGES.map((item) => (
-                <li key={item.label}>
+                <li key={item.key}>
                   <Link href={item.href} className="text-[13.5px] text-ink-inverse-soft transition-colors hover:text-ink-inverse">
-                    {item.label}
+                    {t.footer[item.key]}
                   </Link>
                 </li>
               ))}
@@ -117,20 +123,27 @@ export function Footer({ role }: { role: Role }) {
           </div>
 
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">Status</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-ink-inverse-soft">{t.footer.status}</p>
             <div className="mt-4 flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-[13.5px] text-ink-inverse-soft">All systems operational</span>
+              <span className="text-[13.5px] text-ink-inverse-soft">{t.footer.allSystems}</span>
             </div>
             <p className="mt-4 text-[13.5px] text-ink-inverse-soft">
-              {isBrand ? "180+ campaigns live right now" : "6,200+ creators active right now"}
+              {isBrand ? t.footer.campaignsLive : t.footer.creatorsActive}
             </p>
           </div>
         </div>
 
         <div className="flex flex-col items-start justify-between gap-3 border-t border-white/10 py-6 sm:flex-row sm:items-center">
-          <p className="text-[12.5px] text-ink-inverse-soft">© {new Date().getFullYear()} ClipRewards. All rights reserved.</p>
-          <p className="text-[12.5px] text-ink-inverse-soft">Placeholder branding — independent build, not affiliated with any third party.</p>
+          {/* The mark and year are one Latin run: isolating them keeps "©" and
+              the digits in logical order inside the Hebrew sentence. */}
+          <p className="text-[12.5px] text-ink-inverse-soft">
+            <span className="ltr-token">
+              {t.footer.copyright.replace("{year}", String(new Date().getFullYear()))}
+            </span>{" "}
+            {t.footer.rights}
+          </p>
+          <p className="text-[12.5px] text-ink-inverse-soft">{t.footer.disclaimer}</p>
         </div>
       </div>
 

@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "i18n:check": "node scripts/i18n-check.mjs",
+    "i18n:legal": "node scripts/legal-parity.mjs"
   },
   "dependencies": {
     "firebase": "^12.18.0",

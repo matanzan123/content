@@ -1,4 +1,7 @@
+"use client";
+
 import Image from "next/image";
+import { useT } from "@/i18n/provider";
 import type { Role } from "./RoleToggle";
 
 const COPY: Record<Role, { eyebrow: string; heading: string; subtitle: string }> = {
@@ -55,7 +58,8 @@ function Badge({ children }: { children: React.ReactNode }) {
 }
 
 function TierTrack({ isBrand }: { isBrand: boolean }) {
-  const tiers = ["New", "Rising", "Trusted", "Elite"];
+  const { tiers: tier } = useT().home.trust;
+  const tiers = [tier.new, tier.rising, tier.trusted, tier.elite];
   return (
     <div className="mt-4 flex items-center gap-1.5">
       {tiers.map((t, i) => (
@@ -81,6 +85,7 @@ function TierTrack({ isBrand }: { isBrand: boolean }) {
 }
 
 function TrustScoreCard({ isBrand }: { isBrand: boolean }) {
+  const t = useT().home.trust;
   const value = 94;
   const circumference = 2 * Math.PI * 52;
   const offset = circumference * (1 - value / 100);
@@ -88,10 +93,10 @@ function TrustScoreCard({ isBrand }: { isBrand: boolean }) {
     <Card isBrand={isBrand} className="sm:min-h-[380px]">
       <div className="absolute inset-0" style={DOT_TEXTURE} />
       <div className="relative flex items-start justify-between">
-        <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Trust Score</p>
+        <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.trustScore}</p>
         <Badge>
           <span className="h-1.5 w-1.5 rounded-full bg-white" />
-          Trusted
+          {t.trusted}
         </Badge>
       </div>
 
@@ -134,17 +139,19 @@ function TrustScoreCard({ isBrand }: { isBrand: boolean }) {
         </div>
         <div>
           <p className={["text-[13.5px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Maya Chen</p>
-          <p className={["text-[11.5px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>12 campaigns completed</p>
-          <p className="mt-1 text-[11.5px] font-bold text-accent-ink">3 to reach Elite</p>
+          <p className={["text-[11.5px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
+            {t.campaignsCompleted.replace("{count}", "12")}
+          </p>
+          <p className="mt-1 text-[11.5px] font-bold text-accent-ink">{t.toElite.replace("{count}", "3")}</p>
         </div>
       </div>
 
       <TierTrack isBrand={isBrand} />
 
       <div className="relative mt-6">
-        <h3 className={["text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Grow Your Trust Score</h3>
+        <h3 className={["text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.growTitle}</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
-          Every approved submission raises your score and unlocks better campaigns.
+          {t.growBody}
         </p>
       </div>
     </Card>
@@ -152,6 +159,7 @@ function TrustScoreCard({ isBrand }: { isBrand: boolean }) {
 }
 
 function VerifiedCard({ isBrand }: { isBrand: boolean }) {
+  const t = useT().home.trust;
   return (
     <Card isBrand={isBrand}>
       <div className="absolute inset-0" style={DOT_TEXTURE} />
@@ -174,11 +182,13 @@ function VerifiedCard({ isBrand }: { isBrand: boolean }) {
             unoptimized
             className="h-[22px] w-[22px] rounded-full object-cover"
           />
-          <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Jordan Ray · Verified</p>
+          <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
+            {t.verifiedName.replace("{name}", "Jordan Ray")}
+          </p>
         </div>
-        <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Stand Out As Reliable</h3>
+        <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.standOutTitle}</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
-          Earn a badge that shows brands you&apos;re reliable and ready to work.
+          {t.standOutBody}
         </p>
       </div>
     </Card>
@@ -186,6 +196,7 @@ function VerifiedCard({ isBrand }: { isBrand: boolean }) {
 }
 
 function ProtectionCard({ isBrand }: { isBrand: boolean }) {
+  const t = useT().home.trust;
   return (
     <Card isBrand={isBrand}>
       <div className="absolute inset-0" style={DOT_TEXTURE} />
@@ -205,18 +216,18 @@ function ProtectionCard({ isBrand }: { isBrand: boolean }) {
             </svg>
           </div>
         </div>
-        <p className={["mt-3 text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Protected</p>
+        <p className={["mt-3 text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.protected}</p>
         <div className={["mt-2 flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-semibold", isBrand ? "bg-white/5 text-ink-inverse-soft" : "bg-surface-sunken text-ink-soft"].join(" ")}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
             <rect x="3" y="7" width="18" height="12" rx="2.5" stroke="currentColor" strokeWidth="2" />
             <path d="M3 11H21" stroke="currentColor" strokeWidth="2" />
           </svg>
-          Bank •••• 4821
-          <span className="font-black text-emerald-700">$1,240.00</span>
+          {t.bank} <span className="ltr-token">•••• 4821</span>
+          <span className="ltr-token font-black text-emerald-700">$1,240.00</span>
         </div>
-        <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Payout Protection</h3>
+        <h3 className={["mt-3 text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.payoutProtection}</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
-          Every payout is backed and guaranteed once your work is approved.
+          {t.protectionBody}
         </p>
       </div>
     </Card>
@@ -224,16 +235,17 @@ function ProtectionCard({ isBrand }: { isBrand: boolean }) {
 }
 
 function SubmissionCard({ isBrand }: { isBrand: boolean }) {
+  const t = useT().home.trust;
   return (
     <Card isBrand={isBrand} className="sm:min-h-[380px]">
       <div className="absolute inset-0" style={DOT_TEXTURE} />
       <div className="relative flex items-start justify-between">
-        <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Latest Submission</p>
+        <p className={["text-[13px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.latestSubmission}</p>
         <Badge>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M5 13L10 18L19 7" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          Approved
+          {t.approved}
         </Badge>
       </div>
 
@@ -262,12 +274,12 @@ function SubmissionCard({ isBrand }: { isBrand: boolean }) {
         </div>
         <div className="flex flex-1 flex-col justify-center gap-2">
           <div className="flex items-baseline justify-between">
-            <span className={["text-[11px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>Views</span>
-            <span className={["font-[var(--font-display)] text-[15px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>128.4K</span>
+            <span className={["text-[11px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>{t.views}</span>
+            <span className={["ltr-token font-[var(--font-display)] text-[15px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>128.4K</span>
           </div>
           <div className="flex items-baseline justify-between">
-            <span className={["text-[11px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>Earned</span>
-            <span className="font-[var(--font-display)] text-[15px] font-extrabold text-emerald-700">$212.40</span>
+            <span className={["text-[11px]", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>{t.earned}</span>
+            <span className="ltr-token font-[var(--font-display)] text-[15px] font-extrabold text-emerald-700">$212.40</span>
           </div>
           <div className={["h-1.5 rounded-full", isBrand ? "bg-white/10" : "bg-surface-sunken"].join(" ")}>
             <div className="h-full w-4/5 rounded-full" style={{ background: "linear-gradient(90deg, var(--accent), var(--accent-violet))" }} />
@@ -276,9 +288,9 @@ function SubmissionCard({ isBrand }: { isBrand: boolean }) {
       </div>
 
       <div className="relative mt-6">
-        <h3 className={["text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>Submit With Confidence</h3>
+        <h3 className={["text-[17px] font-extrabold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>{t.submitTitle}</h3>
         <p className={["mt-1.5 text-[13.5px] leading-relaxed", isBrand ? "text-ink-inverse-soft" : "text-ink-soft"].join(" ")}>
-          Track every submission from posted to paid, updated in real time.
+          {t.submitBody}
         </p>
       </div>
     </Card>
@@ -286,8 +298,13 @@ function SubmissionCard({ isBrand }: { isBrand: boolean }) {
 }
 
 export function TrustSection({ role }: { role: Role }) {
-  const copy = COPY[role];
+  const t = useT();
   const isBrand = role === "brand";
+  // Only the creator realm is localized so far; the brand copy still comes
+  // from COPY until the brand-home pass migrates it.
+  const copy = isBrand
+    ? COPY.brand
+    : { eyebrow: t.home.trust.eyebrow, heading: t.home.trust.heading, subtitle: t.home.trust.subtitle };
 
   return (
     <section

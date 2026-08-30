@@ -24,7 +24,7 @@ export default async function OnboardingPage({ params }: Params) {
         {/* These pages deliberately have no Header, but someone who lands here
             directly still has to be able to change language. */}
         <div className="mb-6 flex justify-end">
-          <LanguageSelector />
+          <LanguageSelector fullNames />
         </div>
         <AuthGate title={t.onboarding.gateTitle} subtitle={t.onboarding.gateSubtitle}>
           <OnboardingWizard />

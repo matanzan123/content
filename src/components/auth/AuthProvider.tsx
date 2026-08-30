@@ -17,12 +17,17 @@ import {
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase";
 
+/** Keys into `onboarding` in the dictionaries. */
+export type AuthErrorKey = "signInNotConfigured" | "unauthorizedDomain" | "signInFailed";
+
 type AuthValue = {
   user: User | null;
   /** True until the first onAuthStateChanged callback settles. */
   loading: boolean;
   configured: boolean;
-  error: string | null;
+  /** Stable key, not a sentence: AuthGate translates it at render time so the
+   *  message follows a language switch and the provider stays locale-neutral. */
+  error: AuthErrorKey | null;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
 };
@@ -32,7 +37,7 @@ const AuthContext = createContext<AuthValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(isFirebaseConfigured);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AuthErrorKey | null>(null);
 
   useEffect(() => {
     // When Firebase isn't configured `loading` already starts false, so there
@@ -49,7 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     const auth = getFirebaseAuth();
     if (!auth) {
-      setError("Google sign-in isn't configured yet — add your Firebase keys to .env.local.");
+      setError("signInNotConfigured");
       return;
     }
     const provider = new GoogleAuthProvider();
@@ -61,8 +66,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") return;
       setError(
         code === "auth/unauthorized-domain"
-          ? "This domain isn't authorized in your Firebase project's Authentication settings."
-          : "Sign-in failed. Please try again."
+          ? "unauthorizedDomain"
+          : "signInFailed"
       );
     }
   }, []);

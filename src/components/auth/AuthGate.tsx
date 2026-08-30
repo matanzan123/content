@@ -2,6 +2,7 @@
 
 import { Link } from "@/i18n/Link";
 import { useAuth } from "./AuthProvider";
+import { useT } from "@/i18n/provider";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 
 /**
@@ -19,6 +20,7 @@ export function AuthGate({
   children: React.ReactNode;
 }) {
   const { user, loading, configured, error } = useAuth();
+  const t = useT().onboarding;
 
   if (loading) {
     return (
@@ -58,24 +60,41 @@ export function AuthGate({
         <GoogleSignInButton />
       </div>
 
-      {error && <p className="mt-4 text-[13px] font-medium text-red-600">{error}</p>}
-
-      {!configured && (
-        <p className="mt-4 rounded-[var(--radius-token-md)] bg-surface-sunken px-4 py-3 text-left text-[12.5px] leading-relaxed text-ink-soft">
-          Firebase isn&apos;t configured. Copy <code className="font-mono">.env.example</code> to{" "}
-          <code className="font-mono">.env.local</code>, fill in your Firebase web-app keys, and
-          restart the dev server.
+      {error && (
+        <p role="alert" className="mt-4 text-[13px] font-medium text-red-600">
+          {t[error]}
         </p>
       )}
 
+      {!configured && (
+        <p className="mt-4 rounded-[var(--radius-token-md)] bg-surface-sunken px-4 py-3 text-start text-[12.5px] leading-relaxed text-ink-soft">
+          {/* The two filenames keep their monospace treatment in both languages. */}
+          {(() => {
+            const [lead, rest = ""] = t.firebaseNotConfigured.split("{example}");
+            const [mid, tail = ""] = rest.split("{local}");
+            return (
+              <>
+                {lead}
+                <code className="ltr-token font-mono">.env.example</code>
+                {mid}
+                <code className="ltr-token font-mono">.env.local</code>
+                {tail}
+              </>
+            );
+          })()}
+        </p>
+      )}
+
+      {/* The spacing around each part comes from the dictionary, because Hebrew
+          attaches "ל" straight onto the next word where English needs a space. */}
       <p className="mt-6 text-[12.5px] leading-relaxed text-ink-soft">
-        By continuing you agree to our{" "}
+        {t.agreePrefix}
         <Link href="/terms-of-service" className="font-medium text-ink underline underline-offset-2">
-          Terms
-        </Link>{" "}
-        and{" "}
+          {t.agreeTerms}
+        </Link>
+        {t.agreeAnd}
         <Link href="/privacy-policy" className="font-medium text-ink underline underline-offset-2">
-          Privacy Policy
+          {t.agreePrivacy}
         </Link>
         .
       </p>

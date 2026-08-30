@@ -38,9 +38,11 @@ function loadDictionary(file, exportName) {
   const js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText;
-  const module = { exports: {} };
-  new Function("module", "exports", js)(module, module.exports);
-  return module.exports[exportName];
+  // Named `mod`, not `module`: Next lints against shadowing the CommonJS global,
+  // and the transpiled dictionary only cares about the two arguments below.
+  const mod = { exports: {} };
+  new Function("module", "exports", js)(mod, mod.exports);
+  return mod.exports[exportName];
 }
 
 const dir = path.resolve("src/i18n/dictionaries");
@@ -53,7 +55,10 @@ const SHARED_ON_PURPOSE = new Set([
   "brand.results.cpm",
   "home.hero.ugc",
   "home.campaigns.perThousand",
+  "discover.perThousand",
   "footer.copyright",
+  "footer.brandCopyright",
+  "brand.campaigns.ss24",
   "contact.emailPlaceholder",
   "contact.websitePlaceholder",
   "onboarding.referralSources.TikTok",

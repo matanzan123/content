@@ -15,9 +15,16 @@ import { useI18n } from "@/i18n/provider";
  */
 export function LanguageSelector({
   isBrand = false,
+  fullNames = false,
   className = "",
 }: {
   isBrand?: boolean;
+  /**
+   * Spells each language out ("EN | עברית") instead of the compact pair the
+   * header uses. Login and onboarding have no Header to give the control
+   * context, so there the name has to carry it on its own.
+   */
+  fullNames?: boolean;
   className?: string;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -56,8 +63,17 @@ export function LanguageSelector({
                   : "text-ink-soft hover:text-ink",
             ].join(" ")}
           >
-            <span aria-hidden="true">{LOCALE_LABELS[code].short}</span>
-            <span className="sr-only">{LOCALE_LABELS[code].name}</span>
+            {/* "EN | עברית": the Latin code is the universally read token, while
+                the Hebrew name is spelled out. Either way the accessible name
+                is the full language name. */}
+            {fullNames && code !== "en" ? (
+              LOCALE_LABELS[code].name
+            ) : (
+              <>
+                <span aria-hidden="true">{LOCALE_LABELS[code].short}</span>
+                <span className="sr-only">{LOCALE_LABELS[code].name}</span>
+              </>
+            )}
           </button>
         );
       })}

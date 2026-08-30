@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useT } from "@/i18n/provider";
 import { useAuth } from "./AuthProvider";
 
 function GoogleMark() {
@@ -26,7 +27,8 @@ function GoogleMark() {
   );
 }
 
-export function GoogleSignInButton({ label = "Continue with Google" }: { label?: string }) {
+export function GoogleSignInButton({ label }: { label?: string }) {
+  const t = useT().onboarding;
   const { signInWithGoogle, configured } = useAuth();
   const [busy, setBusy] = useState(false);
 
@@ -47,7 +49,7 @@ export function GoogleSignInButton({ label = "Continue with Google" }: { label?:
       className="inline-flex w-full items-center justify-center gap-3 rounded-[var(--radius-token-pill)] border border-line bg-surface px-6 py-3.5 text-[14.5px] font-semibold text-ink shadow-[var(--shadow-card)] transition-colors hover:bg-surface-sunken disabled:cursor-not-allowed disabled:opacity-60"
     >
       <GoogleMark />
-      {busy ? "Opening Google…" : label}
+      {busy ? t.openingGoogle : (label ?? t.continueWithGoogle)}
     </button>
   );
 }

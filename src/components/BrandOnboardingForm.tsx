@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { Templated } from "@/i18n/Templated";
+import { useT } from "@/i18n/provider";
 
 const GOALS = [
   "Brand awareness at scale",
@@ -29,15 +32,15 @@ type Fields = {
 
 const EMPTY: Fields = { name: "", email: "", website: "", goal: "", budget: "" };
 
-function validate(values: Fields) {
+function validate(values: Fields, e: Dictionary["contact"]["errors"]) {
   const errors: Partial<Record<keyof Fields, string>> = {};
-  if (!values.name.trim()) errors.name = "Tell us who we're talking to.";
-  if (!values.email.trim()) errors.email = "We need an email to reply to.";
+  if (!values.name.trim()) errors.name = e.name;
+  if (!values.email.trim()) errors.email = e.email;
   else if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(values.email.trim()))
-    errors.email = "That doesn't look like a valid email.";
-  if (!values.website.trim()) errors.website = "Add your company website.";
-  if (!values.goal) errors.goal = "Pick the goal closest to yours.";
-  if (!values.budget) errors.budget = "Pick a budget range.";
+    errors.email = e.emailInvalid;
+  if (!values.website.trim()) errors.website = e.website;
+  if (!values.goal) errors.goal = e.goal;
+  if (!values.budget) errors.budget = e.budget;
   return errors;
 }
 
@@ -48,13 +51,14 @@ const CHEVRON_BG =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b5d68' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\")";
 
 function Label({ htmlFor, children }: { htmlFor: string; children: React.ReactNode }) {
+  const required = useT().common.required;
   return (
     <label htmlFor={htmlFor} className="block text-[13px] font-semibold text-ink">
       {children}{" "}
       <span className="text-accent" aria-hidden="true">
         *
       </span>
-      <span className="sr-only">(required)</span>
+      <span className="sr-only">{required}</span>
     </label>
   );
 }
@@ -74,6 +78,7 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 }
 
 export function BrandOnboardingForm() {
+  const t = useT().contact;
   const [values, setValues] = useState<Fields>(EMPTY);
   const [errors, setErrors] = useState<Partial<Record<keyof Fields, string>>>({});
   const [wantsAgency, setWantsAgency] = useState(false);
@@ -88,7 +93,7 @@ export function BrandOnboardingForm() {
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const nextErrors = validate(values);
+    const nextErrors = validate(values, t.errors);
     setErrors(nextErrors);
     const firstBad = (Object.keys(nextErrors) as (keyof Fields)[])[0];
     if (firstBad) {
@@ -114,12 +119,17 @@ export function BrandOnboardingForm() {
           </svg>
         </span>
         <h3 className="mt-5 font-[var(--font-display)] text-[24px] font-extrabold tracking-tight text-ink">
-          Thanks, {values.name.trim().split(" ")[0]} — we&apos;ve got it.
+          {t.successTitle.replace("{name}", values.name.trim().split(" ")[0])}
         </h3>
         <p className="mt-2.5 max-w-sm text-[14px] leading-relaxed text-ink-soft">
-          A campaign strategist will reply to{" "}
-          <span className="font-semibold text-ink">{values.email.trim()}</span> within one business
-          day{wantsAgency ? ", along with a matched Verified Agency." : "."}
+          {/* The address is a Latin run inside a Hebrew sentence — Templated
+              gives it its own LTR isolation as well as its weight. */}
+          <Templated
+            template={t.successBody.replace("{agency}", wantsAgency ? t.successAgency : "")}
+            token="email"
+            value={values.email.trim()}
+            className="font-semibold text-ink"
+          />
         </p>
         <button
           type="button"
@@ -130,7 +140,7 @@ export function BrandOnboardingForm() {
           }}
           className="mt-7 rounded-[var(--radius-token-pill)] border border-line px-5 py-2.5 text-[13px] font-semibold text-ink transition-colors hover:bg-surface-sunken"
         >
-          Submit another request
+          {t.submitAnother}
         </button>
       </div>
     );
@@ -140,21 +150,21 @@ export function BrandOnboardingForm() {
     <form noValidate onSubmit={handleSubmit} className="px-6 py-10 sm:px-10 sm:py-12">
       <div className="mx-auto max-w-[460px]">
         <h2 className="font-[var(--font-display)] text-[22px] font-extrabold tracking-tight text-ink">
-          Brand Onboarding
+          {t.formTitle}
         </h2>
         <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-          Tell us what you&apos;re launching and we&apos;ll map the right creator mix for it.
+          {t.formSubtitle}
         </p>
 
         <div className="mt-7 space-y-5">
           <div>
-            <Label htmlFor="name">Name</Label>
+            <Label htmlFor="name">{t.name}</Label>
             <input
               id="name"
               name="name"
               type="text"
               autoComplete="name"
-              placeholder="Jordan Reyes"
+              placeholder={t.namePlaceholder}
               value={values.name}
               onChange={update("name")}
               required
@@ -166,13 +176,13 @@ export function BrandOnboardingForm() {
           </div>
 
           <div>
-            <Label htmlFor="email">Company Email</Label>
+            <Label htmlFor="email">{t.email}</Label>
             <input
               id="email"
               name="email"
               type="email"
               autoComplete="email"
-              placeholder="you@company.com"
+              placeholder={t.emailPlaceholder} dir="ltr"
               value={values.email}
               onChange={update("email")}
               required
@@ -184,13 +194,13 @@ export function BrandOnboardingForm() {
           </div>
 
           <div>
-            <Label htmlFor="website">Company Website</Label>
+            <Label htmlFor="website">{t.website}</Label>
             <input
               id="website"
               name="website"
               type="url"
               autoComplete="url"
-              placeholder="https://company.com"
+              placeholder={t.websitePlaceholder} dir="ltr"
               value={values.website}
               onChange={update("website")}
               required
@@ -202,7 +212,7 @@ export function BrandOnboardingForm() {
           </div>
 
           <div>
-            <Label htmlFor="goal">What Are Your Goals</Label>
+            <Label htmlFor="goal">{t.goal}</Label>
             <select
               id="goal"
               name="goal"
@@ -214,10 +224,10 @@ export function BrandOnboardingForm() {
               className={`mt-2 appearance-none bg-[length:16px] bg-[right_1rem_center] bg-no-repeat pr-11 ${FIELD_BASE}`}
               style={{ backgroundImage: CHEVRON_BG }}
             >
-              <option value="">Select a goal</option>
+              <option value="">{t.goalPlaceholder}</option>
               {GOALS.map((g) => (
                 <option key={g} value={g}>
-                  {g}
+                  {t.goals[g as keyof typeof t.goals] ?? g}
                 </option>
               ))}
             </select>
@@ -225,7 +235,7 @@ export function BrandOnboardingForm() {
           </div>
 
           <div>
-            <Label htmlFor="budget">Marketing Budget</Label>
+            <Label htmlFor="budget">{t.budget}</Label>
             <select
               id="budget"
               name="budget"
@@ -237,10 +247,10 @@ export function BrandOnboardingForm() {
               className={`mt-2 appearance-none bg-[length:16px] bg-[right_1rem_center] bg-no-repeat pr-11 ${FIELD_BASE}`}
               style={{ backgroundImage: CHEVRON_BG }}
             >
-              <option value="">Select a range</option>
+              <option value="">{t.budgetPlaceholder}</option>
               {BUDGETS.map((b) => (
                 <option key={b} value={b}>
-                  {b}
+                  {t.budgets[b as keyof typeof t.budgets] ?? b}
                 </option>
               ))}
             </select>
@@ -255,7 +265,7 @@ export function BrandOnboardingForm() {
               className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-line accent-[var(--accent)]"
             />
             <span className="text-[13.5px] leading-snug text-ink-soft">
-              Would you like guaranteed results by working with a Verified Agency?
+              {t.agency}
             </span>
           </label>
         </div>
@@ -264,8 +274,8 @@ export function BrandOnboardingForm() {
           type="submit"
           className="mt-8 inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] bg-accent px-7 py-3 text-[14px] font-bold text-white transition-colors hover:bg-accent-ink"
         >
-          Submit
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          {t.submit}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="dir-flip">
             <path
               d="M5 12H19M19 12L13 6M19 12L13 18"
               stroke="currentColor"
@@ -277,7 +287,7 @@ export function BrandOnboardingForm() {
         </button>
 
         <p className="mt-4 text-[12px] leading-relaxed text-ink-soft">
-          Placeholder build — submissions aren&apos;t sent anywhere yet.
+          {t.note}
         </p>
       </div>
     </form>

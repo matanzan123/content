@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import {
   CATEGORIES,
   CONTENT_TYPES,
@@ -23,12 +24,18 @@ function Dropdown({
   value,
   onChange,
   isBrand,
+  allLabel,
+  render,
 }: {
   label: string;
   options: readonly string[];
   value: string;
   onChange: (v: string) => void;
   isBrand: boolean;
+  /** Reset option at the top of the list. */
+  allLabel: string;
+  /** Maps a raw option value to its localized label. */
+  render: (opt: string) => string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -65,7 +72,7 @@ function Dropdown({
               : "border-line bg-surface text-ink-soft hover:text-ink",
         ].join(" ")}
       >
-        {value || label}
+        {value ? render(value) : label}
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -79,7 +86,7 @@ function Dropdown({
             triggerRef.current?.focus();
           }}
           className={[
-            "absolute right-0 z-30 mt-2 min-w-[180px] overflow-hidden rounded-[var(--radius-token-md)] border py-1 shadow-[var(--shadow-float)]",
+            "absolute end-0 z-30 mt-2 min-w-[180px] overflow-hidden rounded-[var(--radius-token-md)] border py-1 shadow-[var(--shadow-float)]",
             isBrand ? "border-white/10 bg-surface-inverse-raised" : "border-line bg-surface",
           ].join(" ")}
         >
@@ -90,11 +97,11 @@ function Dropdown({
               setOpen(false);
             }}
             className={[
-              "block w-full px-4 py-2 text-left text-[13.5px] transition-colors",
+              "block w-full px-4 py-2 text-start text-[13.5px] transition-colors",
               isBrand ? "text-ink-inverse-soft hover:bg-white/[0.07]" : "text-ink-soft hover:bg-surface-sunken",
             ].join(" ")}
           >
-            All {label.toLowerCase()}
+            {allLabel}
           </button>
           {options.map((opt) => (
             <button
@@ -105,7 +112,7 @@ function Dropdown({
                 setOpen(false);
               }}
               className={[
-                "block w-full px-4 py-2 text-left text-[13.5px] font-medium transition-colors",
+                "block w-full px-4 py-2 text-start text-[13.5px] font-medium transition-colors",
                 value === opt
                   ? "text-accent"
                   : isBrand
@@ -113,7 +120,7 @@ function Dropdown({
                     : "text-ink hover:bg-surface-sunken",
               ].join(" ")}
             >
-              {opt}
+              {render(opt)}
             </button>
           ))}
         </div>
@@ -123,6 +130,7 @@ function Dropdown({
 }
 
 function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean }) {
+  const t = useT().discover;
   const [index, setIndex] = useState(0);
   const current = items[index];
 
@@ -165,15 +173,17 @@ function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean 
             {current.title}
           </h2>
           <p className="mt-2.5 text-[13.5px] text-white/75">
-            {current.category} · <span className="font-bold text-white">${current.cpm.toFixed(2)}</span>
-            /1K views · ${current.budget.toLocaleString()}
+            {t.categories[current.category as keyof typeof t.categories] ?? current.category} ·{" "}
+            <span className="ltr-token font-bold text-white">${current.cpm.toFixed(2)}</span>
+            <span className="ltr-token">{t.perThousandViews}</span> ·{" "}
+            <span className="ltr-token">${current.budget.toLocaleString("en-US")}</span>
           </p>
 
           <Link
             href={`/discover/${current.id}`}
             className="mt-6 inline-flex items-center rounded-[var(--radius-token-pill)] bg-white px-6 py-2.5 text-[13.5px] font-bold text-ink transition-colors hover:bg-white/90"
           >
-            View Program
+            {t.viewProgram}
           </Link>
         </div>
       </div>
@@ -185,7 +195,7 @@ function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean 
               <button
                 key={item.id}
                 type="button"
-                aria-label={`Go to slide ${i + 1}`}
+                aria-label={t.goToSlide.replace("{index}", String(i + 1))}
                 aria-current={i === index}
                 onClick={() => setIndex(i)}
                 className="flex h-6 w-6 items-center justify-center rounded-full"
@@ -206,7 +216,7 @@ function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean 
               <button
                 key={d}
                 type="button"
-                aria-label={d === -1 ? "Previous campaign" : "Next campaign"}
+                aria-label={d === -1 ? t.previousCampaign : t.nextCampaign}
                 onClick={() => go(d)}
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur transition-colors hover:bg-white/25"
               >
@@ -233,6 +243,13 @@ function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean 
 export function DiscoverExperience() {
   const [role] = useState<Role>("brand");
   const isBrand = role === "brand";
+  const t = useT().discover;
+  // The dataset stores English option values; these maps turn them into copy.
+  const label = {
+    status: (v: string) => t.statuses[v as keyof typeof t.statuses] ?? v,
+    category: (v: string) => t.categories[v as keyof typeof t.categories] ?? v,
+    content: (v: string) => t.contentTypes[v as keyof typeof t.contentTypes] ?? v,
+  };
 
   const campaigns = getCampaigns();
 
@@ -314,7 +331,7 @@ export function DiscoverExperience() {
                   isBrand ? "text-ink-inverse" : "text-ink",
                 ].join(" ")}
               >
-                No campaigns live yet
+                {t.emptyTitle}
               </h1>
               <p
                 className={[
@@ -322,8 +339,7 @@ export function DiscoverExperience() {
                   isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                 ].join(" ")}
               >
-                Campaigns brands publish will show up here for creators to browse and join. Be the
-                first to put one on the board.
+                {t.emptyBody}
               </p>
               <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
                 <Link
@@ -333,7 +349,7 @@ export function DiscoverExperience() {
                     isBrand ? "bg-white text-ink hover:bg-white/90" : "bg-ink text-white hover:bg-ink/90",
                   ].join(" ")}
                 >
-                  Launch a campaign
+                  {t.emptyLaunch}
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path
                       d="M5 12H19M19 12L13 6M19 12L13 18"
@@ -353,7 +369,7 @@ export function DiscoverExperience() {
                       : "border-line text-ink hover:bg-surface",
                   ].join(" ")}
                 >
-                  Join as a creator
+                  {t.emptyJoin}
                 </Link>
               </div>
             </div>
@@ -371,7 +387,7 @@ export function DiscoverExperience() {
                 fill="none"
                 aria-hidden="true"
                 className={[
-                  "pointer-events-none absolute left-4 top-1/2 -translate-y-1/2",
+                  "pointer-events-none absolute start-4 top-1/2 -translate-y-1/2",
                   isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                 ].join(" ")}
               >
@@ -383,10 +399,10 @@ export function DiscoverExperience() {
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Campaigns and creators"
-                aria-label="Search campaigns and creators"
+                placeholder={t.searchPlaceholder}
+                aria-label={t.searchLabel}
                 className={[
-                  "w-full rounded-[var(--radius-token-pill)] border py-2.5 pl-11 pr-14 text-[13.5px] outline-none transition-colors focus:border-accent",
+                  "w-full rounded-[var(--radius-token-pill)] border py-2.5 ps-11 pe-14 text-[13.5px] outline-none transition-colors focus:border-accent",
                   isBrand
                     ? "border-white/10 bg-surface-inverse-raised text-ink-inverse placeholder:text-ink-inverse-soft/70"
                     : "border-line bg-surface-sunken text-ink placeholder:text-ink-soft/70",
@@ -394,7 +410,7 @@ export function DiscoverExperience() {
               />
               <kbd
                 className={[
-                  "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 font-mono text-[10.5px]",
+                  "pointer-events-none absolute end-3 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 font-mono text-[10.5px]",
                   isBrand ? "bg-white/10 text-ink-inverse-soft" : "bg-line/70 text-ink-soft",
                 ].join(" ")}
               >
@@ -428,9 +444,9 @@ export function DiscoverExperience() {
             </div>
 
             <div className="ml-auto flex flex-wrap items-center gap-2">
-              <Dropdown label="Status" options={STATUSES} value={status} onChange={setStatus} isBrand={isBrand} />
-              <Dropdown label="Category" options={CATEGORIES} value={category} onChange={setCategory} isBrand={isBrand} />
-              <Dropdown label="Content" options={CONTENT_TYPES} value={contentType} onChange={setContentType} isBrand={isBrand} />
+              <Dropdown label={t.status} options={STATUSES} value={status} onChange={setStatus} isBrand={isBrand} allLabel={t.allStatuses} render={label.status} />
+              <Dropdown label={t.category} options={CATEGORIES} value={category} onChange={setCategory} isBrand={isBrand} allLabel={t.allCategories} render={label.category} />
+              <Dropdown label={t.content} options={CONTENT_TYPES} value={contentType} onChange={setContentType} isBrand={isBrand} allLabel={t.allContent} render={label.content} />
             </div>
           </div>
         </section>
@@ -445,7 +461,7 @@ export function DiscoverExperience() {
                   isBrand ? "text-ink-inverse" : "text-ink",
                 ].join(" ")}
               >
-                {anyFilter ? "Results" : "Featured"}
+                {anyFilter ? t.results : t.featured}
               </h2>
               {hasCampaigns && (
                 <span
@@ -454,7 +470,7 @@ export function DiscoverExperience() {
                     isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                   ].join(" ")}
                 >
-                  {filtered.length} {filtered.length === 1 ? "campaign" : "campaigns"}
+                  {(filtered.length === 1 ? t.campaignCountOne : t.campaignCount).replace("{count}", String(filtered.length))}
                 </span>
               )}
               {anyFilter && (
@@ -463,7 +479,7 @@ export function DiscoverExperience() {
                   onClick={clearFilters}
                   className="ml-auto text-[13px] font-semibold text-accent hover:underline"
                 >
-                  Clear filters
+                  {t.clearFilters}
                 </button>
               )}
             </div>
@@ -482,7 +498,7 @@ export function DiscoverExperience() {
                 ].join(" ")}
               >
                 <p className={["text-[15px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
-                  {hasCampaigns ? "Nothing matches those filters" : "The board is empty for now"}
+                  {hasCampaigns ? t.noMatchTitle : t.boardEmptyTitle}
                 </p>
                 <p
                   className={[
@@ -491,14 +507,14 @@ export function DiscoverExperience() {
                   ].join(" ")}
                 >
                   {hasCampaigns ? (
-                    "Try clearing a filter or searching for something broader."
+                    t.noMatchBody
                   ) : (
                     <>
-                      As soon as a brand publishes a campaign it lands here.{" "}
+                      {t.boardEmptyBody.split("{link}")[0]}
                       <Link href="/contact" className="font-semibold underline underline-offset-2">
-                        Talk to us
-                      </Link>{" "}
-                      about launching the first one.
+                        {t.talkToUs}
+                      </Link>
+                      {t.boardEmptyBody.split("{link}")[1]}
                     </>
                   )}
                 </p>

@@ -2,6 +2,7 @@
 
 import { useId, useMemo, useState } from "react";
 import { Link } from "@/i18n/Link";
+import { useT } from "@/i18n/provider";
 import { FAQ_CATEGORIES } from "@/data/faqs";
 import { Footer } from "./Footer";
 import { Header } from "./Header";
@@ -57,7 +58,7 @@ function FAQItem({
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-start"
       >
         <span className={["text-[14.5px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
           {q}
@@ -91,10 +92,26 @@ export function FAQsExperience() {
   const [query, setQuery] = useState("");
   const [openKey, setOpenKey] = useState<string | null>(null);
   const isBrand = role === "brand";
+  const t = useT();
 
-  const categories = FAQ_CATEGORIES[role];
+  /**
+   * The dataset holds ids; the words come from the dictionary. Resolving first
+   * means the search below matches whatever language is on screen — a Hebrew
+   * visitor searching "תשלום" filters Hebrew answers, not English ones.
+   */
+  const categories = useMemo(() => {
+    const titles = t.faqs.categoryTitles;
+    const groups = t.faqs.items as Record<string, Record<string, { q: string; a: string }>>;
+    return FAQ_CATEGORIES[role].map((cat) => ({
+      id: cat.id,
+      title: titles[cat.id],
+      items: cat.items.map((itemId) => ({ id: itemId, ...groups[cat.id][itemId] })),
+    }));
+  }, [role, t]);
 
   const filtered = useMemo(() => {
+    // Hebrew has no case, so toLowerCase() is a no-op for it and still
+    // normalises the Latin half of a mixed query.
     const needle = query.trim().toLowerCase();
     if (!needle) return categories;
     return categories
@@ -148,7 +165,7 @@ export function FAQsExperience() {
                 isBrand ? "bg-white/10 text-ink-inverse-soft" : "bg-accent-soft text-accent-ink",
               ].join(" ")}
             >
-              Help Center
+              {t.faqs.badge}
             </span>
             <h1
               className={[
@@ -156,7 +173,7 @@ export function FAQsExperience() {
                 isBrand ? "text-ink-inverse" : "text-ink",
               ].join(" ")}
             >
-              Frequently Asked Questions
+              {t.faqs.heading}
             </h1>
             <p
               className={[
@@ -164,8 +181,8 @@ export function FAQsExperience() {
                 isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
               ].join(" ")}
             >
-              Quick answers to the questions that come up most — for the side of the marketplace
-              you&apos;re on.
+              {t.faqs.subtitle}
+
             </p>
 
             {/* Creators / Brands tabs */}
@@ -175,7 +192,7 @@ export function FAQsExperience() {
                 isBrand ? "bg-white/[0.07]" : "bg-surface-sunken",
               ].join(" ")}
               role="tablist"
-              aria-label="Audience"
+              aria-label={t.faqs.audience}
             >
               {(["creator", "brand"] as const).map((r) => {
                 const active = role === r;
@@ -199,7 +216,7 @@ export function FAQsExperience() {
                           : "text-ink-soft hover:text-ink",
                     ].join(" ")}
                   >
-                    {r === "creator" ? "Creators" : "Brands"}
+                    {r === "creator" ? t.faqs.creators : t.faqs.brands}
                   </button>
                 );
               })}
@@ -214,7 +231,7 @@ export function FAQsExperience() {
                 fill="none"
                 aria-hidden="true"
                 className={[
-                  "pointer-events-none absolute left-4 top-1/2 -translate-y-1/2",
+                  "pointer-events-none absolute start-4 top-1/2 -translate-y-1/2",
                   isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                 ].join(" ")}
               >
@@ -225,10 +242,10 @@ export function FAQsExperience() {
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search questions"
-                aria-label="Search questions"
+                placeholder={t.faqs.searchPlaceholder}
+                aria-label={t.faqs.searchLabel}
                 className={[
-                  "w-full rounded-[var(--radius-token-pill)] border py-3 pl-11 pr-4 text-[14px] outline-none transition-colors focus:border-accent focus:ring-4 focus:ring-accent-soft",
+                  "w-full rounded-[var(--radius-token-pill)] border py-3 ps-11 pe-4 text-[14px] outline-none transition-colors focus:border-accent focus:ring-4 focus:ring-accent-soft",
                   isBrand
                     ? "border-white/10 bg-surface-inverse-raised text-ink-inverse placeholder:text-ink-inverse-soft/70"
                     : "border-line bg-surface-sunken text-ink placeholder:text-ink-soft/70",
@@ -242,7 +259,7 @@ export function FAQsExperience() {
         <section className="px-6 pb-20">
           <div className="mx-auto grid max-w-[1040px] gap-10 lg:grid-cols-[220px_1fr] lg:gap-14">
             {/* Category jump list */}
-            <nav aria-label="FAQ categories" className="hidden lg:block">
+            <nav aria-label={t.faqs.categoryNav} className="hidden lg:block">
               <div className="sticky top-28">
                 <p
                   className={[
@@ -250,7 +267,7 @@ export function FAQsExperience() {
                     isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                   ].join(" ")}
                 >
-                  Categories
+                  {t.faqs.categories}
                 </p>
                 <ul className="mt-4 space-y-1">
                   {filtered.map((cat) => (
@@ -282,8 +299,10 @@ export function FAQsExperience() {
                 ].join(" ")}
               >
                 {query.trim()
-                  ? `${totalMatches} ${totalMatches === 1 ? "result" : "results"} for “${query.trim()}”`
-                  : `${totalMatches} questions for ${role === "brand" ? "brands" : "creators"}`}
+                  ? (totalMatches === 1 ? t.faqs.resultFor : t.faqs.resultsFor)
+                      .replace("{count}", String(totalMatches))
+                      .replace("{query}", query.trim())
+                  : (role === "brand" ? t.faqs.countForBrands : t.faqs.countForCreators).replace("{count}", String(totalMatches))}
               </p>
 
               {filtered.length === 0 ? (
@@ -294,7 +313,7 @@ export function FAQsExperience() {
                   ].join(" ")}
                 >
                   <p className={["text-[15px] font-bold", isBrand ? "text-ink-inverse" : "text-ink"].join(" ")}>
-                    No questions match that search
+                    {t.faqs.noMatchTitle}
                   </p>
                   <p
                     className={[
@@ -302,11 +321,11 @@ export function FAQsExperience() {
                       isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
                     ].join(" ")}
                   >
-                    Try a different word, or{" "}
+                    {t.faqs.noMatchBody.split("{link}")[0]}
                     <Link href="/contact" className="font-semibold underline underline-offset-2">
-                      ask our team directly
+                      {t.faqs.askTeam}
                     </Link>
-                    .
+                    {t.faqs.noMatchBody.split("{link}")[1]}
                   </p>
                 </div>
               ) : (
@@ -323,7 +342,9 @@ export function FAQsExperience() {
                       </h2>
                       <div className="mt-4 flex flex-col gap-3">
                         {cat.items.map((item) => {
-                          const key = `${role}:${cat.id}:${item.q}`;
+                          // Keyed by id, not by the question text, so switching language keeps the
+                          // open row open instead of collapsing it.
+                          const key = `${role}:${cat.id}:${item.id}`;
                           return (
                             <FAQItem
                               key={key}
@@ -358,7 +379,7 @@ export function FAQsExperience() {
                 isBrand ? "text-ink-inverse" : "text-ink",
               ].join(" ")}
             >
-              Still stuck?
+              {t.faqs.stuckHeading}
             </h2>
             <p
               className={[
@@ -366,7 +387,7 @@ export function FAQsExperience() {
                 isBrand ? "text-ink-inverse-soft" : "text-ink-soft",
               ].join(" ")}
             >
-              If your question isn&apos;t here, send it over — a real person reads every message.
+              {t.faqs.stuckBody}
             </p>
             <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
               <Link
@@ -376,7 +397,7 @@ export function FAQsExperience() {
                   isBrand ? "bg-white text-ink hover:bg-white/90" : "bg-ink text-white hover:bg-ink/90",
                 ].join(" ")}
               >
-                Contact our team
+                {t.faqs.contactTeam}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path
                     d="M5 12H19M19 12L13 6M19 12L13 18"
@@ -396,7 +417,7 @@ export function FAQsExperience() {
                     : "border-line text-ink hover:bg-surface",
                 ].join(" ")}
               >
-                {isBrand ? "Launch a campaign" : "Become a creator"}
+                {isBrand ? t.faqs.launchCampaign : t.faqs.becomeCreator}
               </Link>
             </div>
           </div>

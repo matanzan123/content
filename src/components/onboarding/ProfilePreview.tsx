@@ -1,9 +1,11 @@
 "use client";
 
+import { INTL_LOCALE, type Locale } from "@/i18n/config";
+import { useI18n } from "@/i18n/provider";
 import { LANGUAGES, type OnboardingDraft } from "./types";
 
-function joinedLabel() {
-  return new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" });
+function joinedLabel(locale: Locale) {
+  return new Date().toLocaleDateString(INTL_LOCALE[locale], { month: "short", year: "numeric" });
 }
 
 export function ProfilePreview({
@@ -15,7 +17,9 @@ export function ProfilePreview({
   handle: string;
   whopHandle: string | null;
 }) {
-  const name = draft.fullName.trim() || "Your name";
+  const { t, locale } = useI18n();
+  const o = t.onboarding;
+  const name = draft.fullName.trim() || o.previewName;
   const initial = name.charAt(0).toLowerCase();
 
   return (
@@ -44,12 +48,12 @@ export function ProfilePreview({
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <p className="text-[17px] font-bold tracking-tight text-ink">{name}</p>
             <span className="rounded-md bg-surface-sunken px-2 py-0.5 text-[11px] font-medium text-ink-soft">
-              Unranked
+              {o.previewUnranked}
             </span>
-            <span className="ml-auto text-[12.5px] text-ink-soft">Joined {joinedLabel()}</span>
+            <span className="ms-auto text-[12.5px] text-ink-soft">{o.previewJoined.replace("{date}", joinedLabel(locale))}</span>
           </div>
           <p className="mt-0.5 text-[14px] text-ink-soft">
-            @{whopHandle ?? handle}
+            <span className="ltr-token">@{whopHandle ?? handle}</span>
           </p>
         </div>
       </div>
@@ -68,7 +72,7 @@ export function ProfilePreview({
                 className="inline-flex items-center gap-1.5 rounded-[var(--radius-token-sm)] bg-surface-sunken px-2.5 py-1.5 text-[12.5px] font-medium text-ink"
               >
                 <span aria-hidden="true">{flag}</span>
-                {lang}
+                {o.languages[lang as keyof typeof o.languages] ?? lang}
               </span>
             );
           })}

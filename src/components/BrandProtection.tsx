@@ -1,6 +1,12 @@
+"use client";
+
 import Image from "next/image";
 import { Link } from "@/i18n/Link";
+import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useT } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo } from "./brand-kit";
+
+type ProtectionKey = keyof Dictionary["brand"]["protection"];
 
 /* ==========================================================================
    PROTECTION FEATURES YOU CAN TRUST
@@ -157,13 +163,14 @@ const FLAG_D =
  * drift animation on the inner element — see the transform note at the top.
  */
 const SUBMISSIONS = [
-  { seed: "protClipAurora", label: "Off-brief", value: "2.1M", left: "54%", top: "-2%", w: "min(128px, 40%)", rot: 6, drift: "animate-drift", z: 5 },
-  { seed: "protClipRidge", label: "Under review", value: "$412", left: "58%", top: "49%", w: "min(116px, 37%)", rot: -5, drift: "animate-drift-slow", z: 4 },
-  { seed: "protClipHalden", label: "Flagged", value: "884K", left: "1%", top: "68%", w: "min(122px, 39%)", rot: -7, drift: "animate-drift-slower", z: 6 },
+  { seed: "protClipAurora", label: "offBrief" as ProtectionKey, value: "2.1M", left: "54%", top: "-2%", w: "min(128px, 40%)", rot: 6, drift: "animate-drift", z: 5 },
+  { seed: "protClipRidge", label: "underReview" as ProtectionKey, value: "$412", left: "58%", top: "49%", w: "min(116px, 37%)", rot: -5, drift: "animate-drift-slow", z: 4 },
+  { seed: "protClipHalden", label: "flagged" as ProtectionKey, value: "884K", left: "1%", top: "68%", w: "min(122px, 39%)", rot: -7, drift: "animate-drift-slower", z: 6 },
 ];
 
 function SubmissionTile({ item }: { item: (typeof SUBMISSIONS)[number] }) {
-  const flagged = item.label === "Flagged";
+  const t = useT().brand.protection;
+  const flagged = item.label === "flagged";
   return (
     <span
       className="absolute block"
@@ -206,17 +213,17 @@ function SubmissionTile({ item }: { item: (typeof SUBMISSIONS)[number] }) {
                   <path d="M6 4.5h13l-3.4 4.6L19 13.7H6z" fill="white" />
                 </svg>
               )}
-              {item.label}
+              {t[item.label]}
             </span>
           </span>
           <span className="flex items-center justify-between gap-1.5 px-2 py-1.5">
             <span className="flex min-w-0 items-center gap-1">
               <span className="h-1 w-1 shrink-0 rounded-full" style={{ background: flagged ? "var(--accent)" : "#7b8a6a" }} />
               <span className="truncate text-[8px] font-bold uppercase tracking-[0.05em] text-[color:var(--ink-inverse-soft)]">
-                Submission
+                {t.submission}
               </span>
             </span>
-            <span className="shrink-0 text-[10px] font-black text-white">{item.value}</span>
+            <span className="ltr-token shrink-0 text-[10px] font-black text-white">{item.value}</span>
           </span>
         </span>
       </span>
@@ -337,12 +344,13 @@ function PinRow({ count, length, gap }: { count: number; length: number; gap: nu
 }
 
 const DATA_TILES = [
-  { label: "Bots blocked", value: "1,284", left: "-2%", top: "2%", drift: "animate-drift" },
-  { label: "Verified views", value: "98.6%", left: "54%", top: "0%", drift: "animate-drift-slow" },
-  { label: "Signals / sec", value: "4.2K", left: "57%", top: "76%", drift: "animate-drift-slower" },
+  { label: "botsBlocked" as ProtectionKey, value: "1,284", left: "-2%", top: "2%", drift: "animate-drift" },
+  { label: "verifiedViews" as ProtectionKey, value: "98.6%", left: "54%", top: "0%", drift: "animate-drift-slow" },
+  { label: "signalsPerSec" as ProtectionKey, value: "4.2K", left: "57%", top: "76%", drift: "animate-drift-slower" },
 ];
 
 function ChipHero() {
+  const t = useT().brand.protection;
   return (
     <div className="relative h-[320px] sm:h-[344px]">
       <span
@@ -490,9 +498,9 @@ function ChipHero() {
             }}
           >
             <span className="text-[8px] font-bold uppercase tracking-[0.1em] text-[color:var(--ink-inverse-soft)]">
-              {tile.label}
+              {t[tile.label]}
             </span>
-            <span className="text-[13px] font-black leading-none text-white">{tile.value}</span>
+            <span className="ltr-token text-[13px] font-black leading-none text-white">{tile.value}</span>
           </span>
         </span>
       ))}
@@ -520,6 +528,7 @@ const SIDE_TILES = [
 ];
 
 function VipHero() {
+  const t = useT().brand.protection;
   return (
     <div className="relative h-[320px] sm:h-[344px]">
       <span
@@ -604,7 +613,7 @@ function VipHero() {
       >
         <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-emerald-400" />
         <span className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-[color:var(--ink-inverse-soft)]">
-          Team online
+          {t.teamOnline}
         </span>
       </span>
     </div>
@@ -624,6 +633,7 @@ const PROOF_STACK = [
 ] as const;
 
 function CtaBlock() {
+  const t = useT().brand.protection;
   return (
     <div className="relative mt-16 flex flex-col items-center gap-6 sm:mt-20">
       <Link
@@ -635,7 +645,7 @@ function CtaBlock() {
             "inset 0 1px 0 rgba(255,255,255,0.4), 0 22px 50px -14px color-mix(in srgb, var(--accent) 85%, transparent)",
         }}
       >
-        Launch My Campaign
+        {t.cta}
         <svg
           width="18"
           height="18"
@@ -668,7 +678,7 @@ function CtaBlock() {
         )}
       </span>
 
-      <p className="text-[15px] font-bold text-white">Trusted by 200+ Brands</p>
+      <p className="text-[15px] font-bold text-white">{t.trust}</p>
     </div>
   );
 }
@@ -676,6 +686,7 @@ function CtaBlock() {
 /* =============================== SECTION ================================ */
 
 export function BrandProtection() {
+  const t = useT().brand.protection;
   return (
     <section
       className="relative overflow-hidden px-6 pb-24 pt-24 sm:pt-28"
@@ -714,28 +725,28 @@ export function BrandProtection() {
       <div className="relative mx-auto max-w-[1240px]">
         <div className="text-center">
           <h2 className="mx-auto max-w-[18ch] text-balance font-[var(--font-display)] text-[40px] font-black leading-[0.98] tracking-[-0.03em] text-white sm:text-[58px]">
-            Protection Features You Can Trust
+            {t.heading}
           </h2>
           <p
             className="mx-auto mt-5 max-w-[46ch] text-balance text-[17px] font-medium leading-[1.55]"
             style={{ color: "color-mix(in srgb, var(--ink-inverse) 76%, var(--ink-inverse-soft))" }}
           >
-            Protection systems designed to secure campaigns, payments and reduce risk.
+            {t.subtitle}
           </p>
         </div>
 
         <div className="mt-14 grid grid-cols-1 gap-6 lg:grid-cols-3">
           <Card>
             <FlagHero />
-            <CardCopy title="Flag Videos" body="Instantly flag content that does not meet campaign standards." />
+            <CardCopy title={t.flagTitle} body={t.flagBody} />
           </Card>
           <Card>
             <ChipHero />
-            <CardCopy title="Bot Protection" body="Detect fake engagement and protect campaign performance." />
+            <CardCopy title={t.botTitle} body={t.botBody} />
           </Card>
           <Card>
             <VipHero />
-            <CardCopy title="VIP Support" body="Priority access to support whenever a brand needs help." />
+            <CardCopy title={t.vipTitle} body={t.vipBody} />
           </Card>
         </div>
 
