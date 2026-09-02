@@ -59,6 +59,12 @@ const SHARED_ON_PURPOSE = new Set([
   "footer.copyright",
   "footer.brandCopyright",
   "brand.campaigns.ss24",
+  // Acronyms and product names that are identical in both languages.
+  "admin.dau",
+  "admin.wau",
+  "admin.mau",
+  "admin.svcFirebase",
+  "admin.svcWhop",
   "contact.emailPlaceholder",
   "contact.websitePlaceholder",
   "onboarding.referralSources.TikTok",

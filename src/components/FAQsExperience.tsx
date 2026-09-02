@@ -1,8 +1,9 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link } from "@/i18n/Link";
 import { useT } from "@/i18n/provider";
+import { trackSearch } from "@/lib/analytics/client";
 import { FAQ_CATEGORIES } from "@/data/faqs";
 import { Footer } from "./Footer";
 import { Header } from "./Header";
@@ -126,6 +127,16 @@ export function FAQsExperience() {
   }, [categories, query]);
 
   const totalMatches = filtered.reduce((n, c) => n + c.items.length, 0);
+
+  // Records that a search happened and how many results it found. The query
+  // text never leaves the browser — only its length bucket. Debounced so a
+  // single search is one event rather than one per keystroke.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) return;
+    const timer = setTimeout(() => trackSearch("faq_searched", q, totalMatches), 700);
+    return () => clearTimeout(timer);
+  }, [query, totalMatches]);
 
   function switchRole(next: Role) {
     setRole(next);

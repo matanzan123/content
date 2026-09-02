@@ -95,8 +95,26 @@ export function privacySectionsEn(): Section[] {
         p(
           "Like most websites, our hosting and infrastructure providers process technical information sent by your browser as part of delivering pages to you — for example IP address, browser and device type, and the pages requested. We use this for security, abuse prevention and reliability.",
         ),
+        h3("Product analytics"),
+        p(
+          "We run our own first-party product analytics. When you use the platform we record the pages you view and a small set of interactions — for example switching language, switching between the creator and brand views, using a filter, running a search, and clicking a primary call to action.",
+        ),
+        p("Each of those records may contain:"),
+        list([
+          "the event type and the page path it happened on;",
+          "a session identifier that lasts until you close the browser tab;",
+          "a randomly generated visitor identifier stored on your device, used only to tell a returning browser from a new one;",
+          "the language you are reading in;",
+          "a country, where our hosting provider supplies one;",
+          "a broad device category and browser family;",
+          "the host name of the site that referred you, if any;",
+          "campaign attribution parameters (utm_source and similar) present in the link you arrived through.",
+        ]),
         callout(
-          "This build does not include an analytics SDK, an advertising SDK, or any third-party tracking script. If we add one, we will say which one, and update this policy first.",
+          "What analytics does not record: your IP address, your full browser user-agent string, the full address of the page that referred you, anything you type into a form, and the text of anything you search for. Searches are recorded only as a length band and a result count, so we can tell whether search is working without keeping what anyone looked for.",
+        ),
+        p(
+          "This is our own system. We do not use Google Analytics, and there is no advertising, social or cross-site tracking pixel on this site — no Meta Pixel, no TikTok pixel, and no equivalent. If that ever changes we will name what we have added and update this policy before it is switched on.",
         ),
       ],
     },
@@ -276,10 +294,14 @@ export function privacySectionsEn(): Section[] {
         list([
           "a secure, http-only session cookie that records that you have linked a third-party account, so the platform can show the connection on your profile;",
           "a short-lived cookie used during that linking flow to protect it against cross-site request forgery;",
-          "your browser's local storage, used to hold an unfinished onboarding draft on your own device.",
+          "your browser's local storage, used to hold an unfinished onboarding draft on your own device, and to hold the randomly generated analytics visitor identifier described above;",
+          "your browser's session storage, used to hold the analytics session identifier until you close the tab.",
         ]),
         p(
-          "These are used to make the platform work and to keep it secure. This build sets no advertising, profiling or cross-site tracking cookies. If that changes, we will update this section and, where required, ask for your consent first.",
+          "These are functional and analytics storage only. This build sets no advertising, profiling or cross-site tracking cookie, and none of these values is shared with a third party.",
+        ),
+        callout(
+          "Whether analytics storage requires opt-in consent depends on the jurisdictions ClipRewards ends up operating in. That question is marked for legal review and is not resolved here; no consent mechanism is claimed to exist in this build.",
         ),
       ],
     },

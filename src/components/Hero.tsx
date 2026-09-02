@@ -2,7 +2,8 @@
 
 import { useId } from "react";
 import Image from "next/image";
-import { Link } from "@/i18n/Link";
+import { TrackedLink } from "@/components/analytics/TrackedLink";
+import { CTA_IDS } from "@/lib/analytics/cta";
 import { Templated } from "@/i18n/Templated";
 import { useT } from "@/i18n/provider";
 import { BRAND_MARKS, BrandLogo, VerifiedTick } from "./brand-kit";
@@ -919,7 +920,8 @@ export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Rol
           </p>
 
           <div className="mt-9 flex flex-wrap items-center gap-3">
-            <Link
+            <TrackedLink
+              ctaId={isBrand ? CTA_IDS.brandHeroLaunchCampaign : CTA_IDS.creatorHeroStartEarning}
               href={copy.primaryCta.href}
               className={[
                 "inline-flex items-center gap-2 rounded-[var(--radius-token-pill)] text-white transition-all duration-200 hover:-translate-y-1",
@@ -944,8 +946,9 @@ export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Rol
                   />
                 </svg>
               )}
-            </Link>
-            <Link
+            </TrackedLink>
+            <TrackedLink
+              ctaId={isBrand ? CTA_IDS.brandHeroSeeVerified : CTA_IDS.creatorHeroBrowseCampaigns}
               href={copy.secondaryCta.href}
               className={[
                 "rounded-[var(--radius-token-pill)] transition-colors",
@@ -955,7 +958,7 @@ export function Hero({ role, onRoleChange }: { role: Role; onRoleChange: (r: Rol
               ].join(" ")}
             >
               {copy.secondaryCta.label}
-            </Link>
+            </TrackedLink>
           </div>
 
           {isBrand && (

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { Dictionary } from "@/i18n/dictionaries/en";
 import { Templated } from "@/i18n/Templated";
 import { useT } from "@/i18n/provider";
+import { track } from "@/lib/analytics/client";
 
 const GOALS = [
   "Brand awareness at scale",
@@ -101,6 +102,7 @@ export function BrandOnboardingForm() {
       return;
     }
     // Placeholder build — no backend yet. Swap for a route handler when one exists.
+    track("brand_form_submitted", { outcome: "success" });
     setSubmitted(true);
   }
 

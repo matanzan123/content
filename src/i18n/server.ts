@@ -33,3 +33,19 @@ export async function getI18n(
   const locale = coerceLocale(raw);
   return { locale, t: DICTIONARIES[locale] };
 }
+
+/**
+ * The dictionary handed to the client provider.
+ *
+ * `admin` is stripped: it is only ever rendered by server components behind
+ * the admin guard, so shipping it would put the admin vocabulary into the
+ * flight payload of every public page — for a visitor who was just refused
+ * access, on a page that has no admin surface at all. The strings are not
+ * secret, but an unauthorised response should not carry them, and every
+ * visitor should not download them.
+ */
+export function getClientDictionary(locale: Locale): Omit<Dictionary, "admin"> {
+  const { admin: _admin, ...rest } = DICTIONARIES[locale];
+  void _admin;
+  return rest;
+}

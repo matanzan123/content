@@ -11,6 +11,12 @@ const PATHS = [
   "/privacy-policy",
   "/terms-of-service",
   "/accessibility",
+  "/admin",
+  "/admin/revenue",
+  "/admin/geography",
+  "/admin/funnels",
+  "/admin/events",
+  "/admin/system",
 ];
 
 // Both languages, since direction, font and copy all differ between them.

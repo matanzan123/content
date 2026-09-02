@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useMemo } from "react";
+import { track } from "@/lib/analytics/client";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LOCALE_COOKIE,
@@ -11,6 +12,13 @@ import {
   type Locale,
 } from "./config";
 import type { Dictionary } from "./dictionaries/en";
+
+/**
+ * What client components can read. `admin` is excluded on purpose — those
+ * strings are rendered only by server components behind the admin guard, so
+ * they never enter a public page payload. See getClientDictionary in server.ts.
+ */
+export type ClientDictionary = Omit<Dictionary, "admin">;
 import {
   formatCompact,
   formatCurrency,
@@ -30,7 +38,7 @@ import {
 type I18nValue = {
   locale: Locale;
   dir: "ltr" | "rtl";
-  t: Dictionary;
+  t: ClientDictionary;
   /** Switches language in place — same URL, same scroll position. */
   setLocale: (next: Locale) => void;
   n: (value: number, options?: Intl.NumberFormatOptions) => string;
@@ -48,7 +56,7 @@ export function I18nProvider({
   children,
 }: {
   locale: Locale;
-  dictionary: Dictionary;
+  dictionary: ClientDictionary;
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -72,6 +80,7 @@ export function I18nProvider({
 
       // Remember the choice. Middleware also syncs this, but writing it here
       // means the preference is correct even before the next request lands.
+      track("language_changed", { to_locale: next });
       document.cookie = `${LOCALE_COOKIE}=${next}; path=/; max-age=${LOCALE_COOKIE_MAX_AGE}; samesite=lax`;
       router.push(target);
     },
@@ -103,6 +112,6 @@ export function useI18n(): I18nValue {
 }
 
 /** Shorthand for the common case of only needing the dictionary. */
-export function useT(): Dictionary {
+export function useT(): ClientDictionary {
   return useI18n().t;
 }

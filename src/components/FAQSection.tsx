@@ -2,8 +2,8 @@
 
 import { useId, useState } from "react";
 import { Link } from "@/i18n/Link";
-import { useT } from "@/i18n/provider";
-import type { Dictionary } from "@/i18n/dictionaries/en";
+import { useT, type ClientDictionary } from "@/i18n/provider";
+
 import type { Role } from "./RoleToggle";
 
 const FAQS: Record<Role, { q: string; a: string }[]> = {
@@ -81,7 +81,7 @@ function FAQItem({ q, a, isBrand }: { q: string; a: string; isBrand: boolean }) 
 
 /** Creator questions live in the dictionary; the brand set is migrated in the
  *  brand-home pass and still reads from FAQS. */
-function creatorItems(t: Dictionary) {
+function creatorItems(t: ClientDictionary) {
   const f = t.home.faq.items;
   return [
     { q: f.paidQ, a: f.paidA },

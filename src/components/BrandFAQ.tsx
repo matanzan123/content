@@ -2,8 +2,7 @@
 
 import { useId, useState } from "react";
 import { Link } from "@/i18n/Link";
-import type { Dictionary } from "@/i18n/dictionaries/en";
-import { useT } from "@/i18n/provider";
+import { useT, type ClientDictionary } from "@/i18n/provider";
 
 /* ==========================================================================
    ANSWERS TO YOUR QUESTIONS — brand realm FAQ
@@ -17,7 +16,7 @@ import { useT } from "@/i18n/provider";
 /** Question order is the approved page order; the text lives in the dictionary. */
 const FAQ_KEYS = ["fee", "flag", "fake", "human", "topUp", "payout", "badge", "agency"] as const;
 
-function faqItems(t: Dictionary) {
+function faqItems(t: ClientDictionary) {
   const f = t.brand.faq.items;
   return FAQ_KEYS.map((k) => ({ q: f[`${k}Q`], a: f[`${k}A`] }));
 }

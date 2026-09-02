@@ -11,7 +11,8 @@ import {
   isLocale,
 } from "@/i18n/config";
 import { I18nProvider } from "@/i18n/provider";
-import { getI18n } from "@/i18n/server";
+import { PageViewTracker } from "@/components/analytics/PageViewTracker";
+import { getClientDictionary, getI18n } from "@/i18n/server";
 import "../globals.css";
 
 /* ==========================================================================
@@ -110,7 +111,8 @@ export default async function LocaleLayout({
         >
           {t.common.skipToContent}
         </a>
-        <I18nProvider locale={locale} dictionary={t}>
+        <I18nProvider locale={locale} dictionary={getClientDictionary(locale)}>
+          <PageViewTracker />
           <AuthProvider>{children}</AuthProvider>
           <AccessibilityWidget />
         </I18nProvider>

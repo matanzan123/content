@@ -379,3 +379,70 @@ html {
   left: auto;
   right: 1rem;
 }
+
+/* ==========================================================================
+   ADMIN THEME
+
+   The admin surface is a different product from the marketing site: denser,
+   calmer, and read for hours rather than scanned once. It gets its own token
+   set scoped to `.admin-root` so nothing here can leak into a public page and
+   nothing there can drift into here.
+
+   Colour carries meaning, and never alone — every status that uses colour also
+   carries a label or an icon.
+   ========================================================================== */
+
+.admin-root {
+  --a-bg: #0a0a0b;
+  --a-panel: #121214;
+  --a-panel-raised: #171719;
+  --a-border: #232327;
+  --a-border-strong: #2e2e34;
+  --a-text: #f4f4f5;
+  --a-text-muted: #a1a1aa;
+  /* 5.6:1 on --a-panel. The previous value (#71717a) measured 4.05:1 and
+     failed WCAG AA for normal text — axe caught it on 41 nodes. */
+  --a-text-dim: #8b8b96;
+  --a-accent: #e07a3f;
+  --a-accent-soft: rgba(224, 122, 63, 0.14);
+  --a-positive: #34d399;
+  --a-negative: #f87171;
+  --a-warning: #fbbf24;
+  --a-grid: rgba(255, 255, 255, 0.055);
+
+  background: var(--a-bg);
+  color: var(--a-text);
+  color-scheme: dark;
+}
+
+/* The admin scrollbar should read as part of the panel, not the OS. */
+.admin-root ::-webkit-scrollbar { width: 10px; height: 10px; }
+.admin-root ::-webkit-scrollbar-track { background: transparent; }
+.admin-root ::-webkit-scrollbar-thumb {
+  background: var(--a-border-strong);
+  border-radius: 6px;
+  border: 2px solid var(--a-bg);
+}
+.admin-root ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* Focus must stay obvious against a near-black ground. */
+.admin-root :focus-visible {
+  outline: 2px solid var(--a-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Numeric columns line up when digits share a width. */
+.admin-num { font-variant-numeric: tabular-nums; }
+
+/*
+  Charts are drawn in a fixed left-to-right coordinate space even in Hebrew.
+  Document direction is about reading text; a time axis is about chronology,
+  and mirroring it would put the future on the left. The surrounding labels,
+  legend and table still follow the document direction.
+*/
+.admin-chart { direction: ltr; }
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-root * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

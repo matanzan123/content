@@ -1,6 +1,7 @@
 "use client";
 
 import { useT } from "@/i18n/provider";
+import { track } from "@/lib/analytics/client";
 
 type Role = "creator" | "brand";
 
@@ -22,7 +23,11 @@ export function RoleToggle({
       role="switch"
       aria-checked={isBrand}
       aria-label={isBrand ? t.roleToggle.toCreator : t.roleToggle.toBrand}
-      onClick={() => onChange(isBrand ? "creator" : "brand")}
+      onClick={() => {
+        const next = isBrand ? "creator" : "brand";
+        track("creator_brand_mode_changed", { mode: next });
+        onChange(next);
+      }}
       className={[
         "inline-flex h-[38px] items-center gap-2 rounded-[var(--radius-token-pill)] pl-[3px] pr-3.5",
         theme === "dark" ? "shadow-[0_0_0_1px_rgba(255,255,255,0.15)]" : "",

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/i18n/Link";
 import { useT } from "@/i18n/provider";
+import { track, trackSearch } from "@/lib/analytics/client";
 import {
   CATEGORIES,
   CONTENT_TYPES,
@@ -131,6 +132,9 @@ function Dropdown({
 
 function HeroCarousel({ items, isBrand }: { items: Campaign[]; isBrand: boolean }) {
   const t = useT().discover;
+
+  // Search shape only — never the query text. Debounced so one search is one
+  // event.  is defined below; the effect reads it after render.
   const [index, setIndex] = useState(0);
   const current = items[index];
 
@@ -289,7 +293,18 @@ export function DiscoverExperience() {
   const hasCampaigns = campaigns.length > 0;
   const anyFilter = Boolean(query.trim() || platform || status || category || contentType);
 
+  // Records that a search happened and how many results it found. The query
+  // text never leaves the browser — only its length bucket. Debounced so one
+  // search is one event rather than one per keystroke.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) return;
+    const timer = setTimeout(() => trackSearch("discover_searched", q, filtered.length), 700);
+    return () => clearTimeout(timer);
+  }, [query, filtered.length]);
+
   function clearFilters() {
+    track("discover_filter_changed", { filter_action: "cleared" });
     setQuery("");
     setPlatform("");
     setStatus("");
