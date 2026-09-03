@@ -266,3 +266,92 @@ export const adminAuditLog = pgTable(
     index("idx_audit_action").on(t.action),
   ],
 );
+
+/* ------------------------ whop_webhook_receipts -------------------------- */
+
+/** Sandbox and production money are different money. Never inferred. */
+export const whopEnvironmentEnum = pgEnum("whop_environment", ["sandbox", "production"]);
+
+/**
+ * What happened to a delivery. Deliberately not a boolean: "we have not built
+ * the handler yet" and "the handler ran and succeeded" must never look alike.
+ */
+export const whopWebhookStatusEnum = pgEnum("whop_webhook_status", [
+  /** Verified and recorded; a handler is running or was interrupted. */
+  "received",
+  /** Handled end to end. Only this and the two below are terminal. */
+  "processed",
+  /** A supported financial event with no ClipRewards mapping to write yet. */
+  "awaiting_mapping",
+  /** Correctly signed, but not an event this build claims to understand. */
+  "unsupported",
+  /** Signed by Whop but for another company. Quarantined, never processed. */
+  "rejected_company",
+  /** Processing raised. Retryable — a redelivery is allowed to try again. */
+  "failed",
+]);
+
+/**
+ * DELIVERY LEDGER for inbound Whop webhooks. Not a financial record.
+ *
+ * Whop delivers at least once and does not guarantee order, so the same event
+ * arrives more than once as a matter of course. `webhook_id` — the Standard
+ * Webhooks message id, unique per event by the spec — is the PRIMARY KEY, so
+ * deduplication is a database constraint rather than application logic: an
+ * `insert … on conflict do nothing` decides the winner even when two instances
+ * race on the same delivery. A `check-then-insert` could not.
+ *
+ * WHY NOT REUSE `financial_ledger.uniq_ledger_provider_ref`: that index is
+ * keyed on the financial RESOURCE. `payment.succeeded`, `refund.created` and
+ * `dispute.created` can all legitimately reference one payment id, so it
+ * cannot tell a redelivery apart from a different event about the same money —
+ * and a delivery that produces no ledger row at all (which is every delivery
+ * today) would have nothing to deduplicate against.
+ *
+ * PRIVACY, enforced by absence: no raw body, no card or bank details, no
+ * customer name, email or address. Only the delivery id, what kind of event it
+ * was, which resource and company it named, and how far we got.
+ */
+export const whopWebhookReceipts = pgTable(
+  "whop_webhook_receipts",
+  {
+    /** Standard Webhooks `webhook-id`. The deduplication key. */
+    webhookId: text("webhook_id").primaryKey(),
+    /** Official Whop event name, e.g. "payment.succeeded". */
+    eventType: text("event_type").notNull(),
+    /** The Whop resource the event named, when the payload exposes one. */
+    resourceId: text("resource_id"),
+    /** Company the event belongs to. Compared against WHOP_COMPANY_ID. */
+    companyId: text("company_id"),
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    status: whopWebhookStatusEnum("status").notNull().default("received"),
+    /** Short category for a failure. Never a message that could quote a secret. */
+    failureCategory: text("failure_category"),
+    /** How many times Whop has delivered this same message id. */
+    deliveryCount: integer("delivery_count").notNull().default(1),
+
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * PROCESSING LEASE. Set when an instance takes ownership of the delivery,
+     * cleared implicitly by reaching a terminal status.
+     *
+     * Without it, an instance that dies mid-handler leaves the row `received`
+     * forever and no redelivery may ever touch it again — a verified payment
+     * stuck permanently, which is not an acceptable failure mode for money.
+     * A lease older than the window is treated as abandoned and may be
+     * reclaimed.
+     */
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    /** Set only when a terminal state is actually reached. Never in advance. */
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_whop_receipts_received").on(t.receivedAt),
+    index("idx_whop_receipts_status").on(t.status),
+    index("idx_whop_receipts_event").on(t.eventType, t.receivedAt),
+    index("idx_whop_receipts_resource").on(t.resourceId),
+    // Finds abandoned leases without scanning the table.
+    index("idx_whop_receipts_claimed").on(t.status, t.claimedAt),
+  ],
+);

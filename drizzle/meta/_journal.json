@@ -8,6 +8,13 @@
       "when": 1788273242986,
       "tag": "0000_high_titanium_man",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788411201936,
+      "tag": "0001_careful_manta",
+      "breakpoints": true
     }
   ]
 }
