@@ -355,3 +355,90 @@ export const whopWebhookReceipts = pgTable(
     index("idx_whop_receipts_claimed").on(t.status, t.claimedAt),
   ],
 );
+
+/* --------------------------- payment_orders ------------------------------ */
+
+/**
+ * Where an order is in its life. Minimal on purpose: refund and payout states
+ * are absent because neither flow exists, and inventing them would imply a
+ * capability we do not have.
+ */
+export const paymentOrderStatusEnum = pgEnum("payment_order_status", [
+  /** Created internally. The amount is fixed from this moment on. */
+  "created",
+  /** A Whop checkout configuration exists for it. */
+  "checkout_created",
+  /** The provider reports a charge in flight. */
+  "payment_pending",
+  /** A verified provider payment matched this order in every particular. */
+  "paid",
+  /** The provider reports the charge did not succeed. Retryable. */
+  "failed",
+  /** Abandoned before payment. Terminal. */
+  "cancelled",
+]);
+
+/**
+ * INTERNAL PAYMENT ORDERS — our own record of an intended payment.
+ *
+ * This is the authority for what an order is worth. A checkout is built FROM a
+ * row here, never the other way round: the browser asks to pay for an order,
+ * and the price comes out of this table. Nothing a browser sends can change an
+ * amount once the row exists.
+ *
+ * Deliberately generic. It is not "campaign funding" — campaigns do not exist
+ * yet, and naming it for a feature we have not built would be a lie in the
+ * schema. `purpose` records what an order was for, so campaign funding, brand
+ * payments and whatever comes later can share it without a rewrite.
+ *
+ * MONEY: `amount_minor` is a bigint of the currency's minor unit, never a
+ * float and never a JS number at rest. `currency` is a lowercase ISO 4217 code
+ * so a row can never be ambiguous about what it measures. Nothing here is
+ * summed across currencies.
+ *
+ * This table records an ORDER, not a ledger entry. `financial_ledger` remains
+ * the only place money is accounted for, and nothing writes it yet.
+ */
+export const paymentOrders = pgTable(
+  "payment_orders",
+  {
+    /** Server-generated. A client-supplied id is never accepted. */
+    orderId: uuid("order_id").primaryKey().defaultRandom(),
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** Minor units. 1000 = $10.00. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    /** Lowercase ISO 4217, matching how Whop reports a currency. */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    status: paymentOrderStatusEnum("status").notNull().default("created"),
+    /** What this order is for. Free-form but server-set; never a fake entity id. */
+    purpose: text("purpose").notNull(),
+
+    /** Whop checkout configuration, prefixed `ch_`. */
+    whopCheckoutId: text("whop_checkout_id"),
+    /** The plan Whop created or reused for the checkout, prefixed `plan_`. */
+    whopPlanId: text("whop_plan_id"),
+    /**
+     * The provider payment that settled this order, prefixed `pay_`.
+     * UNIQUE: one Whop payment must never be able to settle two orders, and
+     * that has to be a database constraint — an application check loses the
+     * race between two concurrent deliveries.
+     */
+    whopPaymentId: text("whop_payment_id"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Set only when a verified provider payment matched. Never in advance. */
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_orders_status").on(t.status),
+    index("idx_orders_created").on(t.createdAt),
+    index("idx_orders_checkout").on(t.whopCheckoutId),
+    // Partial: most orders have no payment yet, and many nulls must not collide.
+    uniqueIndex("uniq_orders_whop_payment")
+      .on(t.whopPaymentId)
+      .where(sql`whop_payment_id is not null`),
+  ],
+);

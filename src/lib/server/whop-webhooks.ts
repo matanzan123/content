@@ -11,6 +11,7 @@ import {
   getWhopWebhookSecret,
 } from "./whop-payments";
 import { verifyPaymentOwnership } from "./whop-resources";
+import { mapPaymentToOrder, type MappingOutcome } from "./whop-payment-mapping";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -177,18 +178,51 @@ export type HandlerResult =
   | { kind: "failed"; category: string };
 
 /**
- * The seam the next phase fills in. Each handler will eventually resolve the
- * Whop resource to a ClipRewards campaign or order and write ONE
- * `financial_ledger` row, idempotently, keyed on the provider reference. None
- * of them writes anything today, and none may until that mapping exists —
- * revenue attributed to a campaign nobody can name is worse than no revenue.
+ * Settles the internal ORDER a verified payment names — and nothing else.
+ *
+ * `mapPaymentToOrder` re-fetches the payment and compares the provider's own
+ * amount, currency, company, metadata and status against our order before any
+ * state moves. A mismatch on any of them leaves the order untouched.
+ *
+ * NO `financial_ledger` WRITE HAPPENS HERE OR ANYWHERE BELOW IT. Proving that
+ * a payment maps to an order is this phase; accounting for the money is the
+ * next one, and it must not be inferred from this succeeding.
  */
-export async function handleWhopPaymentSucceeded(): Promise<HandlerResult> {
-  return { kind: "business_mapping_not_implemented" };
+export async function handleWhopPaymentSucceeded(resourceId: string | null): Promise<HandlerResult> {
+  const outcome = await mapPaymentToOrder(resourceId, "succeeded");
+  return describeMapping(outcome);
 }
 
-export async function handleWhopPaymentFailed(): Promise<HandlerResult> {
-  return { kind: "business_mapping_not_implemented" };
+export async function handleWhopPaymentFailed(resourceId: string | null): Promise<HandlerResult> {
+  const outcome = await mapPaymentToOrder(resourceId, "failed");
+  return describeMapping(outcome);
+}
+
+export async function handleWhopPaymentPending(resourceId: string | null): Promise<HandlerResult> {
+  const outcome = await mapPaymentToOrder(resourceId, "pending");
+  return describeMapping(outcome);
+}
+
+/**
+ * Translates a mapping outcome into a receipt state.
+ *
+ * A resolved order is `handled` — the event did everything this build claims
+ * to do with it. A refusal is `failed` with the reason as its category, so a
+ * mismatch is visible in the receipts table rather than being swallowed as
+ * "nothing to do". A payment that simply is not settled yet is neither: it is
+ * recorded as awaiting the mapping that a later event will complete.
+ */
+function describeMapping(outcome: MappingOutcome): HandlerResult {
+  switch (outcome.kind) {
+    case "paid":
+    case "pending":
+    case "failed_recorded":
+      return { kind: "handled" };
+    case "ignored":
+      return { kind: "business_mapping_not_implemented" };
+    case "rejected":
+      return { kind: "failed", category: outcome.reason };
+  }
 }
 
 export async function handleWhopRefundCreated(): Promise<HandlerResult> {
@@ -214,10 +248,12 @@ export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
  */
 const OWNERSHIP_GATED = new Set<string>(["payment.succeeded", "payment.failed", "payment.pending"]);
 
-const HANDLERS: Record<SupportedEvent, () => Promise<HandlerResult>> = {
+type Handler = (resourceId: string | null) => Promise<HandlerResult>;
+
+const HANDLERS: Record<SupportedEvent, Handler> = {
   "payment.succeeded": handleWhopPaymentSucceeded,
   "payment.failed": handleWhopPaymentFailed,
-  "payment.pending": handleWhopPaymentFailed,
+  "payment.pending": handleWhopPaymentPending,
   "refund.created": handleWhopRefundCreated,
   "refund.updated": handleWhopRefundCreated,
   "dispute.created": handleWhopDisputeCreated,
@@ -425,7 +461,7 @@ export async function processVerifiedWebhook(
   }
 
   try {
-    const result = await HANDLERS[eventType]();
+    const result = await HANDLERS[eventType](resourceId);
 
     if (result.kind === "failed") {
       await db

@@ -139,7 +139,7 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
   const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
   const gated = source.slice(source.indexOf("OWNERSHIP_GATED"), source.indexOf("const HANDLERS"));
   check("E. payment events are ownership-gated", ["payment.succeeded", "payment.failed", "payment.pending"].every((e) => gated.includes(e)));
-  const boundary = source.slice(source.indexOf("if (OWNERSHIP_GATED"), source.indexOf("await HANDLERS[eventType]()"));
+  const boundary = source.slice(source.indexOf("if (OWNERSHIP_GATED"), source.indexOf("await HANDLERS[eventType]("));
   check("E. the gate calls the authoritative lookup", boundary.includes("verifyPaymentOwnership(resourceId)"));
   check("E. anything other than verified stops the dispatch", boundary.includes('ownership.kind !== "verified"'));
   check("E. the payload company_id alone can never satisfy the gate", boundary.includes("companyId") === false);
@@ -153,7 +153,13 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
   const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
   const handlers = source.slice(source.indexOf("export async function handleWhopPaymentSucceeded"), source.indexOf("const OWNERSHIP_GATED"));
   check("F. no handler writes to a database", handlers.includes("db.") === false && handlers.includes("insert(") === false);
-  check("F. every handler still reports business_mapping_not_implemented", (handlers.match(/business_mapping_not_implemented/g) ?? []).length >= 5);
+  // Payment handlers now resolve an internal ORDER. The refund, dispute and
+  // payout handlers still report no mapping, because theirs does not exist.
+  check("F. non-payment handlers still report no mapping", (handlers.match(/business_mapping_not_implemented/g) ?? []).length >= 3);
+  check("F. payment handlers delegate to the order mapping", handlers.includes("mapPaymentToOrder(resourceId"));
+  const mapping = readFileSync("src/lib/server/whop-payment-mapping.ts", "utf8");
+  check("F. the mapping never writes the ledger", mapping.includes("financialLedger") === false);
+  check("F. the mapping only ever updates an order", mapping.includes("markOrderPaid") && mapping.includes("recordOrderAttempt"));
   check("F. a verified payment therefore ends at awaiting_mapping", source.includes('result.kind === "handled" ? "processed" : "awaiting_mapping"'));
 }
 

@@ -15,6 +15,13 @@
       "when": 1788411201936,
       "tag": "0001_careful_manta",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788432343473,
+      "tag": "0002_misty_obadiah_stane",
+      "breakpoints": true
     }
   ]
 }

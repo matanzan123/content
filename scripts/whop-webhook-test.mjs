@@ -56,6 +56,9 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   eq: () => {},
   getDb: () => null,
   verifyPaymentOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
+  // suites test the receiver, not the mapping.
+  mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
   whopWebhookReceipts: {},
   getWhopWebhookSecret: () => SECRET,
   getWhopCompanyId: () => COMPANY,
@@ -167,6 +170,9 @@ const paymentBody = JSON.stringify({
     eq: () => {},
     getDb: () => null,
     verifyPaymentOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
+  // suites test the receiver, not the mapping.
+  mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
     whopWebhookReceipts: {},
     getWhopWebhookSecret: () => null,
     getWhopCompanyId: () => COMPANY,

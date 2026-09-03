@@ -74,6 +74,9 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   // Ownership is proved in whop-resources-test.mjs; here it is stubbed so the
   // retry/lease semantics are what is under test.
   verifyPaymentOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
+  // suites test the receiver, not the mapping.
+  mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
   describeWhopError: (e) => (e instanceof Error ? e.message : "unknown error"),
 });
 
@@ -238,7 +241,7 @@ try {
     check("G. no JS clock stamps any receipt timestamp", source.includes("new Date()") === false);
     check("G. every lifecycle timestamp uses the database clock", source.includes("const dbNow = sql"));
     check("G. the lease window is compared inside Postgres", acquisition.includes("now() - make_interval"));
-    check("the ownership gate sits before dispatch", source.indexOf("verifyPaymentOwnership") < source.indexOf("await HANDLERS[eventType]()"));
+    check("the ownership gate sits before dispatch", source.indexOf("verifyPaymentOwnership") < source.indexOf("await HANDLERS[eventType]("));
     check("delivery_count is incremented in SQL", acquisition.includes("deliveryCount: sql`"));
     check("an in-flight delivery is not acknowledged", acquisition.includes("kind: \"processing_in_flight\""));
   }
