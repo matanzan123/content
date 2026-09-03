@@ -1,8 +1,7 @@
-import { redirect } from "next/navigation";
 import { AccessDenied } from "@/components/admin/AccessDenied";
+import { AdminSignIn } from "@/components/admin/AdminSignIn";
 import { AdminSidebar } from "@/components/admin/AdminSidebar";
 import { getAdminCheck } from "@/lib/server/admin-guard";
-import { localePath } from "@/i18n/config";
 import { getI18n } from "@/i18n/server";
 
 type Params = { params: Promise<{ locale: string }> };
@@ -32,7 +31,17 @@ export default async function AdminLayout({
   const check = await getAdminCheck();
 
   if (!check.ok) {
-    if (check.reason === "unauthenticated") redirect(localePath(locale, "/login"));
+    // An unauthenticated visitor is not refused — they are offered the admin
+    // sign-in, which is the only surface that mints an admin session cookie.
+    // Sending them to the public /login would drop them into creator
+    // onboarding, which cannot produce one.
+    if (check.reason === "unauthenticated") {
+      return (
+        <div className="admin-root flex min-h-screen flex-col">
+          <AdminSignIn locale={locale} t={t.admin} />
+        </div>
+      );
+    }
     const unconfigured = check.reason === "unconfigured";
     return (
       <div className="admin-root flex min-h-screen flex-col">

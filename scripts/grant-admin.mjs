@@ -21,7 +21,9 @@ import { getAuth } from "firebase-admin/auth";
 function loadEnv() {
   try {
     const file = readFileSync(path.resolve(".env.local"), "utf8");
-    for (const line of file.split("\n")) {
+    // Split on either ending: a CRLF file leaves a trailing \r that JS's `.`
+    // will not match, which silently drops every variable on Windows.
+    for (const line of file.split(/\r?\n/)) {
       const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
       if (!match) continue;
       const [, key, rawValue] = match;
