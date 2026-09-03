@@ -6,7 +6,9 @@ import type { AnalyticsEvent, ClientEvent, DeviceCategory, UserType } from "./sc
    SERVER-SIDE EVENT ENRICHMENT
 
    Everything a visitor could lie about is decided here, not accepted from the
-   request body: country, device, browser, referrer host, and identity.
+   request body: country, device, browser, and identity. The referrer host is
+   the exception the browser alone can supply — it arrives already reduced to a
+   hostname by `parseEvent`, and is discarded here when it names this site.
 
    PRIVACY: the raw IP is never read into a stored field. Geography comes from
    a header the hosting platform attaches after it has already seen the IP, so
@@ -21,7 +23,6 @@ import type { AnalyticsEvent, ClientEvent, DeviceCategory, UserType } from "./sc
  * null and the dashboard reports "unknown" rather than guessing.
  */
 const COUNTRY_HEADERS = ["x-vercel-ip-country", "cf-ipcountry"] as const;
-const REGION_HEADERS = ["x-vercel-ip-country-region", "cf-region-code"] as const;
 
 function readFirstHeader(headers: Headers, names: readonly string[]): string | null {
   for (const name of names) {
@@ -38,11 +39,6 @@ function normaliseCountry(value: string | null): string | null {
   return /^[A-Z]{2}$/.test(code) ? code : null;
 }
 
-function normaliseRegion(value: string | null): string | null {
-  if (!value) return null;
-  const code = value.trim().toUpperCase();
-  return /^[A-Z0-9]{1,3}$/.test(code) ? code : null;
-}
 
 /**
  * Coarse device class from client hints where available, falling back to a
@@ -73,18 +69,38 @@ function browserFamily(headers: Headers): string | null {
   return "Other";
 }
 
-/**
- * Referrer HOST, never the full URL. A referring URL's path and query can
- * carry someone else's personal data, and we have no use for it.
- */
-function referrerHost(raw: string | null): string | null {
+/** The host this request was served on, without its port. */
+function ownHost(headers: Headers): string | null {
+  const raw = headers.get("x-forwarded-host") ?? headers.get("host");
   if (!raw) return null;
-  try {
-    const host = new URL(raw).hostname.toLowerCase();
-    return host.length > 253 ? null : host;
-  } catch {
-    return null;
-  }
+  const host = raw.split(",")[0].trim().toLowerCase();
+  // Strip a port; an IPv6 literal keeps its brackets and has no bare colon.
+  return host.replace(/:\d+$/, "") || null;
+}
+
+/** `www.` is the same site as the apex for attribution purposes. */
+function bareHost(host: string): string {
+  return host.replace(/^www\./, "");
+}
+
+/**
+ * EXTERNAL referrers only.
+ *
+ * The host is already sanitised — `parseEvent` reduced `document.referrer` to
+ * a hostname before it got here. What remains is to discard our own: a visitor
+ * arriving at /en/brand from /en came from ClipRewards, which is not a traffic
+ * source, and recording it would make every report say the site refers itself.
+ * Null is the honest answer, and it is what the reports render as "direct".
+ *
+ * Note this is deliberately NOT read from the request's `Referer` header. That
+ * header describes the page the beacon fired from — always a ClipRewards page
+ * — which is exactly the bug this replaces.
+ */
+function externalReferrerHost(host: string | null, headers: Headers): string | null {
+  if (!host) return null;
+  const own = ownHost(headers);
+  if (own && bareHost(host) === bareHost(own)) return null;
+  return host;
 }
 
 /** UTM values are attacker-controlled; clamp hard and keep them opaque. */
@@ -115,10 +131,9 @@ export function enrichEvent(client: ClientEvent, ctx: EnrichContext): AnalyticsE
     user_id: ctx.userId,
     user_type: ctx.userType,
     country: normaliseCountry(readFirstHeader(ctx.headers, COUNTRY_HEADERS)),
-    region: normaliseRegion(readFirstHeader(ctx.headers, REGION_HEADERS)),
     device_category: deviceCategory(ctx.headers),
     browser_family: browserFamily(ctx.headers),
-    referrer_host: referrerHost(ctx.headers.get("referer")),
+    referrer_host: externalReferrerHost(client.referrer_host, ctx.headers),
     utm_source: utm(params.get("utm_source")),
     utm_medium: utm(params.get("utm_medium")),
     utm_campaign: utm(params.get("utm_campaign")),

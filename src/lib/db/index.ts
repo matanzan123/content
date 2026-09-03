@@ -49,6 +49,14 @@ export function getDb(): Database | null {
       max: 3,
       idle_timeout: 20,
       connect_timeout: 10,
+      // Required for a pooled endpoint. Neon's pooler is PgBouncer in
+      // transaction mode, where a named prepared statement created on one
+      // pooled backend is not there on the next — postgres.js prepares by
+      // default, so leaving this on produces intermittent "prepared statement
+      // does not exist" failures that only appear under concurrency. The cost
+      // on a direct connection is small, and serverless instances are too
+      // short-lived to amortise a prepared statement anyway.
+      prepare: false,
       // Analytics writes must never take the page down; surface nothing.
       onnotice: () => {},
     });

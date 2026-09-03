@@ -126,9 +126,18 @@ export async function storeEvents(events: AnalyticsEvent[]): Promise<StoreResult
     }
 
     return { stored: events.length, configured: true };
-  } catch {
+  } catch (error) {
     // Never surface a database error to a browser: the message can carry table
     // names, the query, or the host. The collector answers 204 regardless.
+    //
+    // It does go to the server log. A write that fails silently on both sides
+    // is indistinguishable from no traffic at all, which would make a broken
+    // connection look like an empty database — exactly the confusion the
+    // unconfigured/empty/zero distinction exists to prevent.
+    console.error(
+      "[analytics] event write failed:",
+      error instanceof Error ? error.message : "unknown error",
+    );
     return { stored: 0, configured: true };
   }
 }

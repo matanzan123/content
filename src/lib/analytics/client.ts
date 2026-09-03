@@ -65,6 +65,30 @@ function currentLocale(): "en" | "he" {
 }
 
 /**
+ * Where this visit came from, sent ONCE per session.
+ *
+ * The beacon's own `Referer` header is useless for this: it names the
+ * ClipRewards page that fired the request, so every session would be
+ * attributed to ClipRewards itself. `document.referrer` is the only place the
+ * true external source survives, and it survives only on the landing page — an
+ * internal navigation replaces it with one of our own URLs.
+ *
+ * Sent on `session_started` alone, so no mid-session event can overwrite
+ * first-touch attribution. The value is read in the same tick and never
+ * written to localStorage or sessionStorage; the full URL lives in this one
+ * request body and nowhere else, and the server reduces it to a hostname
+ * before anything is stored.
+ */
+function sessionReferrer(name: EventName): string | undefined {
+  if (name !== "session_started") return undefined;
+  try {
+    return document.referrer || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fire-and-forget. `sendBeacon` survives a navigation, which matters for the
  * click that takes the visitor away from the page. Analytics must never block
  * or delay a user action, so every failure is swallowed.
@@ -82,6 +106,7 @@ export function track(name: EventName, metadata?: Metadata): void {
     is_new_visitor: visitor.isNew,
     locale: currentLocale(),
     path: window.location.pathname,
+    referrer: sessionReferrer(name),
     metadata,
   });
 

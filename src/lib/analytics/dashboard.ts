@@ -33,7 +33,14 @@ async function attempt<T>(run: () => Promise<T>): Promise<Outcome<T>> {
   if (!isDatabaseConfigured()) return unconfigured<T>();
   try {
     return { ok: true, data: await run() };
-  } catch {
+  } catch (error) {
+    // The panel shows a generic failure — a query or a host name must not
+    // reach the browser. The reason is written to the server log so a real
+    // fault is diagnosable instead of looking like a configuration problem.
+    console.error(
+      "[admin] dashboard query failed:",
+      error instanceof Error ? error.message : "unknown error",
+    );
     return { ok: false, reason: "error" };
   }
 }

@@ -153,12 +153,22 @@ export type ClientEvent = {
   visitor_id: string | null;
   locale: "en" | "he";
   path: string;
+  /**
+   * Referrer HOSTNAME, already reduced from `document.referrer` at the
+   * validation boundary — never a full URL. Non-null only on
+   * `session_started`: first-touch attribution belongs to the session, and a
+   * later event carrying a referrer could only be an internal page.
+   */
+  referrer_host: string | null;
   metadata?: Metadata;
 };
 
 /**
  * The stored record. Fields the browser cannot be trusted with — country,
- * device, referrer host, user identity — are filled in on the server.
+ * device, user identity — are filled in on the server. The referrer host is
+ * the one field the browser is the only source for, so the server does not
+ * fill it in but does police it: it is sanitised at the validation boundary
+ * and dropped when it names ClipRewards itself.
  */
 export type AnalyticsEvent = ClientEvent & {
   event_id: string;
@@ -172,12 +182,9 @@ export type AnalyticsEvent = ClientEvent & {
   user_type: UserType;
   /** ISO 3166-1 alpha-2, from a trusted platform header. Null when unknown. */
   country: string | null;
-  region: string | null;
   device_category: DeviceCategory;
   /** Browser family only — never the full user-agent string. */
   browser_family: string | null;
-  /** Referrer HOST only. The full URL can carry personal data in its query. */
-  referrer_host: string | null;
   utm_source: string | null;
   utm_medium: string | null;
   utm_campaign: string | null;

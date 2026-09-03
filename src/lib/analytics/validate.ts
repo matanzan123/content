@@ -61,6 +61,28 @@ export function sanitiseMetadata(raw: unknown): Metadata | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+/**
+ * Reduces a referring URL to its HOSTNAME, or null.
+ *
+ * A referring URL's path, query and fragment can carry someone else's personal
+ * data — a search term, an email in a link — and we have no use for any of it.
+ * Reduction happens here, at the boundary, so the full URL never reaches
+ * enrichment, storage or a report. Credentials in a `user:pass@host` URL are
+ * discarded by the same step, because `URL.hostname` excludes them.
+ *
+ * Anything unparseable is null rather than a guess: an unattributed session is
+ * correct, an invented source is not.
+ */
+export function referrerHost(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw || raw.length > 2048) return null;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host && host.length <= 253 ? host : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseEvent(raw: unknown): ClientEvent | null {
   if (!raw || typeof raw !== "object") return null;
   const input = raw as Record<string, unknown>;
@@ -85,6 +107,11 @@ export function parseEvent(raw: unknown): ClientEvent | null {
       ? input.visitor_id
       : null;
 
+  // First-touch attribution is a property of the SESSION, so the referrer is
+  // read from the one event that opens it. Accepting it on a later event would
+  // let an internal page overwrite where the visitor actually came from.
+  const referrer = input.name === "session_started" ? referrerHost(input.referrer) : null;
+
   return {
     name: input.name,
     occurred_at: occurredAt,
@@ -92,6 +119,7 @@ export function parseEvent(raw: unknown): ClientEvent | null {
     visitor_id: visitorId,
     locale: input.locale,
     path: input.path.split("?")[0],
+    referrer_host: referrer,
     metadata: sanitiseMetadata(input.metadata),
   };
 }
