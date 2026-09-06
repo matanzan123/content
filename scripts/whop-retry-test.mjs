@@ -77,6 +77,12 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
   // suites test the receiver, not the mapping.
   mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
+  // The refund seam, stubbed for the same reason: refund mapping and refund
+  // accounting are proved in refund-test.mjs, so what is under test here is
+  // the retry and lease semantics of the receiver, not what a refund decides.
+  verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
+  postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
   describeWhopError: (e) => (e instanceof Error ? e.message : "unknown error"),
 });
 

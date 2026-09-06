@@ -59,6 +59,13 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
   // suites test the receiver, not the mapping.
   mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
+  // The refund seam, stubbed for the same reason: refund mapping and refund
+  // accounting are proved in refund-test.mjs, so what is under test here is
+  // the RECEIVER — that a refund event reaches an ownership gate and a
+  // handler at all, not what those then decide.
+  verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
+  postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
   whopWebhookReceipts: {},
   getWhopWebhookSecret: () => SECRET,
   getWhopCompanyId: () => COMPANY,
@@ -172,6 +179,9 @@ const paymentBody = JSON.stringify({
   // Order mapping is proved in whop-checkout-test.mjs; stubbed here so these
   // suites test the receiver, not the mapping.
   mapPaymentToOrder: async () => ({ kind: "ignored", reason: "not_settled" }),
+    verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+    mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
+    postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
     whopWebhookReceipts: {},
     getWhopWebhookSecret: () => null,
     getWhopCompanyId: () => COMPANY,
@@ -212,17 +222,42 @@ for (const name of ["chat.message.created", "product.created", "membership.activ
 check("a body with no event name degrades to unknown", webhooks.readEnvelope({}).eventType === "unknown");
 check("a null body does not throw", webhooks.readEnvelope(null).eventType === "unknown");
 
-/* -------------- handlers exist but write nothing financial yet ------------ */
+/* ------------------- handlers, and which are implemented ------------------ */
 
-for (const handler of [
-  "handleWhopPaymentSucceeded",
-  "handleWhopPaymentFailed",
-  "handleWhopRefundCreated",
-  "handleWhopDisputeCreated",
-  "handleWhopPayoutUpdated",
-]) {
+// The payment handlers reach a mapping that is STUBBED here to report
+// "not settled", so they correctly report that there was nothing to do.
+for (const handler of ["handleWhopPaymentSucceeded", "handleWhopPaymentFailed"]) {
   const result = await webhooks[handler]();
-  check(`${handler} reports business_mapping_not_implemented`, result.kind === "business_mapping_not_implemented");
+  check(
+    `${handler} reports business_mapping_not_implemented on an unmapped payment`,
+    result.kind === "business_mapping_not_implemented",
+  );
+}
+
+// REFUNDS ARE NOW IMPLEMENTED. The old assertion here — that
+// `handleWhopRefundCreated` reported `business_mapping_not_implemented` — was
+// a true statement about a build that had no refund mapping, and it is
+// deliberately replaced rather than deleted: the refund handler now RESOLVES
+// its event, and the thing worth asserting is that it does.
+check(
+  "the old refund stub is gone",
+  webhooks.handleWhopRefundCreated === undefined,
+);
+{
+  // `mapRefundToOrder` is stubbed to report a pending refund, so the handler
+  // should treat the delivery as fully handled and post nothing.
+  const result = await webhooks.handleWhopRefund("rf_x", "msg_x");
+  check("handleWhopRefund RESOLVES a refund event rather than deferring it",
+    result.kind === "handled", JSON.stringify(result));
+}
+
+// DISPUTES AND PAYOUTS ARE STILL NOT IMPLEMENTED, and must stay that way.
+for (const handler of ["handleWhopDisputeCreated", "handleWhopPayoutUpdated"]) {
+  const result = await webhooks[handler]();
+  check(
+    `${handler} still reports business_mapping_not_implemented`,
+    result.kind === "business_mapping_not_implemented",
+  );
 }
 
 /* ------------------------ I. wrong company detected ----------------------- */

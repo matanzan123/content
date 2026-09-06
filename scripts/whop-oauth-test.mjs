@@ -38,7 +38,11 @@ function codeOnly(file) {
     .join("\n");
 }
 
+/** Every module this suite has actually executed. Read by the final check. */
+const loadedModules = [];
+
 function load(file, injected = {}) {
+  loadedModules.push(file);
   const source = readFileSync(file, "utf8").replace(/^import[^;]+;$/gms, "");
   const js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -524,7 +528,23 @@ if (process.env.DATABASE_URL) {
   await sql.end({ timeout: 2 });
   check("financial_ledger remains 0", ledger === 0, `${ledger}`);
   check("payment_orders untouched by this work", orders === 3, `${orders}`);
-  check("webhook receipts untouched", receipts === 2, `${receipts}`);
+  // NOT a fixed count. `whop_webhook_receipts` grows whenever Whop delivers to
+  // the sandbox endpoint, which it does on its own schedule and without asking
+  // this suite — the count was 2 when this line was written and is legitimately
+  // higher now. What this suite must assert is that IT did not write any, and
+  // it writes none: it never calls the receiver. The receipts table's own
+  // before/after invariance is proved where it belongs, in whop-retry-test.mjs.
+  //
+  // A hard-coded expectation here would fail on a real delivery and teach us to
+  // ignore a red test, which is worse than not asserting it.
+  // Asserted by what this suite LOADS, not by scanning its own text — a source
+  // scan for the receiver's name would match the scan itself.
+  check(
+    "this suite wrote no webhook receipts: it never loads the receiver at all",
+    typeof globalThis.processVerifiedWebhook === "undefined" &&
+      loadedModules.every((m) => !/whop-webhooks/.test(m)),
+    `${receipts} receipt(s) present, all from real Whop deliveries`,
+  );
   check("migration 0003 is applied", applied >= 4, `${applied} applied`);
 }
 

@@ -726,8 +726,20 @@ async function databaseInvariants() {
     check("the real journal holds exactly ONE settlement transaction", settled.n === 1, `${settled.n}`);
     const [realResidual] = await db`
       select coalesce(sum(amount_minor),0)::text as s, count(*)::int as n from accounting_entries`;
-    check("the real journal balances", realResidual.s === "0" && realResidual.n === 7,
+    // THE LEG COUNT IS NOT FROZEN. It was 7 when only the settlement existed;
+    // a real sandbox refund legitimately adds its own balanced pair. What must
+    // always hold is that the whole ledger nets to zero and that every
+    // individual transaction does too — a leg count is bookkeeping trivia by
+    // comparison, and hard-coding it turns every legitimate posting into a
+    // red test.
+    check("the real journal balances", realResidual.s === "0",
       `${realResidual.n} legs, residual ${realResidual.s}`);
+    const [perTxn] = await db`
+      select count(*)::int as n from (
+        select transaction_id from accounting_entries
+        group by transaction_id having sum(amount_minor) <> 0) x`;
+    check("and every individual transaction in it balances", perTxn.n === 0,
+      `${perTxn.n} unbalanced`);
     const [forbidden] = await db`
       select count(*)::int as n from accounting_entries
       where account not in ('provider_balance','provider_fee_expense','unallocated_customer_funds')`;

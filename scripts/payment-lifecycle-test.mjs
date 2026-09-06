@@ -187,15 +187,27 @@ check("`payment.affiliate_reward_created` is NOT accepted — no resolver",
 check("an invented event is not accepted", webhooks.isSupportedEvent("payment.definitely_paid") === false);
 
 const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
-check("every payment event is ownership-gated", (() => {
+// The gate is a MAP now rather than a Set — refunds join it with their own
+// verifier, because an `rf_` id cannot be proved by the payment verifier — so
+// the block is sliced to its closing brace instead of a closing bracket.
+const gateBlock = (() => {
   const start = source.indexOf("const OWNERSHIP_GATED");
-  const gate = source.slice(start, source.indexOf("]);", start));
-  return start > 0 && paymentEvents.every((e) => gate.includes(`"${e}"`));
-})());
-check("refunds are still recognised but NOT implemented",
+  return start > 0 ? source.slice(start, source.indexOf("\n};", start)) : "";
+})();
+check("every payment event is ownership-gated",
+  gateBlock.length > 0 &&
+  paymentEvents.every((e) => gateBlock.includes(`"${e}": verifyPaymentOwnership`)));
+// REFUNDS ARE NOW IMPLEMENTED. This assertion previously recorded that they
+// were not; it is replaced rather than deleted, because "refunds are wired to
+// a real resolver and a real ownership verifier" is the property that now has
+// to stay true.
+check("refunds are recognised AND implemented, with their own ownership verifier",
   webhooks.isSupportedEvent("refund.created") === true &&
-  source.includes("export async function handleWhopRefundCreated") &&
-  /handleWhopRefundCreated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source));
+  webhooks.isSupportedEvent("refund.updated") === true &&
+  gateBlock.includes('"refund.created": verifyRefundOwnership') &&
+  gateBlock.includes('"refund.updated": verifyRefundOwnership') &&
+  /export async function handleWhopRefund\(/.test(source) &&
+  !/handleWhopRefundCreated/.test(source));
 check("disputes are still recognised but NOT implemented",
   /handleWhopDisputeCreated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source));
 check("payouts are still recognised but NOT implemented",
@@ -290,6 +302,7 @@ async function sequences() {
   const client = postgres(direct.toString(), { max: 1, prepare: false, onnotice: () => {} });
 
   const before = await client`select count(*)::int as n from accounting_transactions`;
+  const [{ n: beforeMigrations }] = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
   const beforeOrders = await client`select order_id, status, paid_at from payment_orders order by created_at`;
 
   try {
@@ -826,8 +839,11 @@ async function sequences() {
     check("REAL DB: accounting_transactions is unchanged", after[0].n === before[0].n, `${after[0].n}`);
     const [entries] = await client`
       select coalesce(sum(amount_minor),0)::text as s, count(*)::int as n from accounting_entries`;
-    check("REAL DB: the real journal still balances with 7 legs",
-      entries.n === 7 && entries.s === "0", `${entries.n} legs, residual ${entries.s}`);
+    // Not a frozen leg count: a real sandbox refund adds its own balanced pair
+    // to the real ledger. `before`/`after` above already prove THIS suite
+    // added no transaction; what matters here is that the journal nets to zero.
+    check("REAL DB: the real journal still balances",
+      entries.s === "0", `${entries.n} legs, residual ${entries.s}`);
     const [ledger] = await client`select count(*)::int as n from financial_ledger`;
     check("REAL DB: financial_ledger is still 0", ledger.n === 0);
     const afterOrders = await client`select order_id, status, paid_at from payment_orders order by created_at`;
@@ -835,7 +851,11 @@ async function sequences() {
       JSON.stringify(afterOrders) === JSON.stringify(beforeOrders),
       afterOrders.map((o) => o.status).join(","));
     const [migrations] = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
-    check("REAL DB: still 5 migrations — no schema change was applied", migrations.n === 5);
+    // 6 since migration 0005 (payment_refunds) was applied. The assertion is
+    // that THIS SUITE applied none, which is why it is compared to the count
+    // captured before the run rather than to a literal.
+    check("REAL DB: no schema change was applied by this suite — still 6 migrations",
+      migrations.n === beforeMigrations && migrations.n === 6, `${migrations.n}`);
     const [gone] = await client`
       select count(*)::int as n from information_schema.schemata where schema_name = ${SCRATCH}`;
     check("REAL DB: the throwaway schema is gone", gone.n === 0);

@@ -36,6 +36,13 @@
       "when": 1788681413190,
       "tag": "0004_thin_ben_urich",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788697382928,
+      "tag": "0005_slippery_hitman",
+      "breakpoints": true
     }
   ]
 }

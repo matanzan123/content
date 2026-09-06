@@ -14,6 +14,9 @@ import { verifyPaymentOwnership } from "./whop-resources";
 import { shouldRetryLookup } from "./payment-lifecycle";
 import { mapPaymentToOrder, type MappingOutcome } from "./whop-payment-mapping";
 import { postWhopSettlement } from "./accounting/whop-payment-posting";
+import { mapRefundToOrder, type RefundMappingOutcome } from "./whop-refund-mapping";
+import { postWhopRefund } from "./accounting/whop-refund-posting";
+import { verifyRefundOwnership } from "./whop-refunds";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -290,8 +293,77 @@ function describeMapping(outcome: MappingOutcome): HandlerResult {
   }
 }
 
-export async function handleWhopRefundCreated(): Promise<HandlerResult> {
-  return { kind: "business_mapping_not_implemented" };
+/**
+ * Resolves the REFUND a verified delivery names, and then — and only then —
+ * accounts for the money.
+ *
+ * THE SAME TWO-STEP SHAPE AS `handleWhopPaymentSucceeded`, for the same
+ * reason. `mapRefundToOrder` re-fetches the refund AND the payment it names,
+ * and compares the provider's own account, order reference, currency, amount
+ * and cumulative refunded total against our order before any state moves. A
+ * mismatch on any of them leaves everything untouched and returns something
+ * other than `completed`, so the posting below is never reached.
+ *
+ * BOTH REFUND EVENTS ROUTE HERE, and that is not laziness. Whop's two refund
+ * events carry no outcome in their names: a refund that succeeded and one that
+ * failed both arrive as `refund.updated`. The outcome comes from the FETCHED
+ * `refund.status`, so the two events genuinely have nothing to distinguish
+ * them at this layer, and giving them separate handlers would only invite one
+ * of them to drift.
+ *
+ * `alreadyCompleted` STILL POSTS, exactly as `alreadyPaid` does. It means an
+ * earlier delivery already recorded the refund as completed, which says
+ * nothing about whether the accounting for it was written — a crash between
+ * the two leaves a completed refund with no journal entry, and a redelivery is
+ * the door through which that gap gets filled. Posting is idempotent on
+ * `whop:payment_refunded:<rf_id>`, so a delivery arriving after a complete one
+ * converges instead of duplicating.
+ *
+ * A FAILED POSTING FAILS THE DELIVERY, for the same reason it does on the
+ * payment side: a completed refund that is not in the ledger is a hole in the
+ * accounts, and acknowledging would close the only door through which it can
+ * be filled.
+ */
+export async function handleWhopRefund(
+  resourceId: string | null,
+  webhookId: string | null,
+): Promise<HandlerResult> {
+  const outcome = await mapRefundToOrder(resourceId);
+  if (outcome.kind !== "completed") return describeRefundMapping(outcome);
+
+  const environment = getWhopEnvironment();
+  if (!environment) return { kind: "failed", category: "accounting_unconfigured" };
+
+  const posted = await postWhopRefund(outcome.refundId, {
+    environment,
+    orderId: outcome.orderId,
+    sourceWebhookId: webhookId,
+  });
+
+  if (!posted.ok) return { kind: "failed", category: `refund_accounting_${posted.reason}` };
+
+  return { kind: "handled" };
+}
+
+/**
+ * Translates a refund mapping outcome into a receipt state.
+ *
+ * A PENDING REFUND IS `handled`, not `awaiting_mapping`. The mapping did
+ * everything there is to do: the refund was verified, recorded, and correctly
+ * produced no accounting because the provider has not moved the money. A later
+ * `refund.updated` brings the outcome. Filing it as awaiting-mapping would
+ * imply a missing implementation rather than a refund that is simply still in
+ * flight.
+ */
+function describeRefundMapping(outcome: RefundMappingOutcome): HandlerResult {
+  switch (outcome.kind) {
+    case "completed":
+    case "pending":
+    case "failed_recorded":
+      return { kind: "handled" };
+    case "rejected":
+      return { kind: "failed", category: `refund_${outcome.reason}` };
+  }
 }
 
 export async function handleWhopDisputeCreated(): Promise<HandlerResult> {
@@ -304,21 +376,42 @@ export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
 
 /**
  * Events whose resource must be proved to belong to us BEFORE any handler
- * runs. These are the ones that will eventually move money.
+ * runs. These are the ones that move money.
  *
- * The other supported events name refunds, disputes and payouts — different
- * resource types with their own lookups. They cannot write money today either,
- * and each will join this gate as its own resolver is written. None of them
- * may be connected to `financial_ledger` before that happens.
+ * A MAP AND NOT A SET, because the resource kinds differ. A `payment.*` event
+ * names a `pay_` id and is proved by `verifyPaymentOwnership`; a `refund.*`
+ * event names an `rf_` id and is proved by `verifyRefundOwnership`, which
+ * checks the refund's own account AND the account of the payment it reverses.
+ * Passing an `rf_` id to the payment verifier would fail its shape check and
+ * quarantine every refund as unresolvable — which is safe, but wrong.
+ *
+ * The remaining supported events name disputes and payouts. Those are
+ * different subjects with their own lookups, are NOT in this map, and their
+ * handlers cannot write money — each will join as its own resolver is written.
  */
-const OWNERSHIP_GATED = new Set<string>([
-  "payment.created",
-  "payment.pending",
-  "payment.authorized",
-  "payment.succeeded",
-  "payment.failed",
-  "payment.canceled",
-]);
+const OWNERSHIP_GATED: Record<string, (id: string | null) => Promise<OwnershipOutcome>> = {
+  "payment.created": verifyPaymentOwnership,
+  "payment.pending": verifyPaymentOwnership,
+  "payment.authorized": verifyPaymentOwnership,
+  "payment.succeeded": verifyPaymentOwnership,
+  "payment.failed": verifyPaymentOwnership,
+  "payment.canceled": verifyPaymentOwnership,
+  "refund.created": verifyRefundOwnership,
+  "refund.updated": verifyRefundOwnership,
+};
+
+/**
+ * The shape both verifiers share. Only `kind` is read at the gate — the
+ * account and payment ids the refund verifier additionally returns are proved
+ * again by the mapping, which is where they are actually used.
+ */
+type OwnershipOutcome =
+  | { kind: "verified" }
+  | { kind: "wrong_company" }
+  | { kind: "resource_not_found" }
+  | { kind: "provider_error"; category: string }
+  | { kind: "invalid_resource_id" }
+  | { kind: "unconfigured" };
 
 type Handler = (resourceId: string | null, webhookId: string) => Promise<HandlerResult>;
 
@@ -335,8 +428,10 @@ const HANDLERS: Record<SupportedEvent, Handler> = {
   "payment.succeeded": handleWhopPaymentSucceeded,
   "payment.failed": handleWhopPaymentFailed,
   "payment.canceled": handleWhopPaymentFailed,
-  "refund.created": handleWhopRefundCreated,
-  "refund.updated": handleWhopRefundCreated,
+  // Both refund events route to one resolver: neither name carries an
+  // outcome, so the fetched `refund.status` is the only thing that can decide.
+  "refund.created": handleWhopRefund,
+  "refund.updated": handleWhopRefund,
   "dispute.created": handleWhopDisputeCreated,
   "dispute.updated": handleWhopDisputeCreated,
   "payout.created": handleWhopPayoutUpdated,
@@ -510,8 +605,9 @@ export async function processVerifiedWebhook(
   // account compared to ours. This sits between the receipt and the dispatch
   // so a future handler cannot run without it having passed: the only route to
   // `HANDLERS` is through this gate.
-  if (OWNERSHIP_GATED.has(eventType)) {
-    const ownership = await verifyPaymentOwnership(resourceId);
+  const verifyOwnership = OWNERSHIP_GATED[eventType];
+  if (verifyOwnership) {
+    const ownership = await verifyOwnership(resourceId);
 
     if (ownership.kind !== "verified") {
       // Whop signed it, but it is not ours: quarantine terminally. Retrying

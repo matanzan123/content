@@ -739,3 +739,98 @@ export const accountingEntries = pgTable(
     index("idx_entries_counterparty").on(t.counterpartyType, t.counterpartyId),
   ],
 );
+
+/* --------------------------- payment_refunds ----------------------------- */
+
+/**
+ * The local lifecycle of a refund, reduced from Whop's five provider statuses.
+ * See `src/lib/server/refund-lifecycle.ts` for why it is three and not five;
+ * the raw provider status is kept alongside in `provider_status`.
+ */
+export const paymentRefundStatusEnum = pgEnum("payment_refund_status", [
+  "pending",
+  "completed",
+  "failed",
+]);
+
+/**
+ * ONE ROW PER PROVIDER REFUND RESOURCE.
+ *
+ * ONE PAYMENT HAS MANY REFUNDS. That is the entire reason this is a table and
+ * not three columns on `payment_orders`: a $10 payment refunded $2, then $3,
+ * then $5 is THREE `rf_` resources with three ids, three statuses and three
+ * outcomes, and a design that could hold only "the refund" would represent the
+ * last of them and silently lose the rest.
+ *
+ * WHAT IS DELIBERATELY ABSENT: any raw provider payload. There is no `payload`
+ * or `raw` jsonb column. A refund payload carries buyer identity, card detail
+ * and a nested copy of the payment, none of which the lifecycle or
+ * reconciliation needs, and all of which would then have to be protected,
+ * retained and deleted to a policy that does not exist. Every column below is
+ * one this build actually reads.
+ *
+ * THIS TABLE IS OPERATIONAL, NOT FINANCIAL. It records where a refund stands
+ * with the provider. The money is in `accounting_transactions` and nowhere
+ * else, and the two are kept apart on purpose: this table is UPDATED as a
+ * refund moves through its states, while the journal is append-only and cannot
+ * be. A row here saying `completed` is a claim; the posting keyed
+ * `whop:payment_refunded:<rf_id>` is the money.
+ */
+export const paymentRefunds = pgTable(
+  "payment_refunds",
+  {
+    /** Server-generated. Never a provider id, and never client-supplied. */
+    refundId: uuid("refund_id").primaryKey().defaultRandom(),
+
+    /** "whop". A column rather than an assumption, so a second provider is a
+     * row value and not a schema migration. */
+    provider: text("provider").notNull().default("whop"),
+
+    /**
+     * THE ECONOMIC IDENTITY, prefixed `rf_`.
+     * UNIQUE with `provider`: two webhook deliveries with different message
+     * ids naming the same refund must converge on ONE row, and that has to be
+     * a database constraint — an application check loses the race between two
+     * concurrent deliveries.
+     */
+    whopRefundId: text("whop_refund_id").notNull(),
+
+    /** The payment this refund reverses, prefixed `pay_`. NOT unique: one
+     * payment legitimately has many refunds. */
+    whopPaymentId: text("whop_payment_id").notNull(),
+
+    /** The order that payment settled. Null only if the payment maps to none. */
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** Minor units, always positive. The amount RETURNED, in `currency`. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    /** Lowercase ISO 4217, matching how Whop reports a currency. */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** Whop's own status verbatim: one of the five in `RefundStatuses`. Kept
+     * raw so the reduction below never loses what the provider actually said. */
+    providerStatus: text("provider_status").notNull(),
+    /** Our three-value reduction of it. */
+    status: paymentRefundStatusEnum("status").notNull().default("pending"),
+
+    /** Whop's normalised `failure_reason`, when it reported one. */
+    failureReason: text("failure_reason"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Set once, when the provider first reported `succeeded`. Never rewritten. */
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** Set when the provider reported `failed` or `canceled`. */
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+  },
+  (t) => [
+    // THE refund identity constraint. Everything about idempotency rests here.
+    uniqueIndex("uniq_refunds_provider_refund").on(t.provider, t.whopRefundId),
+    index("idx_refunds_payment").on(t.whopPaymentId),
+    index("idx_refunds_order").on(t.orderId),
+    index("idx_refunds_status").on(t.status),
+    index("idx_refunds_created").on(t.createdAt),
+  ],
+);

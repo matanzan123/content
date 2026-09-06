@@ -139,8 +139,18 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
   const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
   const gated = source.slice(source.indexOf("OWNERSHIP_GATED"), source.indexOf("const HANDLERS"));
   check("E. payment events are ownership-gated", ["payment.succeeded", "payment.failed", "payment.pending"].every((e) => gated.includes(e)));
-  const boundary = source.slice(source.indexOf("if (OWNERSHIP_GATED"), source.indexOf("await HANDLERS[eventType]("));
-  check("E. the gate calls the authoritative lookup", boundary.includes("verifyPaymentOwnership(resourceId)"));
+  // The gate is a MAP now, not a Set: refund events joined it with their own
+  // verifier (an `rf_` id cannot be proved by the payment verifier), so the
+  // dispatch reads `OWNERSHIP_GATED[eventType]` instead of testing membership.
+  // The anchor moves with it; the properties asserted below do not change.
+  const boundary = source.slice(
+    source.indexOf("const verifyOwnership = OWNERSHIP_GATED"),
+    source.indexOf("await HANDLERS[eventType]("),
+  );
+  check("E. every gated event names an authoritative lookup",
+    gated.includes("verifyPaymentOwnership") && gated.includes("verifyRefundOwnership"));
+  check("E. the gate actually calls the verifier it looked up",
+    boundary.includes("await verifyOwnership(resourceId)"));
   check("E. anything other than verified stops the dispatch", boundary.includes('ownership.kind !== "verified"'));
   check("E. the payload company_id alone can never satisfy the gate", boundary.includes("companyId") === false);
   check("E. a wrong company is quarantined terminally", boundary.includes('status: "rejected_company"') && boundary.includes("ownership_mismatch"));
