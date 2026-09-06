@@ -1,11 +1,33 @@
-import { AdminPage, adminMetadata, type AdminPageProps } from "@/components/admin/AdminPage";
-import { RevenueBody } from "@/components/admin/sections/BusinessSections";
+import { AdminTopBar } from "@/components/admin/AdminTopBar";
+import { adminMetadata } from "@/components/admin/AdminPage";
+import { RevenueBody } from "@/components/admin/DashboardSections";
+import { getAdminPageContext } from "@/lib/admin/context";
+import { ADMIN_TIMEZONE } from "@/lib/analytics/range";
+
+type Params = {
+  params: Promise<{ locale: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+};
 
 export const generateMetadata = adminMetadata("revenue");
-
-/** Authorization runs in the admin layout and again in AdminPage. */
 export const dynamic = "force-dynamic";
 
-export default function Page(props: AdminPageProps) {
-  return <AdminPage {...props} titleKey="revenue" showRange={true} body={RevenueBody} />;
+export default async function Page({ params, searchParams }: Params) {
+  const ctx = await getAdminPageContext(params, searchParams);
+  if (!ctx.authorized) return null;
+
+  return (
+    <>
+      <AdminTopBar
+        t={ctx.t.admin}
+        title={ctx.t.admin.nav.revenue}
+        email={ctx.admin?.email ?? null}
+        timezone={ADMIN_TIMEZONE}
+        showRange={false}
+      />
+      <main id="main-content" className="flex-1 px-4 py-5 sm:px-6">
+        <RevenueBody t={ctx.t.admin} locale={ctx.locale} />
+      </main>
+    </>
+  );
 }
