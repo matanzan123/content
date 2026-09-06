@@ -6,6 +6,7 @@ import { paymentOrders } from "@/lib/db/schema";
 import { getWhopEnvironment } from "../whop-payments";
 import { mapPaymentToOrder } from "../whop-payment-mapping";
 import { postWhopSettlement } from "./whop-payment-posting";
+import { isAbsorbing } from "../payment-lifecycle";
 
 /* ==========================================================================
    ACCOUNTING BACKFILL — for payments that settled before the ledger existed.
@@ -104,7 +105,111 @@ export async function backfillOrder(orderId: string): Promise<BackfillOutcome | 
 }
 
 /**
- * Every paid order in the configured environment, oldest first.
+ * CONVERGENCE for an order that is not settled yet.
+ *
+ * The narrow, explicitly-bounded repair the reconciliation report cannot do
+ * for itself. It runs the same authoritative resolver a webhook runs, so the
+ * rules are not restated here and cannot drift from them:
+ *
+ *   - the order's next state is derived from the provider's own status;
+ *   - `paid` and `cancelled` are absorbing and are left alone, in this
+ *     function AND in the SQL underneath it;
+ *   - a settled payment also gets its accounting posted, idempotently.
+ *
+ * It exists because a missed delivery is ordinary — a tunnel down, a deploy
+ * mid-flight — and the alternative is an order stuck in `payment_pending`
+ * forever with no way back other than editing the row by hand.
+ *
+ * IT CHANGES NO FINANCIAL HISTORY. The journal is append-only and this cannot
+ * reach it except through `postWhopSettlement`, which is idempotent on the
+ * economic event.
+ */
+/**
+ * CONVERGENCE starting from a PAYMENT id rather than an order.
+ *
+ * The necessary counterpart to `convergeOrderFromProvider`, because of an
+ * asymmetry in what our own rows can tell us: `payment_orders.whop_payment_id`
+ * is only written when a payment SETTLES an order — it is under a unique index
+ * and means "the payment that paid this", not "a payment that was attempted".
+ * So an order sitting in `payment_pending` or `failed` has no link back to
+ * the provider at all, and cannot be reconciled from its own row.
+ *
+ * The payment id is available from the place that always records it: the
+ * webhook receipt's `resource_id`. Given one, the authoritative resolver
+ * finds its own order through `metadata.order_id` and applies every check.
+ *
+ * As everywhere else, this decides nothing itself — it re-runs the resolver.
+ */
+export async function convergeFromPayment(paymentId: string): Promise<
+  | { paymentId: string; result: BackfillOutcome["result"] }
+  | null
+> {
+  const environment = getWhopEnvironment();
+  if (!getDb() || !environment) return null;
+
+  const mapped = await mapPaymentToOrder(paymentId, "pending");
+  if (mapped.kind !== "paid") {
+    const reason = mapped.kind === "rejected" ? mapped.reason : mapped.kind;
+    return { paymentId, result: { kind: "skipped", reason } };
+  }
+
+  const posted = await postWhopSettlement(paymentId, {
+    environment,
+    orderId: mapped.orderId,
+    sourceWebhookId: null,
+  });
+  if (!posted.ok) return { paymentId, result: { kind: "failed", reason: posted.reason } };
+
+  return {
+    paymentId,
+    result: posted.alreadyPosted
+      ? { kind: "already_posted", transactionId: posted.transactionId }
+      : { kind: "posted", transactionId: posted.transactionId },
+  };
+}
+
+export async function convergeOrderFromProvider(orderId: string): Promise<BackfillOutcome | null> {
+  const db = getDb();
+  const environment = getWhopEnvironment();
+  if (!db || !environment) return null;
+
+  const [order] = await db.select().from(paymentOrders).where(eq(paymentOrders.orderId, orderId));
+  if (!order || !order.whopPaymentId) return null;
+
+  const base = { orderId: order.orderId, paymentId: order.whopPaymentId };
+
+  // Absorbing states are not converged, they are already final.
+  if (isAbsorbing(order.status) && order.status !== "paid") {
+    return { ...base, result: { kind: "skipped", reason: `absorbing:${order.status}` } };
+  }
+
+  // `pending` as the intent: it claims the least. The resolver ignores it for
+  // the state decision anyway, and it keeps a surprising provider answer from
+  // being filed as a finished `succeeded` delivery.
+  const mapped = await mapPaymentToOrder(order.whopPaymentId, "pending");
+
+  if (mapped.kind !== "paid") {
+    const reason = mapped.kind === "rejected" ? mapped.reason : mapped.kind;
+    return { ...base, result: { kind: "skipped", reason } };
+  }
+
+  const posted = await postWhopSettlement(order.whopPaymentId, {
+    environment,
+    orderId: order.orderId,
+    sourceWebhookId: null,
+  });
+  if (!posted.ok) return { ...base, result: { kind: "failed", reason: posted.reason } };
+
+  return {
+    ...base,
+    result: posted.alreadyPosted
+      ? { kind: "already_posted", transactionId: posted.transactionId }
+      : { kind: "posted", transactionId: posted.transactionId },
+  };
+}
+
+/**
+ * Every paid order in the configured environment.
  *
  * Bounded, and it never invents work: an order with no provider payment is not
  * examined at all, because there is nothing authoritative to ask about.

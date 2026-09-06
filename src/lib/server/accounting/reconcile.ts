@@ -5,6 +5,8 @@ import { getDb } from "@/lib/db";
 import { accountingEntries, accountingTransactions, paymentOrders } from "@/lib/db/schema";
 import { economicKey } from "./accounts";
 import { fetchSettlementFacts } from "./whop-payment-posting";
+import { retrievePaymentPhase } from "../whop-resources";
+import { classifyProviderStatus, isAbsorbing, targetOrderStatus } from "../payment-lifecycle";
 
 /* ==========================================================================
    RECONCILIATION — four records, compared, nothing repaired.
@@ -41,6 +43,10 @@ export type DiscrepancyCode =
   | "provider_mismatch"
   /** The provider could not be asked. Not a discrepancy — an unknown. */
   | "provider_unavailable"
+  /** An order left mid-flight long enough that it will not resolve on its own. */
+  | "stale_pending"
+  /** Whop and our order disagree about where the payment is. */
+  | "provider_status_conflict"
   /** A state that should not be reachable at all. */
   | "impossible_state";
 
@@ -61,6 +67,15 @@ export type ReconciliationReport = {
   providerConsulted: boolean;
   discrepancies: Discrepancy[];
 };
+
+/**
+ * How long an order may sit mid-flight before it is worth a human look.
+ *
+ * Generous on purpose. Card rails clear in seconds, but bank debits and
+ * some local methods legitimately take days, and a threshold that flags
+ * those produces a report nobody reads.
+ */
+export const STALE_PENDING_HOURS = 72;
 
 const EMPTY: ReconciliationReport = {
   configured: false,
@@ -90,6 +105,7 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
       currency: paymentOrders.currency,
       status: paymentOrders.status,
       whopPaymentId: paymentOrders.whopPaymentId,
+      updatedAt: paymentOrders.updatedAt,
     })
     .from(paymentOrders)
     .limit(limit);
@@ -151,8 +167,28 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
     }
   }
 
+  const staleBefore = Date.now() - STALE_PENDING_HOURS * 3600 * 1000;
+
   for (const order of orders) {
     const posted = order.whopPaymentId ? (byPayment.get(order.whopPaymentId) ?? []) : [];
+
+    // STUCK MID-FLIGHT. A charge that has neither settled nor failed after
+    // this long is not still clearing — a delivery was missed, or a rail gave
+    // up quietly. Reported, never resolved from here: only the provider can
+    // say where the money went, and asking it is the job of the per-payment
+    // pass below.
+    if (
+      (order.status === "payment_pending" || order.status === "checkout_created") &&
+      order.updatedAt.getTime() < staleBefore
+    ) {
+      findings.push({
+        code: "stale_pending",
+        orderId: order.orderId,
+        transactionId: null,
+        paymentId: order.whopPaymentId,
+        detail: `${order.status} since ${order.updatedAt.toISOString()}`,
+      });
+    }
 
     if (order.status === "paid") {
       if (!order.whopPaymentId) {
@@ -356,5 +392,121 @@ export async function reconcilePaymentAgainstProvider(
     }
   }
 
+  return findings;
+}
+
+/* -------------------------------------------------------------------------
+   LIFECYCLE RECONCILIATION
+   ------------------------------------------------------------------------- */
+
+/**
+ * Asks Whop where ONE payment actually is, and compares that to the order.
+ *
+ * This is the check that catches the failures the internal pass cannot see,
+ * because both of our own records can be wrong together:
+ *
+ *   - Whop says `paid`, our order does not         → a missed delivery
+ *   - Whop says `void`/`uncollectible`, order paid → the serious one
+ *   - Whop says in flight, order says failed       → a stale failure stuck
+ *
+ * Still read-only. It names the conflict and the direction; deciding what to
+ * do about a paid order the provider says was never collected is not a thing
+ * a scheduled job should do on its own.
+ *
+ * `provider_unavailable` is reported as its own code and never as a conflict:
+ * an outage means we do not know, and a report that turned "could not ask"
+ * into "records disagree" would generate false alarms during every incident.
+ */
+export async function reconcileOrderLifecycle(orderId: string): Promise<Discrepancy[]> {
+  const db = getDb();
+  if (!db) return [];
+
+  const [order] = await db.select().from(paymentOrders).where(eq(paymentOrders.orderId, orderId));
+  if (!order) return [];
+
+  if (!order.whopPaymentId) {
+    // NOTHING TO ASK ABOUT, and this is a real limitation rather than an
+    // oversight: `whop_payment_id` is only written when a payment SETTLES an
+    // order, so an order in `payment_pending` or `failed` holds no link to
+    // the provider. Those are reachable the other way round — from a payment
+    // id, which `whop_webhook_receipts.resource_id` always records — via
+    // `reconcilePaymentAgainstProvider` and `convergeFromPayment`.
+    //
+    // An order with no payment is only wrong if it claims to be paid, and the
+    // internal pass already reports that as `impossible_state`.
+    return [];
+  }
+
+  const phase = await retrievePaymentPhase(order.whopPaymentId);
+
+  if (phase.kind !== "known") {
+    const unavailable = phase.kind === "provider_error" || phase.kind === "unconfigured";
+    return [
+      {
+        code: unavailable ? "provider_unavailable" : "provider_mismatch",
+        orderId: order.orderId,
+        transactionId: null,
+        paymentId: order.whopPaymentId,
+        detail: phase.kind,
+      },
+    ];
+  }
+
+  const classified = classifyProviderStatus(phase.status);
+  const expected = targetOrderStatus(classified);
+
+  if (expected === order.status) return [];
+
+  // `paid` is absorbing for a reason, and the provider agreeing that a payment
+  // is still in flight does not un-pay it — an in-flight status on a settled
+  // payment is normal while a later attempt or adjustment is processing. Only
+  // a provider status that rules collection out is a conflict with `paid`.
+  if (isAbsorbing(order.status)) {
+    if (order.status === "paid" && classified === "terminal_unpaid") {
+      return [
+        {
+          code: "provider_status_conflict",
+          orderId: order.orderId,
+          transactionId: null,
+          paymentId: order.whopPaymentId,
+          detail: `order is paid but provider reports ${phase.status} — money may never have been collected`,
+        },
+      ];
+    }
+    return [];
+  }
+
+  return [
+    {
+      code: "provider_status_conflict",
+      orderId: order.orderId,
+      transactionId: null,
+      paymentId: order.whopPaymentId,
+      detail: `order is ${order.status}, provider reports ${phase.status} (expected ${expected})`,
+    },
+  ];
+}
+
+/**
+ * Every order that names a provider payment, checked against Whop.
+ *
+ * Bounded and sequential: this is two API calls per order, and a
+ * reconciliation job that stampedes the provider during an incident is its own
+ * outage.
+ */
+export async function reconcileLifecycleAgainstProvider(limit = 50): Promise<Discrepancy[]> {
+  const db = getDb();
+  if (!db) return [];
+
+  const orders = await db
+    .select({ orderId: paymentOrders.orderId })
+    .from(paymentOrders)
+    .where(sql`${paymentOrders.whopPaymentId} is not null`)
+    .limit(limit);
+
+  const findings: Discrepancy[] = [];
+  for (const { orderId } of orders) {
+    findings.push(...(await reconcileOrderLifecycle(orderId)));
+  }
   return findings;
 }

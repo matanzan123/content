@@ -84,3 +84,53 @@ export async function verifyPaymentOwnership(paymentId: unknown): Promise<Owners
 
   return { kind: "verified", accountId };
 }
+
+/* -------------------------------------------------------------------------
+   LIFECYCLE PHASE
+   ------------------------------------------------------------------------- */
+
+/**
+ * The provider's CURRENT phase for a payment, with ownership proved in the
+ * same call.
+ *
+ * Exists for reconciliation, which asks a different question from settlement:
+ * not "may I account for this?" but "does Whop still agree with what our order
+ * says?". It therefore reports a phase for payments in every state, including
+ * the ones `fetchSettlementFacts` refuses, and it never touches an order or a
+ * ledger.
+ *
+ * Ownership is still proved here rather than trusted. A reconciliation report
+ * built from another company's payments would be worse than no report.
+ */
+export type PhaseResult =
+  | { kind: "known"; status: string; accountId: string }
+  | { kind: "wrong_company" }
+  | { kind: "resource_not_found" }
+  | { kind: "provider_error"; category: string }
+  | { kind: "invalid_resource_id" }
+  | { kind: "unconfigured" };
+
+export async function retrievePaymentPhase(paymentId: unknown): Promise<PhaseResult> {
+  if (!isPaymentId(paymentId)) return { kind: "invalid_resource_id" };
+
+  const expected = getWhopCompanyId();
+  const client = getWhopPaymentsClient();
+  if (!expected || !client) return { kind: "unconfigured" };
+
+  try {
+    const payment = await client.payments.retrieve({ id: paymentId });
+    if (!payment.account_id || payment.account_id !== expected) return { kind: "wrong_company" };
+    return {
+      kind: "known",
+      status: typeof payment.status === "string" ? payment.status : "",
+      accountId: payment.account_id,
+    };
+  } catch (error) {
+    if (error instanceof WhopError && error.statusCode === 404) {
+      return { kind: "resource_not_found" };
+    }
+    const status = error instanceof WhopError && error.statusCode ? String(error.statusCode) : "unknown";
+    console.error("[whop] payment phase lookup failed:", status, describeWhopError(error));
+    return { kind: "provider_error", category: `http_${status}` };
+  }
+}

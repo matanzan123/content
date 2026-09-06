@@ -55,6 +55,7 @@ const ordersAtStart = await (async () => {
 })();
 
 const money = load("src/lib/server/money.ts", {});
+const lifecycleRules = load("src/lib/server/payment-lifecycle.ts", {});
 const payments = load("src/lib/server/whop-payments.ts", { WhopClient: class {} });
 
 /* ------------------------- D. money is exact, in minor units ------------- */
@@ -254,6 +255,12 @@ const baseOrder = {
 function mappingModule(payment, order, { throws = null, orders = {} } = {}) {
   const state = { markCalls: [], attemptCalls: [], order };
   const mod = load("src/lib/server/whop-payment-mapping.ts", {
+    // The state machine is injected REAL, not stubbed: what these cases check
+    // is that the mapping reaches the right decision, and a fake classifier
+    // would let a wrong decision pass.
+    classifyProviderStatus: lifecycleRules.classifyProviderStatus,
+    targetOrderStatus: lifecycleRules.targetOrderStatus,
+    isAbsorbing: lifecycleRules.isAbsorbing,
     WhopError: sdk.WhopError,
     describeWhopError: (e) => String(e?.message ?? ""),
     getWhopCompanyId: () => OURS,
@@ -672,8 +679,21 @@ const NGROK = "https://example-tunnel-host.ngrok-free.dev";
   check("there is NO `succeeded` status on the resource", ALL.includes("succeeded") === false);
 
   const mapping = readFileSync("src/lib/server/whop-payment-mapping.ts", "utf8");
-  check("the settled check is an explicit equality, not a negation", mapping.includes('const SETTLED = "paid"') && /status !== ["'`]failed/.test(mapping) === false);
-  check("settlement compares against that one constant", mapping.includes("payment.status !== SETTLED"));
+  // The settled test used to be a bare `status !== "paid"` in this file. It
+  // now goes through the lifecycle classifier, which knows all eight statuses;
+  // what has to stay true is that the decision is a positive classification of
+  // the PROVIDER's status and never a negation of an event name.
+  check("settlement is decided by classifying the provider status",
+    mapping.includes("const phase = classifyProviderStatus(payment.status)") &&
+    mapping.includes('phase !== "settled"'));
+  check("no status is decided by negating a failure name",
+    /status !== ["'`]failed/.test(mapping) === false);
+  const rules = readFileSync("src/lib/server/payment-lifecycle.ts", "utf8");
+  check("exactly one status is classified as settled",
+    rules.includes('const SETTLED: ReadonlySet<string> = new Set(["paid"])'));
+  check("the classifier covers every SDK status",
+    ALL.every((v) => lifecycleRules.classifyProviderStatus(v) !== "unknown"),
+    ALL.filter((v) => lifecycleRules.classifyProviderStatus(v) === "unknown").join(",") || "all covered");
 
   // Every enum value plus values Whop might add later.
   const settles = [];

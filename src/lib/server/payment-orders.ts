@@ -192,7 +192,14 @@ export async function markOrderPaid(orderId: string, whopPaymentId: string): Pro
       .where(
         and(
           eq(paymentOrders.orderId, orderId),
+          // THE ABSORBING STATES, in the statement rather than in a branch.
+          // `paid` is here as well as `cancelled` so a settled order is never
+          // re-written at all: a redelivery of the same payment falls through
+          // to the read below and is reported as `alreadyPaid`, and a
+          // DIFFERENT payment arriving for a settled order is refused outright
+          // instead of quietly matching.
           sql`${paymentOrders.status} <> 'cancelled'`,
+          sql`${paymentOrders.status} <> 'paid'`,
           // Either unsettled, or already settled by this very payment.
           sql`(${paymentOrders.whopPaymentId} is null or ${paymentOrders.whopPaymentId} = ${whopPaymentId})`,
         ),

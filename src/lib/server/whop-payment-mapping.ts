@@ -10,6 +10,11 @@ import {
 import { isPaymentId } from "./whop-resources";
 import { currencyDecimals, decimalToMinor, normaliseCurrency } from "./money";
 import { getPaymentOrder, markOrderPaid, recordOrderAttempt } from "./payment-orders";
+import {
+  classifyProviderStatus,
+  isAbsorbing,
+  targetOrderStatus,
+} from "./payment-lifecycle";
 
 /* ==========================================================================
    PAYMENT → ORDER MAPPING — server only.
@@ -35,19 +40,23 @@ import { getPaymentOrder, markOrderPaid, recordOrderAttempt } from "./payment-or
 
    H is enforced by a UNIQUE index, not by a read — see `markOrderPaid`.
 
+   THE EVENT NAME NEVER DECIDES THE OUTCOME. Whichever of the six payment
+   lifecycle events brought us here, the order's next state is derived from
+   the FETCHED `payment.status` through `payment-lifecycle.ts`. That is what
+   makes the final state independent of arrival order: Whop guarantees
+   at-least-once delivery and no ordering, so a `payment.failed` for an
+   earlier attempt can and does arrive after the `payment.succeeded` that
+   collected.
+
    NOTHING HERE WRITES `financial_ledger`. A paid order is a fact about a
-   checkout; accounting for it is a later, separate step.
+   checkout; accounting for it is a separate step that runs after this one.
    ========================================================================== */
 
 /**
- * Whop's own settled state for a payment resource.
- *
- * Note the vocabulary difference, which is easy to get wrong: the EVENT is
- * named `payment.succeeded`, but the RESOURCE reports `ReceiptStatus.Paid`.
- * Checking for a status called "succeeded" would never match anything.
+ * The provider's status is read through `payment-lifecycle.ts`, which holds
+ * the full eight-value contract and the rule for turning it into an order
+ * state. Nothing in this file decides what a status means.
  */
-const SETTLED = "paid";
-const IN_FLIGHT: ReadonlySet<string> = new Set(["open", "pending", "authorized", "draft"]);
 
 export type MappingOutcome =
   | { kind: "paid"; orderId: string; alreadyPaid: boolean }
@@ -154,9 +163,11 @@ async function fetchPayment(
  * Resolves ONE payment against our orders and updates the order — and only the
  * order.
  *
- * `intent` says what the delivery claimed. It never overrides the provider's
- * own status: a `payment.succeeded` for a payment Whop does not report as paid
- * settles nothing.
+ * `intent` says what the DELIVERY claimed. It never decides the order's state
+ * — that comes from the fetched payment's own status. It is used for exactly
+ * one thing, after the order has been updated: a `payment.succeeded` whose
+ * payment is not settled keeps its receipt retryable, because that combination
+ * is a surprise worth revisiting rather than a finished piece of work.
  */
 export async function mapPaymentToOrder(
   paymentId: unknown,
@@ -209,18 +220,36 @@ export async function mapPaymentToOrder(
     return { kind: "rejected", reason: "amount_mismatch" };
   }
 
-  // G — the provider's status decides, whatever the event was called.
-  if (payment.status !== SETTLED) {
+  // G — THE PROVIDER'S STATUS DECIDES, whatever the event was called.
+  //
+  // `intent` does not appear in this decision at all. Three deliveries named
+  // `payment.created`, `payment.pending` and `payment.failed` reaching us for
+  // a payment Whop reports as `paid` all settle the order, and a
+  // `payment.succeeded` for a payment Whop reports as `void` fails it. The
+  // final state is a function of provider truth, not of arrival order.
+  const phase = classifyProviderStatus(payment.status);
+
+  if (phase !== "settled") {
+    const target = targetOrderStatus(phase);
+
+    // A late or out-of-order event must never un-pay a settled order. The
+    // guard lives in the UPDATE too, so this is belt and braces: the database
+    // refuses it even if this branch is ever skipped.
+    if (isAbsorbing(order.status)) {
+      return { kind: "ignored", reason: "already_paid_elsewhere" };
+    }
+
+    const moved = await recordOrderAttempt(order.orderId, target);
+    if (!moved) return { kind: "ignored", reason: "already_paid_elsewhere" };
+
+    // `intent` is used for ONE thing, and only after the order is updated:
+    // deciding whether the DELIVERY is finished with. A `payment.succeeded`
+    // whose payment is not settled is a genuine surprise — most often a race
+    // against a rail that has not cleared — so it stays retryable rather than
+    // being filed as handled.
     if (intent === "succeeded") return { kind: "ignored", reason: "not_settled" };
 
-    // A late failure must never un-pay a settled order. The guard lives in the
-    // UPDATE, so this is enforced by the database rather than by this branch.
-    if (order.status === "paid") return { kind: "ignored", reason: "already_paid_elsewhere" };
-
-    const next = intent === "failed" && !IN_FLIGHT.has(payment.status) ? "failed" : "payment_pending";
-    const moved = await recordOrderAttempt(order.orderId, next);
-    if (!moved) return { kind: "ignored", reason: "already_paid_elsewhere" };
-    return next === "failed"
+    return target === "failed"
       ? { kind: "failed_recorded", orderId: order.orderId }
       : { kind: "pending", orderId: order.orderId };
   }

@@ -11,6 +11,7 @@ import {
   getWhopWebhookSecret,
 } from "./whop-payments";
 import { verifyPaymentOwnership } from "./whop-resources";
+import { shouldRetryLookup } from "./payment-lifecycle";
 import { mapPaymentToOrder, type MappingOutcome } from "./whop-payment-mapping";
 import { postWhopSettlement } from "./accounting/whop-payment-posting";
 
@@ -50,9 +51,18 @@ import { postWhopSettlement } from "./accounting/whop-payment-posting";
  * recorded as `unsupported`, which is deterministic and cannot create money.
  */
 export const SUPPORTED_EVENTS = [
+  // The six payment lifecycle events, verified against BOTH the SDK's
+  // `WebhookEvent` enum and docs.whop.com/llms.txt, which list exactly these.
+  // `payment.completed` is NOT one of them — it appears in the SDK only as a
+  // people-filter value, never as a subscribable webhook — and
+  // `payment.affiliate_reward_created` and the `app_payment.*` family are
+  // different subjects that would need their own resolvers.
+  "payment.created",
+  "payment.pending",
+  "payment.authorized",
   "payment.succeeded",
   "payment.failed",
-  "payment.pending",
+  "payment.canceled",
   "refund.created",
   "refund.updated",
   "dispute.created",
@@ -79,7 +89,22 @@ export function isSupportedEvent(name: unknown): name is SupportedEvent {
  * named outcome.
  */
 export type WebhookOutcome =
-  | { ack: true; status: "accepted" | "duplicate" | "awaiting_mapping" | "unsupported" | "rejected_company" }
+  | {
+      ack: true;
+      status:
+        | "accepted"
+        | "duplicate"
+        | "awaiting_mapping"
+        | "unsupported"
+        | "rejected_company"
+        /**
+         * We could not prove what the event refers to, and asking again cannot
+         * change that. The RECEIPT stays `failed` — nothing was handled, and
+         * reconciliation must still be able to see it — but Whop is told to
+         * stop redelivering an answer that will not move.
+         */
+        | "unresolvable";
+    }
   | {
       ack: false;
       kind: "unverified" | "unconfigured" | "storage_unavailable" | "processing_failed" | "processing_in_flight";
@@ -286,14 +311,30 @@ export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
  * and each will join this gate as its own resolver is written. None of them
  * may be connected to `financial_ledger` before that happens.
  */
-const OWNERSHIP_GATED = new Set<string>(["payment.succeeded", "payment.failed", "payment.pending"]);
+const OWNERSHIP_GATED = new Set<string>([
+  "payment.created",
+  "payment.pending",
+  "payment.authorized",
+  "payment.succeeded",
+  "payment.failed",
+  "payment.canceled",
+]);
 
 type Handler = (resourceId: string | null, webhookId: string) => Promise<HandlerResult>;
 
 const HANDLERS: Record<SupportedEvent, Handler> = {
+  // Five of the six route to the same resolver. That is deliberate: the
+  // order's next state comes from the payment's own status, so a
+  // `payment.created` for a payment Whop already reports as `paid` settles
+  // the order exactly as a `payment.succeeded` would. Only
+  // `payment.succeeded` carries a distinct `intent`, and only because a
+  // succeeded event for an unsettled payment should stay retryable.
+  "payment.created": handleWhopPaymentPending,
+  "payment.pending": handleWhopPaymentPending,
+  "payment.authorized": handleWhopPaymentPending,
   "payment.succeeded": handleWhopPaymentSucceeded,
   "payment.failed": handleWhopPaymentFailed,
-  "payment.pending": handleWhopPaymentPending,
+  "payment.canceled": handleWhopPaymentFailed,
   "refund.created": handleWhopRefundCreated,
   "refund.updated": handleWhopRefundCreated,
   "dispute.created": handleWhopDisputeCreated,
@@ -488,15 +529,35 @@ export async function processVerifiedWebhook(
         return { ack: true, status: "rejected_company" };
       }
 
-      // Could not PROVE ownership — the lookup failed, the id was malformed,
-      // or credentials are missing. Fail closed and keep the receipt
-      // retryable: an unprovable payment must never reach a money handler, and
-      // must never be quietly acknowledged as done either.
-      await db
+      // Could not PROVE ownership. Fail closed either way — an unprovable
+      // payment never reaches a money handler — but the ANSWER to Whop
+      // depends on whether asking again could change anything.
+      //
+      // An OUTAGE (timeout, 429, 5xx, no credentials) is a reason to be asked
+      // again: nothing was decided, and acknowledging would let Whop stop
+      // retrying an event we never resolved.
+      //
+      // A DEFINITIVE answer is not. A malformed id can never become
+      // well-formed, and a 404 that has already survived several deliveries is
+      // an id that does not exist on this environment — a production id
+      // reaching a sandbox key looks exactly like this. Retrying those forever
+      // buries the real signal and never converges. `delivery_count` is read
+      // back from the row so the bound is measured against actual deliveries,
+      // not against anything this process is holding.
+      const [{ deliveryCount }] = await db
         .update(whopWebhookReceipts)
         .set({ status: "failed", failureCategory: ownership.kind, claimedAt: null })
-        .where(eq(whopWebhookReceipts.webhookId, webhookId));
-      return { ack: false, kind: "processing_failed" };
+        .where(eq(whopWebhookReceipts.webhookId, webhookId))
+        .returning({ deliveryCount: whopWebhookReceipts.deliveryCount });
+
+      if (shouldRetryLookup(ownership.kind, deliveryCount)) {
+        return { ack: false, kind: "processing_failed" };
+      }
+
+      // Exhausted. The receipt stays `failed` rather than being dressed up as
+      // processed — nothing was handled, and reconciliation can still see it —
+      // but we stop asking Whop to repeat an answer that will not change.
+      return { ack: true, status: "unresolvable" };
     }
   }
 
