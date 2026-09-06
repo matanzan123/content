@@ -442,3 +442,111 @@ export const paymentOrders = pgTable(
       .where(sql`whop_payment_id is not null`),
   ],
 );
+
+/* --------------------------- whop_oauth_states --------------------------- */
+
+/**
+ * IN-FLIGHT OAuth authorizations.
+ *
+ * A row exists only between "Connect Whop" and the callback. It is what makes
+ * `state` one-time and replay-resistant: the callback consumes it with a
+ * `DELETE … RETURNING`, so a replayed authorization code arrives to find
+ * nothing and is refused. A cookie could not do this — a cookie can be
+ * replayed until it expires, and it is not shared across server instances.
+ *
+ * `firebase_uid` is captured at the START of the flow, from a verified
+ * Firebase ID token. The callback has no session of its own, so this row is
+ * the only thing that says whose account the link belongs to. That is
+ * deliberate: the identity is decided where it can be proved.
+ *
+ * The PKCE code verifier is stored ENCRYPTED. It never travels to the browser
+ * and never appears in a URL — only its S256 hash does.
+ */
+export const whopOauthStates = pgTable(
+  "whop_oauth_states",
+  {
+    /** High-entropy random value. Also the `state` parameter. */
+    state: text("state").primaryKey(),
+    /** Whose link this will be. From a verified ID token, never from a body. */
+    firebaseUid: text("firebase_uid").notNull(),
+    /** AES-256-GCM envelope. Never leaves the server. */
+    codeVerifierCiphertext: text("code_verifier_ciphertext").notNull(),
+    // No `nonce` column, deliberately. One is sent on the authorize request
+    // because Whop documents the parameter, but this flow never reads an
+    // id_token — identity comes from a server-to-server userinfo call — so
+    // there is nothing to compare it against. Storing it would imply a
+    // verification step that does not exist.
+    /** Where to send the person afterwards. Server-built, never accepted. */
+    returnPath: text("return_path").notNull(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Short. An authorization the user walked away from must not stay usable. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_oauth_states_expires").on(t.expiresAt),
+    index("idx_oauth_states_uid").on(t.firebaseUid),
+  ],
+);
+
+/* --------------------------- whop_connections ---------------------------- */
+
+/**
+ * THE LINK between a ClipRewards account and a Whop identity.
+ *
+ * Firebase remains the canonical identity; this table records that a user has
+ * additionally connected Whop. It is not a login: nothing here can sign
+ * anyone in.
+ *
+ * THE JOIN KEY IS THE OIDC SUBJECT, never an email address. Whop's `sub` is
+ * stable and provider-issued; an email is neither, is often shared or reused,
+ * and can be changed by the person who controls the mailbox. Linking on email
+ * is the classic account-takeover path, so `email` does not appear here at
+ * all — not to match on, and not to store.
+ *
+ * TOKENS ARE ENCRYPTED, bound to the owning uid as additional authenticated
+ * data. A row moved between users fails to decrypt.
+ *
+ * TWO PARTIAL UNIQUE INDEXES enforce the rules that matter, in the database
+ * rather than in code:
+ *   - one Whop identity cannot be linked by two ClipRewards users;
+ *   - one ClipRewards user cannot hold two active links.
+ * Both are scoped to ACTIVE rows, so a revoked link stays as history without
+ * blocking a later, legitimate reconnection.
+ */
+export const whopConnections = pgTable(
+  "whop_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    firebaseUid: text("firebase_uid").notNull(),
+    /** The OIDC `sub` from userinfo. The authoritative provider identity. */
+    whopUserId: text("whop_user_id").notNull(),
+    /** Display only — a handle to show in the UI. Never used to match. */
+    whopUsername: text("whop_username"),
+    /** Exactly what was granted, so a later scope change is detectable. */
+    scopes: text("scopes").notNull(),
+
+    /** AES-256-GCM envelopes. Null once revoked. */
+    accessTokenCiphertext: text("access_token_ciphertext"),
+    refreshTokenCiphertext: text("refresh_token_ciphertext"),
+    /** When the access token stops working. Refresh is driven from this. */
+    tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+
+    connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastRefreshedAt: timestamp("last_refreshed_at", { withTimezone: true }),
+    /** Set on disconnect. The row survives as history; the credentials do not. */
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_whop_connections_uid").on(t.firebaseUid),
+    index("idx_whop_connections_whop_user").on(t.whopUserId),
+    // One ACTIVE link per ClipRewards user.
+    uniqueIndex("uniq_whop_connection_active_user")
+      .on(t.firebaseUid)
+      .where(sql`revoked_at is null`),
+    // One ACTIVE link per Whop identity — the anti-takeover constraint.
+    uniqueIndex("uniq_whop_connection_active_whop_user")
+      .on(t.whopUserId)
+      .where(sql`revoked_at is null`),
+  ],
+);

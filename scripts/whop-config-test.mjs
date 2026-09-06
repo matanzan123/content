@@ -8,7 +8,7 @@
  * in sync — the SDK import is stripped, which is fine because every function
  * exercised here is pure configuration logic that never constructs a client.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -159,12 +159,23 @@ check(
   JSON.stringify(resolveWhopPayments({ ...sandbox, ...oauthOnly })).includes("client-secret") === false,
 );
 
-const oauth = load("src/lib/whop.ts");
-check("OAuth isWhopConfigured is unchanged and false without its own vars", oauth.isWhopConfigured() === false);
-check("OAuth module exposes no payments helper", oauth.getWhopPaymentsClient === undefined);
+// The legacy OAuth module is gone; account linking now lives in
+// src/lib/server/whop-oauth.ts and shares nothing with payments.
+check("the legacy OAuth module no longer exists", existsSync("src/lib/whop.ts") === false);
+const linking = readFileSync("src/lib/server/whop-oauth.ts", "utf8");
+check("the linking module exposes no payments helper", linking.includes("getWhopPaymentsClient") === false);
+check("the linking module reads no payments credential", /WHOP_API_KEY|WHOP_WEBHOOK_SECRET|WHOP_COMPANY_ID/.test(linking) === false);
+// Comments in the payments module name the OAuth variables to explain the
+// separation; what matters is that no code reads them.
+const paymentsCode = readFileSync("src/lib/server/whop-payments.ts", "utf8")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .split(/\r?\n/)
+  .filter((l) => !l.trim().startsWith("//"))
+  .join("\n");
+check("the payments module reads no OAuth credential", /WHOP_CLIENT_ID|WHOP_CLIENT_SECRET|WHOP_REDIRECT_URI/.test(paymentsCode) === false);
 check(
-  "OAuth cookie names are untouched",
-  oauth.WHOP_SESSION_COOKIE === "cr_whop" && oauth.WHOP_STATE_COOKIE === "cr_whop_state",
+  "the linking flow uses its own cookie, unrelated to payments",
+  readFileSync("src/app/api/whop/connect/route.ts", "utf8").includes("cr_whop_link"),
 );
 
 const failed = results.filter((r) => !r.pass);

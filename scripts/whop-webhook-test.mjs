@@ -15,7 +15,7 @@
  * are behaviour of SQL, not of JavaScript, and are proved against real
  * Postgres in `whop-retry-test.mjs`.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -67,7 +67,6 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
 });
 
 const payments = load("src/lib/server/whop-payments.ts", { WhopClient: class {} });
-const oauth = load("src/lib/whop.ts", {});
 
 const results = [];
 const check = (name, pass, detail) => {
@@ -281,8 +280,10 @@ for (const handler of [
 
 /* -------------------- O. the old OAuth flow is unaffected ----------------- */
 
-check("OAuth cookie names are unchanged", oauth.WHOP_SESSION_COOKIE === "cr_whop" && oauth.WHOP_STATE_COOKIE === "cr_whop_state");
-check("OAuth config is still its own three variables", oauth.isWhopConfigured() === false);
+// Account linking is a separate subsystem with its own module, cookie and
+// credentials. The legacy module that used to blur the two is deleted.
+check("the legacy OAuth module is gone", existsSync("src/lib/whop.ts") === false);
+check("the webhook receiver shares nothing with account linking", readFileSync("src/lib/server/whop-webhooks.ts", "utf8").includes("whop-oauth") === false);
 check("the webhook receiver does not touch OAuth", readFileSync("src/lib/server/whop-webhooks.ts", "utf8").includes("WHOP_CLIENT") === false);
 
 /* ------------- E, F: durable dedup — needs the unapplied migration -------- */

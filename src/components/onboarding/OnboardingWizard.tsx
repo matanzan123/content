@@ -1,7 +1,7 @@
 "use client";
 
 import { useT } from "@/i18n/provider";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { ProfilePreview } from "./ProfilePreview";
 import { SocialIcon, WhopMark } from "./SocialIcons";
@@ -84,6 +84,7 @@ export function OnboardingWizard() {
   const [draft, setDraft] = useState<OnboardingDraft>(emptyDraft);
   const [hydrated, setHydrated] = useState(false);
   const [whopHandle, setWhopHandle] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [done, setDone] = useState(false);
   // The OAuth callback redirects back with ?whop=connected or ?whop=<message>.
   // Read it once at mount so it stays derived state, not an effect write.
@@ -136,13 +137,54 @@ export function OnboardingWizard() {
   }, [whopResult]);
 
   useEffect(() => {
-    fetch("/api/whop/me")
-      .then((r) => r.json())
-      .then((d: { connected: boolean; username?: string }) => {
-        if (d.connected && d.username) setWhopHandle(d.username);
-      })
-      .catch(() => {});
-  }, []);
+    // The link belongs to a signed-in ClipRewards account, so asking about it
+    // means proving who is asking. No token, no question.
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const idToken = await user.getIdToken();
+        const response = await fetch("/api/whop/connection", {
+          headers: { authorization: `Bearer ${idToken}` },
+        });
+        if (!response.ok || cancelled) return;
+        const d = (await response.json()) as { connected: boolean; username?: string | null };
+        if (!cancelled && d.connected && d.username) setWhopHandle(d.username);
+      } catch {
+        // A failed status read is not worth surfacing; the button still works.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  /**
+   * Starts the link.
+   *
+   * A POST rather than a link, because the server establishes who is
+   * connecting before it will hand back an authorize URL. The old `<a>` could
+   * be followed by anyone, signed in or not, which is precisely how the legacy
+   * flow produced connections belonging to nobody.
+   */
+  const connectWhop = useCallback(async () => {
+    if (!user || connecting) return;
+    setConnecting(true);
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/whop/connect", {
+        method: "POST",
+        headers: { authorization: `Bearer ${idToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ return_to: "onboarding" }),
+      });
+      if (!response.ok) return setConnecting(false);
+      const { authorize_url } = (await response.json()) as { authorize_url?: string };
+      if (typeof authorize_url !== "string") return setConnecting(false);
+      window.location.assign(authorize_url);
+    } catch {
+      setConnecting(false);
+    }
+  }, [user, connecting]);
 
   const update = (patch: Partial<OnboardingDraft>) => setDraft((d) => ({ ...d, ...patch }));
 
@@ -457,16 +499,15 @@ export function OnboardingWizard() {
           </button>
 
           {isLastStep && !whopHandle ? (
-            // A route handler that redirects out to Whop, so this has to be a
-            // real document navigation rather than a client-side Link — and it
-            // must not pick up a locale prefix.
-            // eslint-disable-next-line @next/next/no-html-link-for-pages
-            <a
-              href="/api/whop/authorize"
-              className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-center text-[14px] font-bold text-white transition-colors hover:bg-ink/90"
+            <button
+              type="button"
+              onClick={connectWhop}
+              disabled={!user || connecting}
+              aria-busy={connecting}
+              className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-center text-[14px] font-bold text-white transition-colors hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {t.connectWhop}
-            </a>
+            </button>
           ) : (
             <button
               type="button"
