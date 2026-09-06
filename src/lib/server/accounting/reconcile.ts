@@ -1,12 +1,15 @@
 import "server-only";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import {
   accountingEntries,
   accountingTransactions,
+  disputeAlerts,
+  paymentDisputes,
   paymentOrders,
   paymentRefunds,
+  resolutionCenterCases,
 } from "@/lib/db/schema";
 import { economicKey } from "./accounts";
 import { fetchSettlementFacts } from "./whop-payment-posting";
@@ -16,6 +19,14 @@ import { classifyRefundStatus } from "../refund-lifecycle";
 import { listRefundsForPayment } from "../whop-refunds";
 import { listRefundsForPaymentLocal } from "../payment-refunds";
 import { refundableBalance } from "../whop-refund-mapping";
+import { getWhopEnvironment } from "../whop-payments";
+import { listDisputesForAccount, listLedgerMovementsForPayment } from "../whop-disputes";
+import { listDisputesForPaymentLocal } from "../payment-disputes";
+import {
+  DISPUTE_LINE_TYPES_NOT_POSTED,
+  isDisputeLineType,
+  isPostableDisputeLine,
+} from "./whop-dispute-posting";
 
 /* ==========================================================================
    RECONCILIATION — four records, compared, nothing repaired.
@@ -1016,6 +1027,474 @@ export async function reconcileRefundsAgainstProvider(
         orderId: null,
         transactionId: null,
         detail: `provider completed refunds ${providerCompleted.toString()} exceed payment total ${balance.totalMinor.toString()}`,
+      });
+    }
+  }
+
+  return findings;
+}
+
+/* ==========================================================================
+   DISPUTE RECONCILIATION.
+
+   THE SAME RULE, RESTATED ONCE MORE BECAUSE IT MATTERS MOST HERE: nothing in
+   this section writes. A chargeback is the most consequential thing that can
+   happen to a payment, and an automatic "repair" of one is how a single wrong
+   number becomes two wrong numbers and an audit trail that agrees with both.
+   The one repair that exists lives in `dispute-recovery.ts`, can only ADD a
+   posting the provider's own ledger says exists, and is a function an operator
+   calls on purpose.
+
+   THE CHECK THAT ONLY EXISTS HERE is the Resolution Center cross-check. A case
+   carrying `refund: merchant` claims money came off OUR balance; there should
+   be a real refund or dispute in our books for the same payment. A case
+   carrying `refund: platform` claims WHOP paid; there should NOT be. Neither
+   check can be made from the case alone, and neither posts anything — they
+   name a discrepancy for a person.
+   ========================================================================== */
+
+export type DisputeDiscrepancyCode =
+  /** Provider reports a dispute we hold no row for. */
+  | "dispute_missing_locally"
+  /** We hold a dispute the provider does not report. */
+  | "dispute_missing_at_provider"
+  /** Local and provider disagree on the dispute's status. */
+  | "dispute_status_mismatch"
+  /** Local and provider disagree on the amount. */
+  | "dispute_amount_mismatch"
+  /** Local and provider disagree on the currency. */
+  | "dispute_currency_mismatch"
+  /** The dispute is attached to a different payment or order than it should be. */
+  | "dispute_mapping_mismatch"
+  /** The environment on the row does not match the configured one. */
+  | "dispute_environment_mismatch"
+  /** The provider's ledger shows a dispute movement with no accounting. */
+  | "dispute_missing_ledger"
+  /** More than one transaction posted for one ledger movement. */
+  | "dispute_duplicate_ledger"
+  /** A dispute-family ledger line this build has no posting rule for. */
+  | "dispute_unmapped_line_type"
+  /** A case claims money came off our balance and nothing in our books shows it. */
+  | "case_refund_unaccounted"
+  /** A case claims WHOP paid, yet our books show us paying. */
+  | "case_platform_refund_booked_locally"
+  /** An alert points at a payment that is not the one its order settled. */
+  | "alert_mapping_mismatch"
+  /** Two local rows claim the same provider resource. */
+  | "dispute_duplicate_resource"
+  /** A transaction's legs do not sum to zero. */
+  | "dispute_unbalanced_transaction"
+  /** The provider could not be asked. Not a discrepancy — an unknown. */
+  | "dispute_provider_unavailable"
+  /** A state that should not be reachable at all. */
+  | "dispute_impossible_state";
+
+export type DisputeDiscrepancy = {
+  code: DisputeDiscrepancyCode;
+  disputeId: string | null;
+  paymentId: string | null;
+  orderId: string | null;
+  transactionId: string | null;
+  detail: string;
+};
+
+export type DisputeReconciliationReport = {
+  configured: boolean;
+  disputesChecked: number;
+  alertsChecked: number;
+  casesChecked: number;
+  transactionsChecked: number;
+  providerConsulted: boolean;
+  discrepancies: DisputeDiscrepancy[];
+};
+
+const EMPTY_DISPUTE_REPORT: DisputeReconciliationReport = {
+  configured: false,
+  disputesChecked: 0,
+  alertsChecked: 0,
+  casesChecked: 0,
+  transactionsChecked: 0,
+  providerConsulted: false,
+  discrepancies: [],
+};
+
+/** The three economic events a dispute movement can be posted under. */
+const DISPUTE_EVENTS = ["dispute_opened", "dispute_won", "dispute_lost"] as const;
+
+/**
+ * Compares our own dispute records against our own ledger, without touching
+ * the network.
+ *
+ * The cheap half, safe to run on a schedule. It catches the failures that do
+ * not need the provider to see: a dispute row and a posting that disagree, a
+ * movement posted twice, a case claiming a refund our books do not show, an
+ * alert wired to the wrong order, and any unbalanced transaction.
+ */
+export async function reconcileDisputesInternal(
+  limit = 500,
+): Promise<DisputeReconciliationReport> {
+  const db = getDb();
+  if (!db) return EMPTY_DISPUTE_REPORT;
+
+  const findings: DisputeDiscrepancy[] = [];
+  const environment = getWhopEnvironment();
+
+  const disputes = await db.select().from(paymentDisputes).limit(limit);
+  const alerts = await db.select().from(disputeAlerts).limit(limit);
+  const cases = await db.select().from(resolutionCenterCases).limit(limit);
+
+  const transactions = await db
+    .select({
+      transactionId: accountingTransactions.transactionId,
+      economicEvent: accountingTransactions.economicEvent,
+      providerResourceId: accountingTransactions.providerResourceId,
+      currency: accountingTransactions.currency,
+      orderId: accountingTransactions.orderId,
+      idempotencyKey: accountingTransactions.idempotencyKey,
+      metadata: accountingTransactions.metadata,
+    })
+    .from(accountingTransactions)
+    .where(sql`${accountingTransactions.economicEvent} in ('dispute_opened','dispute_won','dispute_lost')`);
+
+  // Two postings naming the SAME ledger movement is double-booked money.
+  const byActivity = new Map<string, typeof transactions>();
+  for (const t of transactions) {
+    const key = t.providerResourceId ?? "";
+    const list = byActivity.get(key) ?? [];
+    list.push(t);
+    byActivity.set(key, list);
+  }
+  for (const [activityId, list] of byActivity) {
+    if (list.length > 1) {
+      findings.push({
+        code: "dispute_duplicate_ledger",
+        disputeId: null,
+        paymentId:
+          typeof list[0].metadata === "object" && list[0].metadata !== null
+            ? ((list[0].metadata as Record<string, unknown>).payment_id as string) ?? null
+            : null,
+        orderId: list[0].orderId,
+        transactionId: list[0].transactionId,
+        detail: `${list.length} transactions for ledger movement ${activityId}`,
+      });
+    }
+  }
+
+  // Every dispute transaction must balance. Checked here as well as by the
+  // database trigger, because a report is where an operator looks.
+  if (transactions.length > 0) {
+    const residuals = await db
+      .select({
+        transactionId: accountingEntries.transactionId,
+        total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
+      })
+      .from(accountingEntries)
+      .innerJoin(
+        accountingTransactions,
+        eq(accountingEntries.transactionId, accountingTransactions.transactionId),
+      )
+      .where(
+        sql`${accountingTransactions.economicEvent} in ('dispute_opened','dispute_won','dispute_lost')`,
+      )
+      .groupBy(accountingEntries.transactionId)
+      .having(sql`sum(${accountingEntries.amountMinor}) <> 0`);
+
+    for (const row of residuals) {
+      findings.push({
+        code: "dispute_unbalanced_transaction",
+        disputeId: null,
+        paymentId: null,
+        orderId: null,
+        transactionId: row.transactionId,
+        detail: `legs sum to ${row.total}, expected 0`,
+      });
+    }
+  }
+
+  // Duplicate local rows for one provider resource. The unique indexes make
+  // this unreachable, which is exactly why it is worth reporting if it ever
+  // appears: it would mean a constraint was dropped.
+  const seenDisputes = new Set<string>();
+  for (const dispute of disputes) {
+    if (seenDisputes.has(dispute.whopDisputeId)) {
+      findings.push({
+        code: "dispute_duplicate_resource",
+        disputeId: dispute.whopDisputeId,
+        paymentId: dispute.whopPaymentId,
+        orderId: dispute.orderId,
+        transactionId: null,
+        detail: "more than one local row for one provider dispute",
+      });
+    }
+    seenDisputes.add(dispute.whopDisputeId);
+
+    if (environment && dispute.environment !== environment) {
+      findings.push({
+        code: "dispute_environment_mismatch",
+        disputeId: dispute.whopDisputeId,
+        paymentId: dispute.whopPaymentId,
+        orderId: dispute.orderId,
+        transactionId: null,
+        detail: `row is ${dispute.environment}, configured is ${environment}`,
+      });
+    }
+
+    // A resolved dispute with no resolution time, or the reverse, is a state
+    // the database constraints forbid — so seeing one means something bypassed
+    // them.
+    const resolved =
+      dispute.status === "won" || dispute.status === "lost" || dispute.status === "closed";
+    if (resolved !== (dispute.resolvedAt !== null)) {
+      findings.push({
+        code: "dispute_impossible_state",
+        disputeId: dispute.whopDisputeId,
+        paymentId: dispute.whopPaymentId,
+        orderId: dispute.orderId,
+        transactionId: null,
+        detail: `status ${dispute.status} with resolved_at ${dispute.resolvedAt === null ? "null" : "set"}`,
+      });
+    }
+  }
+
+  // An alert must point at the payment its own order was settled by. A
+  // mismatch means the alert was wired to the wrong charge.
+  for (const alert of alerts) {
+    if (!alert.orderId || !alert.whopPaymentId) continue;
+    const [order] = await db
+      .select({ whopPaymentId: paymentOrders.whopPaymentId })
+      .from(paymentOrders)
+      .where(eq(paymentOrders.orderId, alert.orderId));
+    if (order && order.whopPaymentId !== alert.whopPaymentId) {
+      findings.push({
+        code: "alert_mapping_mismatch",
+        disputeId: alert.whopAlertId,
+        paymentId: alert.whopPaymentId,
+        orderId: alert.orderId,
+        transactionId: null,
+        detail: `alert names ${alert.whopPaymentId}, order settled by ${order.whopPaymentId}`,
+      });
+    }
+  }
+
+  /* --- THE RESOLUTION CENTER CROSS-CHECK --- */
+
+  for (const rc of cases) {
+    if (rc.status !== "closed" || !rc.whopPaymentId) continue;
+
+    // Does anything in OUR books show money leaving for this payment?
+    const [localRefunds] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(paymentRefunds)
+      .where(
+        and(
+          eq(paymentRefunds.whopPaymentId, rc.whopPaymentId),
+          eq(paymentRefunds.status, "completed"),
+        ),
+      );
+    const [localDisputeLoss] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(paymentDisputes)
+      .where(
+        and(eq(paymentDisputes.whopPaymentId, rc.whopPaymentId), eq(paymentDisputes.status, "lost")),
+      );
+    const weBookedSomething = (localRefunds?.n ?? 0) > 0 || (localDisputeLoss?.n ?? 0) > 0;
+
+    if (rc.refundSource === "merchant" && !weBookedSomething) {
+      findings.push({
+        code: "case_refund_unaccounted",
+        disputeId: rc.whopCaseId,
+        paymentId: rc.whopPaymentId,
+        orderId: rc.orderId,
+        transactionId: null,
+        detail:
+          "case reports a merchant refund; no completed refund or lost dispute exists for the payment",
+      });
+    }
+    if (rc.refundSource === "platform" && weBookedSomething) {
+      findings.push({
+        code: "case_platform_refund_booked_locally",
+        disputeId: rc.whopCaseId,
+        paymentId: rc.whopPaymentId,
+        orderId: rc.orderId,
+        transactionId: null,
+        detail:
+          "case reports Whop covered the refund, yet our books show money leaving our balance",
+      });
+    }
+  }
+
+  return {
+    configured: true,
+    disputesChecked: disputes.length,
+    alertsChecked: alerts.length,
+    casesChecked: cases.length,
+    transactionsChecked: transactions.length,
+    providerConsulted: false,
+    discrepancies: findings,
+  };
+}
+
+/**
+ * Adds the provider to the comparison, for the disputes of ONE payment.
+ *
+ * Two independent questions are asked, and they need different sources:
+ *
+ *   1. does Whop agree with our dispute ROWS?  -> `disputes.list`
+ *   2. is every dispute MOVEMENT accounted for? -> `financialActivity.list`
+ *
+ * A LIMITATION WORTH STATING: `disputes.list` has no `payment_id` filter — only
+ * `account_id` — so the account's disputes are listed and filtered here rather
+ * than server-side. That is fine at this scale and would need paging at a
+ * larger one; it is called out so nobody mistakes it for a per-payment query.
+ */
+export async function reconcileDisputesAgainstProvider(
+  paymentId: string,
+): Promise<DisputeDiscrepancy[]> {
+  const db = getDb();
+  if (!db) return [];
+
+  const findings: DisputeDiscrepancy[] = [];
+  const local = await listDisputesForPaymentLocal(paymentId);
+
+  /* --- (1) the dispute rows --- */
+
+  const listed = await listDisputesForAccount();
+  if (!listed.ok) {
+    findings.push({
+      code: "dispute_provider_unavailable",
+      disputeId: null,
+      paymentId,
+      orderId: null,
+      transactionId: null,
+      detail: listed.reason,
+    });
+  } else {
+    const remoteForPayment = listed.disputes.filter((d) => d.paymentId === paymentId);
+    const localById = new Map(local.map((d) => [d.whopDisputeId, d]));
+    const remoteById = new Map(remoteForPayment.map((d) => [d.disputeId, d]));
+
+    for (const remote of remoteForPayment) {
+      const mine = localById.get(remote.disputeId);
+      if (!mine) {
+        findings.push({
+          code: "dispute_missing_locally",
+          disputeId: remote.disputeId,
+          paymentId,
+          orderId: null,
+          transactionId: null,
+          detail: `provider reports a ${remote.status} dispute of ${remote.amountMinor.toString()} we have no row for`,
+        });
+        continue;
+      }
+      if (mine.providerStatus !== remote.status) {
+        findings.push({
+          code: "dispute_status_mismatch",
+          disputeId: remote.disputeId,
+          paymentId,
+          orderId: mine.orderId,
+          transactionId: null,
+          detail: `local ${mine.providerStatus}, provider ${remote.status}`,
+        });
+      }
+      if (mine.amountMinor !== remote.amountMinor) {
+        findings.push({
+          code: "dispute_amount_mismatch",
+          disputeId: remote.disputeId,
+          paymentId,
+          orderId: mine.orderId,
+          transactionId: null,
+          detail: `local ${mine.amountMinor.toString()}, provider ${remote.amountMinor.toString()}`,
+        });
+      }
+      if (mine.currency !== remote.currency) {
+        findings.push({
+          code: "dispute_currency_mismatch",
+          disputeId: remote.disputeId,
+          paymentId,
+          orderId: mine.orderId,
+          transactionId: null,
+          detail: `local ${mine.currency}, provider ${remote.currency}`,
+        });
+      }
+      if (remote.paymentId !== null && mine.whopPaymentId !== remote.paymentId) {
+        findings.push({
+          code: "dispute_mapping_mismatch",
+          disputeId: remote.disputeId,
+          paymentId,
+          orderId: mine.orderId,
+          transactionId: null,
+          detail: `local payment ${mine.whopPaymentId}, provider payment ${remote.paymentId}`,
+        });
+      }
+    }
+
+    for (const mine of local) {
+      if (remoteById.has(mine.whopDisputeId)) continue;
+      findings.push({
+        code: "dispute_missing_at_provider",
+        disputeId: mine.whopDisputeId,
+        paymentId,
+        orderId: mine.orderId,
+        transactionId: null,
+        detail: `local ${mine.status} dispute the provider does not report against this payment`,
+      });
+    }
+  }
+
+  /* --- (2) the money --- */
+
+  const ledger = await listLedgerMovementsForPayment(paymentId);
+  if (!ledger.ok) {
+    findings.push({
+      code: "dispute_provider_unavailable",
+      disputeId: null,
+      paymentId,
+      orderId: null,
+      transactionId: null,
+      detail: `ledger: ${ledger.reason}`,
+    });
+    return findings;
+  }
+
+  for (const movement of ledger.movements) {
+    if (!isDisputeLineType(movement.lineType)) continue;
+
+    // A line we can see but have no rule for. Reported for a human rather than
+    // guessed at — see `DISPUTE_LINE_TYPES_NOT_POSTED`.
+    if (!isPostableDisputeLine(movement.lineType)) {
+      findings.push({
+        code: "dispute_unmapped_line_type",
+        disputeId: null,
+        paymentId,
+        orderId: null,
+        transactionId: null,
+        detail: `${movement.lineType} of ${movement.amountMinor.toString()} is not posted: ${
+          DISPUTE_LINE_TYPES_NOT_POSTED[movement.lineType]
+        }`,
+      });
+      continue;
+    }
+    if (movement.amountMinor === BigInt(0)) continue;
+
+    // THE CRASH-RECOVERY SIGNAL. Money the provider says moved, with nothing
+    // in our journal for it.
+    // `inArray`, not `= any(${keys})`. A JS array interpolated into a raw
+    // `sql` template is emitted as a parenthesised tuple — `any(($1,$2,$3))` —
+    // which Postgres rejects. `inArray` builds the IN list the driver expects.
+    const keys = DISPUTE_EVENTS.map((event) => economicKey("whop", event, movement.activityId));
+    const [posted] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(accountingTransactions)
+      .where(inArray(accountingTransactions.idempotencyKey, keys));
+
+    if ((posted?.n ?? 0) === 0) {
+      findings.push({
+        code: "dispute_missing_ledger",
+        disputeId: null,
+        paymentId,
+        orderId: null,
+        transactionId: null,
+        detail: `provider ledger row ${movement.activityId} (${movement.lineType}, ${movement.amountMinor.toString()}) has no accounting transaction`,
       });
     }
   }

@@ -1895,13 +1895,14 @@ function sourceInvariants() {
     !/payout_sent|payout_reversed|payout_clearing|withdrawal|\btransfers?\b/i.test(refundSource),
   );
   check(
-    "the dispute and payout webhook handlers are still the untouched stubs",
-    /export async function handleWhopDisputeCreated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(
+    // DISPUTES ARE NOW IMPLEMENTED (task 4), so only the payout stub remains.
+    // What this suite still needs to assert is that the REFUND work did not
+    // reach into either subject — proved below by the absence of dispute and
+    // payout vocabulary in the refund modules themselves.
+    "the payout webhook handler is still the untouched stub",
+    /export async function handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(
       files.webhooks,
-    ) &&
-      /export async function handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(
-        files.webhooks,
-      ),
+    ),
   );
 
   // THE ORIGINAL PAYMENT IS NEVER MUTATED.
@@ -2017,9 +2018,14 @@ function sourceInvariants() {
     touchedOld.length === 0,
     touchedOld.join(" ") || "none",
   );
+  // 0005 is the refund migration and is now APPLIED, so it no longer appears
+  // in `git status` as untracked — it appears as a committed file. What this
+  // suite asserts is that it exists on disk and that the refund work did not
+  // invent a second one. Later tasks add their own (0006 is disputes), which
+  // is why this is not "the only new migration" any more.
   check(
-    "0005 exists and is the only new migration",
-    changed.includes("0005_slippery_hitman.sql"),
+    "the refund migration 0005 exists on disk",
+    require("node:fs").existsSync("drizzle/0005_slippery_hitman.sql"),
   );
 }
 

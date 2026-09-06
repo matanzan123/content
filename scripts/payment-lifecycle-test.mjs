@@ -208,8 +208,22 @@ check("refunds are recognised AND implemented, with their own ownership verifier
   gateBlock.includes('"refund.updated": verifyRefundOwnership') &&
   /export async function handleWhopRefund\(/.test(source) &&
   !/handleWhopRefundCreated/.test(source));
-check("disputes are still recognised but NOT implemented",
-  /handleWhopDisputeCreated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source));
+// DISPUTES ARE NOW IMPLEMENTED (task 4). This previously recorded that they
+// were not; it is replaced rather than deleted, because "the dispute family is
+// wired to real resolvers and its own ownership verifiers" is the property that
+// now has to stay true.
+check("the six dispute-family events are recognised AND implemented",
+  ["dispute.created", "dispute.updated", "dispute_alert.created",
+   "resolution_center_case.created", "resolution_center_case.updated",
+   "resolution_center_case.decided"].every((e) => webhooks.isSupportedEvent(e)) &&
+  /export async function handleWhopDispute\(/.test(source) &&
+  /export async function handleWhopDisputeAlert\(/.test(source) &&
+  /export async function handleWhopResolutionCase\(/.test(source) &&
+  !/handleWhopDisputeCreated/.test(source));
+check("and each is ownership-gated by a verifier for its own resource kind",
+  gateBlock.includes('"dispute.created": verifyDisputeOwnership') &&
+  gateBlock.includes('"dispute_alert.created": verifyAlertOwnership') &&
+  gateBlock.includes('"resolution_center_case.decided": verifyCaseOwnership'));
 check("payouts are still recognised but NOT implemented",
   /handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source));
 check("no transfer or withdrawal event was enabled",

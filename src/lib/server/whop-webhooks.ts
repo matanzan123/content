@@ -17,6 +17,19 @@ import { postWhopSettlement } from "./accounting/whop-payment-posting";
 import { mapRefundToOrder, type RefundMappingOutcome } from "./whop-refund-mapping";
 import { postWhopRefund } from "./accounting/whop-refund-posting";
 import { verifyRefundOwnership } from "./whop-refunds";
+import {
+  mapAlertToOrder,
+  mapCaseToOrder,
+  mapDisputeToOrder,
+  type AlertMappingOutcome,
+  type DisputeMappingOutcome,
+} from "./whop-dispute-mapping";
+import { postDisputeMovementsForPayment } from "./accounting/whop-dispute-posting";
+import {
+  verifyAlertOwnership,
+  verifyCaseOwnership,
+  verifyDisputeOwnership,
+} from "./whop-disputes";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -68,8 +81,16 @@ export const SUPPORTED_EVENTS = [
   "payment.canceled",
   "refund.created",
   "refund.updated",
+  // The dispute family, verified against the SDK's `WebhookEvent` enum, which
+  // carries exactly these six and no others: there is no `dispute.won`,
+  // `dispute.lost` or `dispute_alert.updated`. An outcome arrives as a
+  // `dispute.updated` whose fetched status says which.
   "dispute.created",
   "dispute.updated",
+  "dispute_alert.created",
+  "resolution_center_case.created",
+  "resolution_center_case.updated",
+  "resolution_center_case.decided",
   "payout.created",
   "payout.updated",
   "payout.reversed",
@@ -366,8 +387,114 @@ function describeRefundMapping(outcome: RefundMappingOutcome): HandlerResult {
   }
 }
 
-export async function handleWhopDisputeCreated(): Promise<HandlerResult> {
-  return { kind: "business_mapping_not_implemented" };
+/**
+ * Resolves the DISPUTE a verified delivery names, and then accounts for any
+ * money the provider's own ledger says has moved because of it.
+ *
+ * THE SAME TWO-STEP SHAPE as payments and refunds, with one crucial
+ * difference: the second step is NOT driven by the dispute's status.
+ *
+ * `mapDisputeToOrder` re-fetches the dispute and the payment it names and
+ * compares account, order, currency and amount before any state moves. Only
+ * then does `postDisputeMovementsForPayment` read the provider's
+ * `financialActivity` feed and mirror whatever dispute-related rows it finds.
+ *
+ * WHY THE POSTING RUNS ON EVERY DELIVERY, including ones that changed nothing.
+ * A dispute's money does not arrive with its status. The fee may post when it
+ * opens, the withdrawal later, the reversal later still — each as its own
+ * ledger row. So every delivery is an opportunity to notice a movement that
+ * has appeared since the last one, and each row is idempotent on its own id,
+ * so re-reading costs a request and never a duplicate.
+ *
+ * BOTH DISPUTE EVENTS ROUTE HERE. `dispute.created` and `dispute.updated`
+ * carry no outcome in their names — a dispute that was won and one that was
+ * lost both arrive as `dispute.updated` — so the fetched status is the only
+ * thing that can decide, and giving them separate handlers would only invite
+ * one to drift.
+ *
+ * A FAILED POSTING FAILS THE DELIVERY, so the receipt stays retryable: a
+ * chargeback that moved money we have not booked is a hole in the accounts.
+ */
+export async function handleWhopDispute(
+  resourceId: string | null,
+  webhookId: string | null,
+): Promise<HandlerResult> {
+  const outcome = await mapDisputeToOrder(resourceId);
+  if (outcome.kind !== "recorded") return describeDisputeMapping(outcome);
+
+  const posted = await postDisputeMovementsForPayment(outcome.paymentId, {
+    orderId: outcome.orderId,
+    disputeId: outcome.resourceId,
+    sourceWebhookId: webhookId,
+  });
+
+  if (!posted.ok) {
+    return { kind: "failed", category: `dispute_accounting_${posted.reason ?? "unknown"}` };
+  }
+  return { kind: "handled" };
+}
+
+/**
+ * Records the ALERT a verified delivery names. No accounting, ever.
+ *
+ * An alert is an issuer's early warning that a chargeback may be coming. The
+ * resource reports only WHETHER a fee was charged (`fee_charged: boolean`) and
+ * never how much, so there is no amount on it that could be posted. If a fee
+ * really was charged it appears on the provider's ledger as a
+ * `dispute_alert_fee` row against the payment, and THAT is what gets posted —
+ * by the dispute handler above, from the same authoritative feed.
+ *
+ * An alert Whop could not match to a payment is recorded as unmatched and
+ * acknowledged. It is a real state, it is terminal, and discarding it would
+ * lose the only record that an issuer reported fraud against us.
+ */
+export async function handleWhopDisputeAlert(
+  resourceId: string | null,
+): Promise<HandlerResult> {
+  const outcome = await mapAlertToOrder(resourceId);
+  if (outcome.kind === "recorded_unmatched") return { kind: "handled" };
+  return describeDisputeMapping(outcome);
+}
+
+/**
+ * Records the RESOLUTION CENTER CASE a verified delivery names. No accounting,
+ * ever.
+ *
+ * A case is Whop's mediation process, not a financial resource. It may end in
+ * a refund or escalate into a chargeback, and when it does Whop emits that
+ * real resource separately — so the money belongs to the `rf_` or `dspt_`,
+ * which have their own handlers and their own idempotency. Posting from a case
+ * as well would book the same money twice.
+ *
+ * The case's own `refund` field (`none` / `merchant` / `platform`) is stored
+ * and used by reconciliation to check that a case claiming money came off OUR
+ * balance has a real refund or dispute behind it — and that one claiming
+ * `platform` does not, because that was Whop's money.
+ *
+ * All three case events route here: `created`, `updated` and `decided` differ
+ * only in when they fire, and the fetched status and outcome say the rest.
+ */
+export async function handleWhopResolutionCase(
+  resourceId: string | null,
+): Promise<HandlerResult> {
+  return describeDisputeMapping(await mapCaseToOrder(resourceId));
+}
+
+/**
+ * Translates a dispute-family mapping outcome into a receipt state.
+ *
+ * A recorded resource is `handled` — the event did everything this build
+ * claims to do with it. A refusal is `failed` with the reason as its category,
+ * so a mismatch is visible in the receipts table rather than being swallowed.
+ */
+function describeDisputeMapping(outcome: DisputeMappingOutcome | AlertMappingOutcome): HandlerResult {
+  switch (outcome.kind) {
+    case "recorded":
+    case "recorded_unmatched":
+      return { kind: "handled" };
+    case "rejected":
+      return { kind: "failed", category: `dispute_${outcome.reason}` };
+  }
 }
 
 export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
@@ -398,6 +525,16 @@ const OWNERSHIP_GATED: Record<string, (id: string | null) => Promise<OwnershipOu
   "payment.canceled": verifyPaymentOwnership,
   "refund.created": verifyRefundOwnership,
   "refund.updated": verifyRefundOwnership,
+  // Each dispute-family resource has its own id shape and its own verifier.
+  // All three prove ownership through the PAYMENT they name, because all three
+  // declare their own account field nullable — "field absent" must never read
+  // as "ownership fine".
+  "dispute.created": verifyDisputeOwnership,
+  "dispute.updated": verifyDisputeOwnership,
+  "dispute_alert.created": verifyAlertOwnership,
+  "resolution_center_case.created": verifyCaseOwnership,
+  "resolution_center_case.updated": verifyCaseOwnership,
+  "resolution_center_case.decided": verifyCaseOwnership,
 };
 
 /**
@@ -407,11 +544,19 @@ const OWNERSHIP_GATED: Record<string, (id: string | null) => Promise<OwnershipOu
  */
 type OwnershipOutcome =
   | { kind: "verified" }
+  /**
+   * Alerts only: readable, not another company's, but Whop matched it to no
+   * payment. A PASS — there is nothing to own and nothing that can post — and
+   * a distinct kind so it can never be confused with a proven-owned resource.
+   */
+  | { kind: "verified_unmatched" }
   | { kind: "wrong_company" }
   | { kind: "resource_not_found" }
   | { kind: "provider_error"; category: string }
   | { kind: "invalid_resource_id" }
-  | { kind: "unconfigured" };
+  | { kind: "unconfigured" }
+  /** Disputes and cases: readable, but names no payment. A refusal. */
+  | { kind: "no_payment_reference" };
 
 type Handler = (resourceId: string | null, webhookId: string) => Promise<HandlerResult>;
 
@@ -432,8 +577,16 @@ const HANDLERS: Record<SupportedEvent, Handler> = {
   // outcome, so the fetched `refund.status` is the only thing that can decide.
   "refund.created": handleWhopRefund,
   "refund.updated": handleWhopRefund,
-  "dispute.created": handleWhopDisputeCreated,
-  "dispute.updated": handleWhopDisputeCreated,
+  // Both dispute events route to one resolver: neither name carries an
+  // outcome, so the fetched `dispute.status` is the only thing that decides.
+  "dispute.created": handleWhopDispute,
+  "dispute.updated": handleWhopDispute,
+  // Alerts and cases are separate subjects with separate resolvers, and
+  // NEITHER posts money — see their handlers for why.
+  "dispute_alert.created": handleWhopDisputeAlert,
+  "resolution_center_case.created": handleWhopResolutionCase,
+  "resolution_center_case.updated": handleWhopResolutionCase,
+  "resolution_center_case.decided": handleWhopResolutionCase,
   "payout.created": handleWhopPayoutUpdated,
   "payout.updated": handleWhopPayoutUpdated,
   "payout.reversed": handleWhopPayoutUpdated,
@@ -609,7 +762,10 @@ export async function processVerifiedWebhook(
   if (verifyOwnership) {
     const ownership = await verifyOwnership(resourceId);
 
-    if (ownership.kind !== "verified") {
+    // `verified_unmatched` passes with `verified`: an alert Whop matched to no
+    // payment is readable, is not another company's, and can never post — see
+    // the type. Every other kind stops the dispatch.
+    if (ownership.kind !== "verified" && ownership.kind !== "verified_unmatched") {
       // Whop signed it, but it is not ours: quarantine terminally. Retrying
       // would reach the same answer.
       if (ownership.kind === "wrong_company") {
@@ -646,9 +802,16 @@ export async function processVerifiedWebhook(
         .where(eq(whopWebhookReceipts.webhookId, webhookId))
         .returning({ deliveryCount: whopWebhookReceipts.deliveryCount });
 
-      if (shouldRetryLookup(ownership.kind, deliveryCount)) {
-        return { ack: false, kind: "processing_failed" };
-      }
+      // A resource that names no payment is DEFINITIVE and never retried. A
+      // dispute or case will not grow a payment reference on redelivery, and
+      // asking again would churn a receipt forever over an answer that cannot
+      // change. It is not in `LookupFailure` for exactly that reason: it is a
+      // shape problem with the resource, not a failure to look it up.
+      const retryable =
+        ownership.kind !== "no_payment_reference" &&
+        shouldRetryLookup(ownership.kind, deliveryCount);
+
+      if (retryable) return { ack: false, kind: "processing_failed" };
 
       // Exhausted. The receipt stays `failed` rather than being dressed up as
       // processed — nothing was handled, and reconciliation can still see it —

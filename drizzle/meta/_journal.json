@@ -43,6 +43,13 @@
       "when": 1788697382928,
       "tag": "0005_slippery_hitman",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788703614194,
+      "tag": "0006_wise_unus",
+      "breakpoints": true
     }
   ]
 }

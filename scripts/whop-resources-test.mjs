@@ -163,9 +163,15 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
   const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
   const handlers = source.slice(source.indexOf("export async function handleWhopPaymentSucceeded"), source.indexOf("const OWNERSHIP_GATED"));
   check("F. no handler writes to a database", handlers.includes("db.") === false && handlers.includes("insert(") === false);
-  // Payment handlers now resolve an internal ORDER. The refund, dispute and
-  // payout handlers still report no mapping, because theirs does not exist.
-  check("F. non-payment handlers still report no mapping", (handlers.match(/business_mapping_not_implemented/g) ?? []).length >= 3);
+  // Payments, refunds and the dispute family now all resolve real resources.
+  // PAYOUTS are the only subject left with no mapping, and the count is now
+  // exact rather than a floor: a rising number here would mean a resolver had
+  // been replaced by a stub, which is the regression worth catching.
+  check(
+    "F. only the payout handler still reports no mapping",
+    /handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source) &&
+      !/handleWhopDisputeCreated|handleWhopRefundCreated/.test(source),
+  );
   check("F. payment handlers delegate to the order mapping", handlers.includes("mapPaymentToOrder(resourceId"));
   const mapping = readFileSync("src/lib/server/whop-payment-mapping.ts", "utf8");
   check("F. the mapping never writes the ledger", mapping.includes("financialLedger") === false);

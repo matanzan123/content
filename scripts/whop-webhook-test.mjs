@@ -66,6 +66,13 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
   mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
   postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
+  verifyDisputeOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  verifyAlertOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  verifyCaseOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  mapDisputeToOrder: async () => ({ kind: "recorded", resourceId: "dspt_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+  mapAlertToOrder: async () => ({ kind: "recorded_unmatched", resourceId: "dspa_x", reason: "payment_unmatched" }),
+  mapCaseToOrder: async () => ({ kind: "recorded", resourceId: "reso_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+  postDisputeMovementsForPayment: async () => ({ ok: true, paymentId: "pay_x", examined: 0, outcomes: [] }),
   whopWebhookReceipts: {},
   getWhopWebhookSecret: () => SECRET,
   getWhopCompanyId: () => COMPANY,
@@ -182,6 +189,13 @@ const paymentBody = JSON.stringify({
     verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
     mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
     postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
+    verifyDisputeOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+    verifyAlertOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+    verifyCaseOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+    mapDisputeToOrder: async () => ({ kind: "recorded", resourceId: "dspt_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+    mapAlertToOrder: async () => ({ kind: "recorded_unmatched", resourceId: "dspa_x", reason: "payment_unmatched" }),
+    mapCaseToOrder: async () => ({ kind: "recorded", resourceId: "reso_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+    postDisputeMovementsForPayment: async () => ({ ok: true, paymentId: "pay_x", examined: 0, outcomes: [] }),
     whopWebhookReceipts: {},
     getWhopWebhookSecret: () => null,
     getWhopCompanyId: () => COMPANY,
@@ -251,11 +265,27 @@ check(
     result.kind === "handled", JSON.stringify(result));
 }
 
-// DISPUTES AND PAYOUTS ARE STILL NOT IMPLEMENTED, and must stay that way.
-for (const handler of ["handleWhopDisputeCreated", "handleWhopPayoutUpdated"]) {
-  const result = await webhooks[handler]();
+// DISPUTES ARE NOW IMPLEMENTED TOO (task 4). The old stub is gone, and the
+// three dispute-family resolvers each resolve their event rather than
+// deferring it. The stubs are stubbed to their "recorded" outcomes here, so
+// what this asserts is the RECEIVER's routing, not what a dispute decides.
+check("the old dispute stub is gone", webhooks.handleWhopDisputeCreated === undefined);
+{
+  const dispute = await webhooks.handleWhopDispute("dspt_x", "msg_d");
+  const alert = await webhooks.handleWhopDisputeAlert("dspa_x");
+  const rc = await webhooks.handleWhopResolutionCase("reso_x");
   check(
-    `${handler} still reports business_mapping_not_implemented`,
+    "all three dispute-family handlers RESOLVE their event",
+    dispute.kind === "handled" && alert.kind === "handled" && rc.kind === "handled",
+    JSON.stringify([dispute.kind, alert.kind, rc.kind]),
+  );
+}
+
+// PAYOUTS ARE STILL NOT IMPLEMENTED, and must stay that way.
+{
+  const result = await webhooks.handleWhopPayoutUpdated();
+  check(
+    "handleWhopPayoutUpdated still reports business_mapping_not_implemented",
     result.kind === "business_mapping_not_implemented",
   );
 }

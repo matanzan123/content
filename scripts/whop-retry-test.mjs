@@ -83,6 +83,13 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   verifyRefundOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
   mapRefundToOrder: async () => ({ kind: "pending", refundId: "rf_x", orderId: "o" }),
   postWhopRefund: async () => ({ ok: true, transactionId: "t", alreadyPosted: false }),
+  verifyDisputeOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  verifyAlertOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  verifyCaseOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
+  mapDisputeToOrder: async () => ({ kind: "recorded", resourceId: "dspt_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+  mapAlertToOrder: async () => ({ kind: "recorded_unmatched", resourceId: "dspa_x", reason: "payment_unmatched" }),
+  mapCaseToOrder: async () => ({ kind: "recorded", resourceId: "reso_x", paymentId: "pay_x", orderId: "o", status: "open", unchanged: false }),
+  postDisputeMovementsForPayment: async () => ({ ok: true, paymentId: "pay_x", examined: 0, outcomes: [] }),
   describeWhopError: (e) => (e instanceof Error ? e.message : "unknown error"),
 });
 

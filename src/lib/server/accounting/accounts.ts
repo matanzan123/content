@@ -195,9 +195,20 @@ export const ECONOMIC_EVENTS = [
 
 export type EconomicEvent = (typeof ECONOMIC_EVENTS)[number];
 
-/** Only these produce a posting today. The rest are declared, not implemented. */
+/**
+ * Only these produce a posting today. The rest are declared, not implemented.
+ *
+ * The three dispute events are posted from the PROVIDER'S OWN LEDGER FEED
+ * (`financialActivity`), never from a dispute's status: the `Dispute` resource
+ * carries no fee and no balance field, and an inquiry can reach `lost` having
+ * moved nothing. See `whop-dispute-posting.ts`.
+ */
 export const IMPLEMENTED_EVENTS: ReadonlySet<EconomicEvent> = new Set<EconomicEvent>([
   "payment_settled",
+  "payment_refunded",
+  "dispute_opened",
+  "dispute_won",
+  "dispute_lost",
   "reversal",
 ]);
 

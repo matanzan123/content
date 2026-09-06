@@ -834,3 +834,219 @@ export const paymentRefunds = pgTable(
     index("idx_refunds_created").on(t.createdAt),
   ],
 );
+
+/* --------------------------- dispute family ------------------------------ */
+
+/**
+ * Our five-value reduction of Whop's dispute vocabulary. See
+ * `src/lib/server/dispute-lifecycle.ts` for why the nine provider statuses
+ * become these five, and why `warning` is kept separate from `open` — an
+ * inquiry moves no funds unless it escalates, and collapsing the two would
+ * hide which disputes are actually at risk. The raw provider status is stored
+ * alongside in `provider_status`.
+ */
+export const disputeStatusEnum = pgEnum("dispute_status", [
+  "warning",
+  "open",
+  "won",
+  "lost",
+  "closed",
+]);
+
+/** Can a refund still avoid the chargeback? The only question an alert poses. */
+export const disputeAlertStatusEnum = pgEnum("dispute_alert_status", [
+  "actionable",
+  "not_actionable",
+]);
+
+/** A Resolution Center case is open or it is closed; the outcome is separate. */
+export const resolutionCaseStatusEnum = pgEnum("resolution_case_status", ["open", "closed"]);
+
+/**
+ * ONE ROW PER PROVIDER DISPUTE RESOURCE, keyed on the `dspt_` id.
+ *
+ * OPERATIONAL, NOT FINANCIAL. This records where a chargeback stands with the
+ * processor. It holds no money: dispute economics live in
+ * `accounting_transactions`, posted from the provider's own ledger feed, and
+ * the two are reconciled against each other rather than one being derived from
+ * the other.
+ *
+ * WHAT IS DELIBERATELY ABSENT. No evidence documents, no attachment contents,
+ * no customer name, email or billing address, no card number or brand — the
+ * dispute resource carries all of those and this build stores none of them.
+ * They belong to the customer, they are not needed to run the lifecycle or to
+ * reconcile the money, and storing them would create a retention and
+ * protection obligation that does not otherwise exist. `reason` and
+ * `reason_code` are kept because triage genuinely needs them.
+ */
+export const paymentDisputes = pgTable(
+  "payment_disputes",
+  {
+    disputeId: uuid("dispute_id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull().default("whop"),
+
+    /** THE economic identity, prefixed `dspt_`. Unique with `provider`. */
+    whopDisputeId: text("whop_dispute_id").notNull(),
+    /** The payment being disputed, prefixed `pay_`. */
+    whopPaymentId: text("whop_payment_id").notNull(),
+    /** The order that payment settled, when it maps to one. */
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** Minor units. The amount under dispute, not necessarily money moved. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** Whop's status verbatim — one of the nine it can produce. */
+    providerStatus: text("provider_status").notNull(),
+    status: disputeStatusEnum("status").notNull().default("open"),
+
+    /**
+     * TRUE for a pre-dispute inquiry, which "moves no funds unless one
+     * escalates". Stored because it changes what a `lost` means: an inquiry
+     * that closes against us may have cost nothing at all.
+     */
+    inquiry: boolean("inquiry").notNull().default(false),
+    /** Visa RDR settled it automatically by refunding the customer. */
+    rapidDisputeResolution: boolean("rapid_dispute_resolution").notNull().default(false),
+
+    reason: text("reason"),
+    reasonCode: text("reason_code"),
+
+    /** When evidence is due. Operational: it drives a deadline queue. */
+    evidenceDueAt: timestamp("evidence_due_at", { withTimezone: true }),
+    evidenceSubmittedAt: timestamp("evidence_submitted_at", { withTimezone: true }),
+
+    /** When Whop says the dispute was opened, as distinct from when we saw it. */
+    openedAt: timestamp("opened_at", { withTimezone: true }),
+    /** The provider's own last-changed time, for staleness comparison. */
+    providerUpdatedAt: timestamp("provider_updated_at", { withTimezone: true }),
+    /** Set once, when the dispute first reached a resolved status. */
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uniq_disputes_provider_dispute").on(t.provider, t.whopDisputeId),
+    index("idx_disputes_payment").on(t.whopPaymentId),
+    index("idx_disputes_order").on(t.orderId),
+    index("idx_disputes_status").on(t.status),
+    index("idx_disputes_evidence_due").on(t.evidenceDueAt),
+  ],
+);
+
+/**
+ * ONE ROW PER PROVIDER DISPUTE ALERT, keyed on the `dspa_` id.
+ *
+ * AN ALERT IS NOT A DISPUTE, and this is a separate table for exactly that
+ * reason: one payment can carry an alert and then a dispute, and folding them
+ * into one row would either lose the alert or double-count the chargeback.
+ *
+ * `whop_payment_id` IS NULLABLE HERE, unlike on a dispute. Whop documents the
+ * field as "null when Whop could not match the report to a payment", and an
+ * unmatched alert is a real state worth recording — it is precisely the one an
+ * operator can do nothing about, and pretending it must have a payment would
+ * mean discarding it.
+ *
+ * NOTHING HERE POSTS MONEY. `fee_charged` is a boolean with no amount anywhere
+ * on the resource, so the fee — if there was one — is knowable only from the
+ * provider's ledger feed, and that is what gets posted.
+ */
+export const disputeAlerts = pgTable(
+  "dispute_alerts",
+  {
+    alertId: uuid("alert_id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull().default("whop"),
+
+    whopAlertId: text("whop_alert_id").notNull(),
+    /** Nullable: an alert Whop could not match to a payment is still real. */
+    whopPaymentId: text("whop_payment_id"),
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** What the ISSUER reported. Documented as possibly differing from the
+     * payment's own amount, and never posted. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** `early_fraud_warning` | `dispute_alert` | `rapid_dispute_resolution`. */
+    alertType: text("alert_type").notNull(),
+    status: disputeAlertStatusEnum("status").notNull().default("not_actionable"),
+    notActionableReason: text("not_actionable_reason"),
+
+    /** Whether Whop charged a fee. A flag, never an amount — see the header. */
+    feeCharged: boolean("fee_charged").notNull().default(false),
+
+    /** When the issuer filed it, which precedes when Whop received it. */
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    providerUpdatedAt: timestamp("provider_updated_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uniq_alerts_provider_alert").on(t.provider, t.whopAlertId),
+    index("idx_alerts_payment").on(t.whopPaymentId),
+    index("idx_alerts_order").on(t.orderId),
+    index("idx_alerts_status").on(t.status),
+  ],
+);
+
+/**
+ * ONE ROW PER RESOLUTION CENTER CASE, keyed on the `reso_` id.
+ *
+ * A CASE IS NOT A REFUND AND NOT A DISPUTE. It is Whop's mediation process,
+ * which may end in either — and when it does, Whop emits that real financial
+ * resource separately, so the money belongs there. This table posts nothing.
+ *
+ * `refund_source` IS THE REASON THIS TABLE EXISTS. Whop documents it as
+ * "whether money moved and off whose balance: none, merchant, or platform",
+ * and explicitly "independent of outcome". Storing it lets reconciliation ask
+ * the one question that matters: a case claiming `merchant` should have a real
+ * refund or dispute in our books for the same payment, and one claiming
+ * `platform` should NOT — that was Whop's money, not ours.
+ */
+export const resolutionCenterCases = pgTable(
+  "resolution_center_cases",
+  {
+    caseId: uuid("case_id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull().default("whop"),
+
+    whopCaseId: text("whop_case_id").notNull(),
+    whopPaymentId: text("whop_payment_id"),
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** Whop's status verbatim: awaiting_merchant / awaiting_customer /
+     * under_review / closed. */
+    providerStatus: text("provider_status").notNull(),
+    status: resolutionCaseStatusEnum("status").notNull().default("open"),
+
+    /** `customer_won` | `merchant_won` | `withdrawn`, null while open. */
+    outcome: text("outcome"),
+    /** `none` | `merchant` | `platform`, null while open. See the header. */
+    refundSource: text("refund_source"),
+    reason: text("reason"),
+    /** Whether Whop itself is involved in deciding the case. */
+    escalated: boolean("escalated").notNull().default(false),
+
+    providerUpdatedAt: timestamp("provider_updated_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uniq_cases_provider_case").on(t.provider, t.whopCaseId),
+    index("idx_cases_payment").on(t.whopPaymentId),
+    index("idx_cases_order").on(t.orderId),
+    index("idx_cases_status").on(t.status),
+  ],
+);
