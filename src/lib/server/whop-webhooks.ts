@@ -12,6 +12,7 @@ import {
 } from "./whop-payments";
 import { verifyPaymentOwnership } from "./whop-resources";
 import { mapPaymentToOrder, type MappingOutcome } from "./whop-payment-mapping";
+import { postWhopSettlement } from "./accounting/whop-payment-posting";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -30,11 +31,15 @@ import { mapPaymentToOrder, type MappingOutcome } from "./whop-payment-mapping";
    optional bookkeeping — it is the only thing standing between a redelivery
    and a double effect once handlers do real work.
 
-   NOTHING HERE WRITES `financial_ledger`. There is no ClipRewards checkout,
-   order or campaign mapping yet, so a `payment.succeeded` cannot be turned
-   into revenue, funding or creator earnings without inventing the
-   relationship. The handlers below say so explicitly rather than dropping the
-   event or guessing.
+   ACCOUNTING ATTACHES AFTER STEP 4, NEVER INSTEAD OF IT. A verified
+   `payment.succeeded` is accounted for only once `mapPaymentToOrder` has
+   settled an order against the provider's own record of the payment; the
+   posting itself is idempotent on the economic event, so a redelivery
+   converges rather than doubling. Everything else — refunds, disputes,
+   payouts — still has no mapping and says so rather than guessing.
+
+   `financial_ledger` is not written here or anywhere else. It is superseded
+   by the balanced journal in `accounting_transactions` / `accounting_entries`.
    ========================================================================== */
 
 /* ------------------------------ event names ------------------------------ */
@@ -178,19 +183,54 @@ export type HandlerResult =
   | { kind: "failed"; category: string };
 
 /**
- * Settles the internal ORDER a verified payment names — and nothing else.
+ * Settles the internal ORDER a verified payment names, and then — and only
+ * then — accounts for the money.
+ *
+ * THE ORDER OF THESE TWO STEPS IS THE WHOLE POINT.
  *
  * `mapPaymentToOrder` re-fetches the payment and compares the provider's own
  * amount, currency, company, metadata and status against our order before any
- * state moves. A mismatch on any of them leaves the order untouched.
+ * state moves. A mismatch on any of them leaves the order untouched and
+ * returns something other than `paid`, so the accounting call below is never
+ * reached. Nothing here repeats or relaxes those checks: the accounting step
+ * runs on a payment that has ALREADY been proved to be ours, against an order
+ * that has ALREADY been settled.
  *
- * NO `financial_ledger` WRITE HAPPENS HERE OR ANYWHERE BELOW IT. Proving that
- * a payment maps to an order is this phase; accounting for the money is the
- * next one, and it must not be inferred from this succeeding.
+ * `alreadyPaid` still posts. It means the order was settled by an earlier
+ * delivery, which tells us nothing about whether the accounting for it was
+ * written — a crash between the two would leave a paid order with no journal
+ * entry, and that gap is exactly what a redelivery is for. Posting is
+ * idempotent on `whop:payment_settled:<payment_id>`, so a delivery that
+ * arrives after a complete one converges instead of duplicating.
+ *
+ * A FAILED POSTING FAILS THE DELIVERY. The receipt goes back to `failed` and
+ * stays retryable, because a settled payment that is not in the ledger is a
+ * hole in the accounts, and acknowledging the delivery would close the only
+ * door through which it can be filled.
  */
-export async function handleWhopPaymentSucceeded(resourceId: string | null): Promise<HandlerResult> {
+export async function handleWhopPaymentSucceeded(
+  resourceId: string | null,
+  webhookId: string | null,
+): Promise<HandlerResult> {
   const outcome = await mapPaymentToOrder(resourceId, "succeeded");
-  return describeMapping(outcome);
+  if (outcome.kind !== "paid") return describeMapping(outcome);
+
+  const environment = getWhopEnvironment();
+  if (!environment) return { kind: "failed", category: "accounting_unconfigured" };
+
+  // `resourceId` is a proven payment id by this point: `mapPaymentToOrder`
+  // returns `paid` only after fetching that very payment from Whop.
+  const posted = await postWhopSettlement(resourceId as string, {
+    environment,
+    orderId: outcome.orderId,
+    sourceWebhookId: webhookId,
+  });
+
+  if (!posted.ok) {
+    return { kind: "failed", category: `accounting_${posted.reason}` };
+  }
+
+  return { kind: "handled" };
 }
 
 export async function handleWhopPaymentFailed(resourceId: string | null): Promise<HandlerResult> {
@@ -248,7 +288,7 @@ export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
  */
 const OWNERSHIP_GATED = new Set<string>(["payment.succeeded", "payment.failed", "payment.pending"]);
 
-type Handler = (resourceId: string | null) => Promise<HandlerResult>;
+type Handler = (resourceId: string | null, webhookId: string) => Promise<HandlerResult>;
 
 const HANDLERS: Record<SupportedEvent, Handler> = {
   "payment.succeeded": handleWhopPaymentSucceeded,
@@ -461,7 +501,7 @@ export async function processVerifiedWebhook(
   }
 
   try {
-    const result = await HANDLERS[eventType](resourceId);
+    const result = await HANDLERS[eventType](resourceId, webhookId);
 
     if (result.kind === "failed") {
       await db

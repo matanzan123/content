@@ -181,7 +181,12 @@ export async function markOrderPaid(orderId: string, whopPaymentId: string): Pro
       .set({
         status: "paid",
         whopPaymentId,
-        paidAt: sql`now()`,
+        // COALESCE, not `now()`. This statement is deliberately re-runnable by
+        // the same payment — that is what makes a redelivery idempotent — and
+        // a plain `now()` made every rerun overwrite the moment the order was
+        // actually settled with the moment it was re-checked. The first
+        // settlement is the true one and must survive every later one.
+        paidAt: sql`coalesce(${paymentOrders.paidAt}, now())`,
         updatedAt: sql`now()`,
       })
       .where(

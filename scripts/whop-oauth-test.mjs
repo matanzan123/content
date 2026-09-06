@@ -5,7 +5,8 @@
  * mock — a stubbed cipher would prove nothing about whether a stored token is
  * actually unreadable. The one-time/replay behaviour of `state` is behaviour
  * of SQL, so it runs against real Postgres in a throwaway table (migration
- * 0003 is NOT applied; the table is created and dropped by this suite).
+ * 0003 is applied, but this suite still uses its own throwaway table so it
+ * never writes a row into the real one).
  *
  * No OAuth consent is performed and no provider request is made.
  */
@@ -283,7 +284,9 @@ if (process.env.DATABASE_URL) {
     const [{ n: ledger }] = await sql`select count(*)::int as n from financial_ledger`;
     check("financial_ledger untouched", ledger === 0, `${ledger} rows`);
     const [{ n: applied }] = await sql`select count(*)::int as n from drizzle.__drizzle_migrations`;
-    check("migration 0003 is NOT applied", applied === 3, `${applied} applied`);
+    check("migration 0003 is applied", applied >= 4, `${applied} applied`);
+    const [{ n: linked }] = await sql`select count(*)::int as n from whop_connections`;
+    check("the real whop_connections table exists and is empty", linked === 0, `${linked} rows`);
     await sql.end({ timeout: 5 });
   }
 }
@@ -522,7 +525,7 @@ if (process.env.DATABASE_URL) {
   check("financial_ledger remains 0", ledger === 0, `${ledger}`);
   check("payment_orders untouched by this work", orders === 3, `${orders}`);
   check("webhook receipts untouched", receipts === 2, `${receipts}`);
-  check("migration 0003 is still NOT applied", applied === 3, `${applied} applied`);
+  check("migration 0003 is applied", applied >= 4, `${applied} applied`);
 }
 
 const failed = results.filter((r) => !r.pass);

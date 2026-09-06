@@ -550,3 +550,192 @@ export const whopConnections = pgTable(
       .where(sql`revoked_at is null`),
   ],
 );
+
+/* =========================================================================
+   ACCOUNTING — the double-entry journal.
+
+   `financial_ledger` above is left exactly as it is. It was a
+   single-row-per-movement sketch written before a provider existed, and it
+   cannot express the thing that actually happens when a payment settles: one
+   customer payment splits into a net that reaches our provider balance, a set
+   of provider fees, and tax — three amounts that must be recorded together or
+   not at all. A one-row-per-movement table can record the pieces but cannot
+   prove they belong to the same event or that they add up.
+
+   It is not dropped and not rewritten. It holds ZERO rows, so nothing is
+   migrated; it is simply superseded, and the two tables below are the only
+   place money is accounted for from here on.
+
+   THE MODEL IS A BALANCED JOURNAL: a header (one economic event) and its legs
+   (one row per account touched). Every leg carries a SIGNED integer in minor
+   units, debit positive and credit negative, and the legs of a transaction
+   must sum to exactly zero. That single invariant is what makes the ledger
+   checkable: a total that does not balance is a bug the database refuses
+   rather than a number someone has to notice.
+   ========================================================================= */
+
+/**
+ * What happened economically. NOT a webhook event name.
+ *
+ * `payment.succeeded` is a delivery; `payment_settled` is the settlement it
+ * describes, however many times it is delivered. Most values here have no
+ * posting rule yet — they are named so the model is whole, and so adding
+ * refunds later is a new rule rather than a migration.
+ */
+export const economicEventEnum = pgEnum("economic_event", [
+  "payment_settled",
+  "payment_refunded",
+  "dispute_opened",
+  "dispute_won",
+  "dispute_lost",
+  "payout_sent",
+  "payout_reversed",
+  "manual_adjustment",
+  "reversal",
+]);
+
+/** The chart of accounts. Mirrors ACCOUNTS in src/lib/server/accounting/accounts.ts. */
+export const ledgerAccountEnum = pgEnum("ledger_account", [
+  "provider_balance",
+  "payout_clearing",
+  "unallocated_customer_funds",
+  "tax_payable",
+  "creator_payable",
+  "campaign_funds",
+  "refunds_payable",
+  "dispute_reserve",
+  "platform_revenue",
+  "provider_fee_expense",
+  "fx_adjustment",
+]);
+
+/**
+ * ONE ECONOMIC EVENT. The journal header.
+ *
+ * IDEMPOTENCY IS `idempotency_key`, and it is built from what happened —
+ * `whop:payment_settled:pay_abc` — never from a delivery id. Whop sends the
+ * same event more than once with different message ids, so a delivery id would
+ * let a redelivery post the money twice; and a refund legitimately names the
+ * same payment as the settlement, so the resource id alone would wrongly
+ * collapse two different events into one. The key is UNIQUE, so a duplicate is
+ * refused by Postgres rather than by a check that can lose a race.
+ *
+ * `source_webhook_id` is EVIDENCE ONLY — it records which delivery caused the
+ * posting so a row can be traced back, and it is deliberately not unique and
+ * not part of any key.
+ *
+ * APPEND-ONLY. Nothing in the application updates or deletes a row here or in
+ * `accounting_entries`; a correction is a new transaction pointing back
+ * through `reverses_transaction_id`. The runtime database role should not be
+ * granted UPDATE or DELETE on either table.
+ */
+export const accountingTransactions = pgTable(
+  "accounting_transactions",
+  {
+    transactionId: uuid("transaction_id").primaryKey().defaultRandom(),
+
+    /** What happened. */
+    economicEvent: economicEventEnum("economic_event").notNull(),
+    /** Who told us. "whop", or "internal" for a correction we originated. */
+    provider: text("provider").notNull(),
+    /** The provider's own id for the thing that happened, e.g. `pay_...`. */
+    providerResourceId: text("provider_resource_id"),
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /**
+     * The currency of EVERY leg. One transaction, one currency — a journal
+     * that mixed currencies could not be checked for balance at all.
+     */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** The economic key. See the table comment. */
+    idempotencyKey: text("idempotency_key").notNull(),
+
+    /** The internal order this settles, when there is one. */
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    /**
+     * Set only on a transaction that exists to undo another one, in full.
+     * A PARTIAL undo is not this: it is an ordinary transaction of its own
+     * kind (a refund is `payment_refunded`, keyed on the refund's own resource
+     * id), because a partial reversal is a new economic event rather than a
+     * retraction of the original.
+     */
+    reversesTransactionId: uuid("reverses_transaction_id"),
+
+    /** Which delivery caused this posting. Traceability only, never a key. */
+    sourceWebhookId: text("source_webhook_id"),
+
+    /** Short, human, and never carrying a secret or a customer detail. */
+    description: text("description"),
+
+    postedAt: timestamp("posted_at", { withTimezone: true }).notNull().defaultNow(),
+    /** When the event happened at the provider, if that differs from posting. */
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+
+    metadata: jsonb("metadata").$type<Record<string, string | number | boolean | null>>(),
+  },
+  (t) => [
+    // THE economic idempotency constraint.
+    uniqueIndex("uniq_accounting_idempotency").on(t.idempotencyKey),
+    // A transaction may be reversed at most once. Partial: almost every row
+    // reverses nothing, and many nulls must not collide.
+    uniqueIndex("uniq_accounting_reversal")
+      .on(t.reversesTransactionId)
+      .where(sql`reverses_transaction_id is not null`),
+    index("idx_accounting_posted").on(t.postedAt),
+    index("idx_accounting_event").on(t.economicEvent, t.postedAt),
+    index("idx_accounting_resource").on(t.provider, t.providerResourceId),
+    index("idx_accounting_order").on(t.orderId),
+    index("idx_accounting_webhook").on(t.sourceWebhookId),
+  ],
+);
+
+/**
+ * THE LEGS. One row per account a transaction touches.
+ *
+ * `amount_minor` is a SIGNED bigint of the currency's minor unit: positive is
+ * a debit, negative is a credit, and zero is meaningless and refused. The legs
+ * of a transaction must sum to zero — enforced in migration 0004 by a
+ * DEFERRABLE constraint trigger, so the check runs once at COMMIT rather than
+ * after each insert, which is the only way a multi-leg journal can be written
+ * at all.
+ *
+ * `leg` is the position within the transaction and is unique with it. That
+ * makes an interrupted insert impossible to complete twice: a retry that
+ * re-inserts leg 1 collides instead of producing a fourth leg on a
+ * three-legged journal.
+ */
+export const accountingEntries = pgTable(
+  "accounting_entries",
+  {
+    entryId: uuid("entry_id").primaryKey().defaultRandom(),
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => accountingTransactions.transactionId),
+
+    /** 1-based position within the transaction. Unique with it. */
+    leg: integer("leg").notNull(),
+
+    account: ledgerAccountEnum("account").notNull(),
+    /** Signed minor units. Debit positive, credit negative, never zero. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    /** Repeated from the header so a leg can never be read without it. */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** Who the leg is with, when that is known. Never an invented id. */
+    counterpartyType: text("counterparty_type"),
+    counterpartyId: text("counterparty_id"),
+
+    /** For a fee leg, Whop's own `origin`, e.g. `stripe_radar_fee`. */
+    sourceDetail: text("source_detail"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uniq_accounting_entry_leg").on(t.transactionId, t.leg),
+    index("idx_entries_transaction").on(t.transactionId),
+    index("idx_entries_account").on(t.account, t.createdAt),
+    index("idx_entries_counterparty").on(t.counterpartyType, t.counterpartyId),
+  ],
+);
