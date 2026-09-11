@@ -4,7 +4,7 @@ import { useT } from "@/i18n/provider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { ProfilePreview } from "./ProfilePreview";
-import { SocialIcon, WhopMark } from "./SocialIcons";
+import { SocialIcon } from "./SocialIcons";
 import {
   CREATOR_TYPES,
   LANGUAGES,
@@ -83,18 +83,18 @@ export function OnboardingWizard() {
   const { user, signOut } = useAuth();
   const [draft, setDraft] = useState<OnboardingDraft>(emptyDraft);
   const [hydrated, setHydrated] = useState(false);
-  const [whopHandle, setWhopHandle] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
-  const [done, setDone] = useState(false);
-  // The OAuth callback redirects back with ?whop=connected or ?whop=<message>.
-  // Read it once at mount so it stays derived state, not an effect write.
-  const [whopResult] = useState(() =>
-    typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("whop")
-  );
-  const whopError =
-    whopResult && whopResult !== "connected" ? decodeURIComponent(whopResult) : null;
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  /*
+   * WHOP CONNECTION HAS BEEN REMOVED FROM ONBOARDING.
+   *
+   * The last step used to offer "Connect Whop", so anyone who had merely
+   * signed in with Google could start linking a Whop account before
+   * ClipRewards had spoken to them. Whop connection belongs AFTER approval:
+   * the server now refuses it for anyone who is not an approved creator or
+   * brand (`requireWhopEligible`), and this step submits the application
+   * instead.
+   */
   const storageKey = `${STORAGE_PREFIX}${user?.uid ?? "guest"}`;
   const seededFor = useRef<string | null>(null);
 
@@ -116,11 +116,9 @@ export function OnboardingWizard() {
       fullName: user?.displayName ?? "",
       photoURL: user?.photoURL ?? null,
       ...restored,
-      // Coming back from Whop always lands on the final step.
-      ...(whopResult ? { step: STEP_COUNT - 1 } : {}),
     });
     setHydrated(true);
-  }, [storageKey, user, whopResult]);
+  }, [storageKey, user]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -131,27 +129,43 @@ export function OnboardingWizard() {
     }
   }, [draft, storageKey, hydrated]);
 
-  // Drop the ?whop= param so a refresh doesn't replay the callback message.
+  // Pull any profile already saved server-side, so a reload or a second device
+  // resumes where the applicant left off. The wizard previously kept its draft
+  // in localStorage only, which is why signing in elsewhere started over.
   useEffect(() => {
-    if (whopResult) window.history.replaceState({}, "", window.location.pathname);
-  }, [whopResult]);
-
-  useEffect(() => {
-    // The link belongs to a signed-in ClipRewards account, so asking about it
-    // means proving who is asking. No token, no question.
     if (!user) return;
     let cancelled = false;
     (async () => {
       try {
         const idToken = await user.getIdToken();
-        const response = await fetch("/api/whop/connection", {
+        const response = await fetch("/api/onboarding/profile", {
           headers: { authorization: `Bearer ${idToken}` },
         });
         if (!response.ok || cancelled) return;
-        const d = (await response.json()) as { connected: boolean; username?: string | null };
-        if (!cancelled && d.connected && d.username) setWhopHandle(d.username);
+        const d = (await response.json()) as {
+          profile?: {
+            fullName?: string | null;
+            bio?: string | null;
+            languages?: string[] | null;
+            creatorType?: string | null;
+            referralSource?: string | null;
+            socials?: string[] | null;
+            lastStep?: number;
+          } | null;
+        };
+        if (cancelled || !d.profile) return;
+        setDraft((current) => ({
+          ...current,
+          fullName: d.profile?.fullName ?? current.fullName,
+          bio: d.profile?.bio ?? current.bio,
+          languages: d.profile?.languages ?? current.languages,
+          creatorType: d.profile?.creatorType ?? current.creatorType,
+          referral: d.profile?.referralSource ?? current.referral,
+          socials: (d.profile?.socials as SocialPlatform[]) ?? current.socials,
+          step: typeof d.profile?.lastStep === "number" ? d.profile.lastStep : current.step,
+        }));
       } catch {
-        // A failed status read is not worth surfacing; the button still works.
+        // A failed read is not worth surfacing; the local draft still works.
       }
     })();
     return () => {
@@ -160,31 +174,73 @@ export function OnboardingWizard() {
   }, [user]);
 
   /**
-   * Starts the link.
+   * Submits the application: persists the profile and marks onboarding done.
    *
-   * A POST rather than a link, because the server establishes who is
-   * connecting before it will hand back an authorize URL. The old `<a>` could
-   * be followed by anyone, signed in or not, which is precisely how the legacy
-   * flow produced connections belonging to nobody.
+   * THE SERVER DECIDES WHAT HAPPENS NEXT. This reloads rather than routing, so
+   * the page guard re-runs and sends the applicant to interview booking — or
+   * wherever their real stage belongs. A client that picked the destination
+   * itself would be guessing at an authorization decision.
    */
-  const connectWhop = useCallback(async () => {
-    if (!user || connecting) return;
-    setConnecting(true);
+  const submitApplication = useCallback(async () => {
+    if (!user || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
     try {
       const idToken = await user.getIdToken();
-      const response = await fetch("/api/whop/connect", {
+
+      /*
+       * THE ROLE IS RECORDED FIRST, AND COMPLETION DEPENDS ON IT.
+       *
+       * `refreshProgress` only lets an account leave `onboarding` when a role
+       * AND a completed profile are both present. Saving the profile first
+       * would stamp `onboarding_completed_at`, advance nothing, and strand the
+       * applicant on this wizard — which is exactly what used to happen.
+       *
+       * The role is "creator" because this IS the creator wizard. It is not
+       * derived from `creatorType`, which is a content category ("Clipper",
+       * "UGC Face") and says nothing about the kind of account.
+       */
+      const roleResponse = await fetch("/api/onboarding/role", {
         method: "POST",
         headers: { authorization: `Bearer ${idToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ return_to: "onboarding" }),
+        body: JSON.stringify({ role: "creator" }),
       });
-      if (!response.ok) return setConnecting(false);
-      const { authorize_url } = (await response.json()) as { authorize_url?: string };
-      if (typeof authorize_url !== "string") return setConnecting(false);
-      window.location.assign(authorize_url);
+      if (!roleResponse.ok) {
+        // Stop here: an application that cannot record what it is applying as
+        // must not be marked complete.
+        const body = (await roleResponse.json().catch(() => null)) as { error?: string } | null;
+        setSubmitError(body?.error ?? "error");
+        setSubmitting(false);
+        return;
+      }
+
+      const response = await fetch("/api/onboarding/profile", {
+        method: "POST",
+        headers: { authorization: `Bearer ${idToken}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          fullName: draft.fullName,
+          bio: draft.bio,
+          photoUrl: draft.photoURL,
+          languages: draft.languages,
+          creatorType: draft.creatorType,
+          referralSource: draft.referral,
+          socials: draft.socials,
+          lastStep: draft.step,
+          complete: true,
+        }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        setSubmitError(body?.error ?? "error");
+        setSubmitting(false);
+        return;
+      }
+      window.location.reload();
     } catch {
-      setConnecting(false);
+      setSubmitError("network");
+      setSubmitting(false);
     }
-  }, [user, connecting]);
+  }, [user, submitting, draft]);
 
   const update = (patch: Partial<OnboardingDraft>) => setDraft((d) => ({ ...d, ...patch }));
 
@@ -225,31 +281,14 @@ export function OnboardingWizard() {
     return <div className="min-h-[520px] rounded-[var(--radius-token-lg)] bg-surface" />;
   }
 
-  if (done) {
-    return (
-      <div className="mx-auto max-w-[560px] rounded-[var(--radius-token-lg)] bg-surface p-10 text-center shadow-[var(--shadow-float)]">
-        <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-accent-soft text-accent">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M5 12.5L10 17.5L19 7.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-        <h2 className="mt-5 font-[var(--font-display)] text-[26px] font-extrabold tracking-tight text-ink">
-          {t.doneTitle}
-        </h2>
-        <p className="mt-2.5 text-[14px] leading-relaxed text-ink-soft">
-          {t.doneBody}
-        </p>
-        <button
-          type="button"
-          onClick={() => update({ step: 0 })}
-          className="mt-7 rounded-[var(--radius-token-pill)] border border-line px-5 py-2.5 text-[13px] font-semibold text-ink transition-colors hover:bg-surface-sunken"
-        >
-          {t.reviewAnswers}
-        </button>
-      </div>
-    );
-  }
-
+  /*
+   * There is no local "done" screen any more.
+   *
+   * Submitting reloads, the server page guard re-runs, and the applicant is
+   * routed to their real next stage — interview booking, or the waiting page
+   * if they already have a slot. A client-rendered success screen would be the
+   * wizard asserting an outcome the server had not yet agreed to.
+   */
   const isLastStep = draft.step === STEP_COUNT - 1;
 
   return (
@@ -316,7 +355,7 @@ export function OnboardingWizard() {
                 <label htmlFor="handle" className="block text-[13px] font-medium text-ink-soft">
                   {t.username}{" "}
                   <span className="text-ink-soft/70">
-                    {whopHandle ? t.fromWhop : t.autoGenerated}
+                    {t.autoGenerated}
                   </span>
                 </label>
                 <div className="relative mt-2">
@@ -325,7 +364,7 @@ export function OnboardingWizard() {
                   </span>
                   <input
                     id="handle"
-                    value={whopHandle ?? handle}
+                    value={handle}
                     readOnly
                     disabled
                     className={`${FIELD} cursor-not-allowed pl-9 pr-10 text-ink-soft`}
@@ -464,25 +503,15 @@ export function OnboardingWizard() {
 
           {draft.step === 4 && (
             <div className="flex h-full flex-col items-center justify-center py-10 text-center">
-              <span className="flex h-14 w-14 items-center justify-center rounded-[16px] bg-surface-sunken text-ink">
-                <WhopMark size={26} />
-              </span>
               <h1 className="mt-5 font-[var(--font-display)] text-[24px] font-extrabold tracking-tight text-ink">
-                {whopHandle ? t.whopConnected : t.whopConnect}
+                {t.reviewTitle}
               </h1>
-              <p className="mt-2.5 max-w-[320px] text-[14px] leading-relaxed text-ink-soft">
-                {whopHandle ? (
-                  <>
-                    Linked as <span className="font-semibold text-ink">@{whopHandle}</span> — payouts
-                    will land in that account.
-                  </>
-                ) : (
-                  t.whopBody
-                )}
+              <p className="mt-2.5 max-w-[340px] text-[14px] leading-relaxed text-ink-soft">
+                {t.reviewBody}
               </p>
-              {whopError && (
+              {submitError && (
                 <p role="alert" className="mt-4 max-w-[320px] text-[13px] font-medium text-red-700">
-                  {whopError}
+                  {submitError}
                 </p>
               )}
             </div>
@@ -498,33 +527,22 @@ export function OnboardingWizard() {
             {c.back}
           </button>
 
-          {isLastStep && !whopHandle ? (
-            <button
-              type="button"
-              onClick={connectWhop}
-              disabled={!user || connecting}
-              aria-busy={connecting}
-              className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-center text-[14px] font-bold text-white transition-colors hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {t.connectWhop}
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={!canContinue}
-              onClick={() => (isLastStep ? setDone(true) : update({ step: draft.step + 1 }))}
-              className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-[14px] font-bold text-white transition-colors hover:bg-ink/90 disabled:cursor-not-allowed disabled:bg-ink-soft"
-            >
-              {isLastStep ? c.finish : c.continue}
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={!canContinue || submitting}
+            aria-busy={submitting}
+            onClick={() => (isLastStep ? submitApplication() : update({ step: draft.step + 1 }))}
+            className="flex-1 rounded-[var(--radius-token-md)] bg-ink py-3 text-[14px] font-bold text-white transition-colors hover:bg-ink/90 disabled:cursor-not-allowed disabled:bg-ink-soft"
+          >
+            {isLastStep ? c.finish : c.continue}
+          </button>
         </div>
       </div>
 
       {/* Right — live profile preview */}
       <div className="hidden items-center bg-surface-sunken/60 p-9 lg:flex">
         <div className="w-full">
-          <ProfilePreview draft={draft} handle={handle} whopHandle={whopHandle} />
+          <ProfilePreview draft={draft} handle={handle} whopHandle={null} />
         </div>
       </div>
     </div>

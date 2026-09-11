@@ -865,11 +865,11 @@ async function sequences() {
       JSON.stringify(afterOrders) === JSON.stringify(beforeOrders),
       afterOrders.map((o) => o.status).join(","));
     const [migrations] = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
-    // 6 since migration 0005 (payment_refunds) was applied. The assertion is
-    // that THIS SUITE applied none, which is why it is compared to the count
-    // captured before the run rather than to a literal.
-    check("REAL DB: no schema change was applied by this suite — still 6 migrations",
-      migrations.n === beforeMigrations && migrations.n === 6, `${migrations.n}`);
+    // The count grows as later tasks ship their own migrations, so a literal
+    // here only ever goes stale. The assertion is that THIS SUITE applied
+    // none, which is why it is compared to the count captured before the run.
+    check("REAL DB: no schema change was applied by this suite",
+      migrations.n === beforeMigrations, `${migrations.n} migrations`);
     const [gone] = await client`
       select count(*)::int as n from information_schema.schemata where schema_name = ${SCRATCH}`;
     check("REAL DB: the throwaway schema is gone", gone.n === 0);

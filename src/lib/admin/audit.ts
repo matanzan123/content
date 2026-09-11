@@ -17,6 +17,13 @@
 export const AUDIT_ACTIONS = [
   "admin_signed_in",
   "admin_signed_out",
+  /* Applicant review. The first actions with a real writer — see
+     `src/lib/server/admin-audit.ts`. `action` is a text column, so these
+     needed no migration. */
+  "applicant_approved",
+  "applicant_rejected",
+  "applicant_needs_followup",
+  "interview_meeting_url_set",
   "admin_role_granted",
   "admin_role_revoked",
   "user_suspended",

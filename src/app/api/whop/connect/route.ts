@@ -1,4 +1,4 @@
-import { getUserFromRequest } from "@/lib/server/user-auth";
+import { requireWhopEligible } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { createAuthorization } from "@/lib/server/whop-connections";
 import { isTokenEncryptionConfigured } from "@/lib/server/token-crypto";
@@ -50,10 +50,19 @@ function json(body: Record<string, unknown>, status: number) {
 export async function POST(request: Request) {
   if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
 
-  const auth = await getUserFromRequest(request);
-  if (!auth.ok) {
-    return json({ error: auth.reason }, auth.reason === "unconfigured" ? 503 : 401);
-  }
+  // APPROVAL GATE. Whop connection belongs AFTER ClipRewards has approved the
+  // applicant, not during onboarding.
+  //
+  // The previous flow reached this endpoint from the last step of the
+  // onboarding wizard, so anyone who had merely signed in with Google could
+  // start linking a Whop account before ClipRewards had spoken to them. That
+  // ordering is now enforced on the SERVER: `requireWhopEligible` admits only
+  // an approved creator or brand — not a pending applicant, not a rejected
+  // one, and not an administrator, who has no Whop account of their own to
+  // link.
+  const gate = await requireWhopEligible(request);
+  if (gate.denied) return gate.response;
+  const auth = { ok: true as const, user: { uid: gate.context.uid as string } };
 
   const config = resolveOAuthConfig();
   if (!config.ok) return json({ error: "unavailable" }, 503);

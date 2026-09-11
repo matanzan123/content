@@ -65,6 +65,8 @@ const SHARED_ON_PURPOSE = new Set([
   "admin.mau",
   "admin.svcFirebase",
   "admin.svcWhop",
+  // The interview is held on Google Meet; the product name is not translated.
+  "approval.interview.formatValue",
   "contact.emailPlaceholder",
   "contact.websitePlaceholder",
   "onboarding.referralSources.TikTok",

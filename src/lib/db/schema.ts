@@ -1050,3 +1050,205 @@ export const resolutionCenterCases = pgTable(
     index("idx_cases_status").on(t.status),
   ],
 );
+
+/* ------------------------------- users ----------------------------------- */
+
+/**
+ * The role a person chose for themselves. `admin` is deliberately NOT here:
+ * administrator status lives in a Firebase custom claim set out of band, and a
+ * role a user can select must never be one that grants privilege.
+ */
+export const userRoleEnum = pgEnum("user_role", ["creator", "brand"]);
+
+/**
+ * Where an account stands in the ClipRewards approval process. See
+ * `src/lib/server/user-lifecycle.ts` for why these six and no more.
+ */
+export const approvalStatusEnum = pgEnum("approval_status", [
+  "onboarding",
+  "pending_interview",
+  "pending_review",
+  "approved",
+  "rejected",
+  "needs_followup",
+]);
+
+/**
+ * THE CANONICAL CLIPREWARDS USER.
+ *
+ * One row per Firebase account, keyed on the Firebase UID. This is the
+ * application's identity record — `user_analytics` is NOT, and never becomes
+ * one: that table is reporting attributes, deliberately holds no identity, and
+ * overloading it with application state would put access decisions in a table
+ * written by browser analytics.
+ *
+ * IDENTITY IS THE UID AND ONLY THE UID. There is no email column, no unique
+ * index on an address, and no lookup by one anywhere in the codebase. Two
+ * Google accounts sharing an address at different times are two users; one
+ * account that changes address is still one user. Email is a display detail
+ * Firebase already owns.
+ *
+ * NO CREDENTIAL IS STORED. No password, no Firebase ID token, no session
+ * cookie, no refresh token. Firebase holds those; duplicating any of them here
+ * would create a second place to leak them from.
+ *
+ * `role` IS NULLABLE ON PURPOSE. A user who has signed in but not yet chosen
+ * is genuinely un-roled, and defaulting them to `creator` — as the admin
+ * dashboard previously did when reading Firebase claims — invents a fact.
+ * Unassigned is a state the product must be able to see and report.
+ *
+ * `approval_status` HAS EXACTLY ONE ADMIN WRITER. The three decision values
+ * (`approved`, `rejected`, `needs_followup`) are set only by `decideUser`
+ * behind `requireAdmin`; the three progress values are derived by the server
+ * from facts it owns. No request body can set this column.
+ */
+export const users = pgTable(
+  "users",
+  {
+    /** The Firebase UID. The canonical ClipRewards identity. */
+    firebaseUid: text("firebase_uid").primaryKey(),
+
+    /** Null until the person explicitly chooses. Never defaulted. */
+    role: userRoleEnum("role"),
+
+    /** Never `approved` on insert — signing in is not joining. */
+    approvalStatus: approvalStatusEnum("approval_status").notNull().default("onboarding"),
+
+    /** Set when the profile step is finished. Null while incomplete. */
+    onboardingCompletedAt: timestamp("onboarding_completed_at", { withTimezone: true }),
+
+    /** Set once, by an admin approval. Never rewritten by a later re-approval. */
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    /** Set when an admin rejects. Cleared if they later approve. */
+    rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+
+    /** Which admin decided, and when they last did. Audit support. */
+    decidedByUid: text("decided_by_uid"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_users_status").on(t.approvalStatus),
+    index("idx_users_role").on(t.role),
+    index("idx_users_created").on(t.createdAt),
+  ],
+);
+
+/**
+ * The onboarding answers worth surviving a reload or a new device.
+ *
+ * A SEPARATE TABLE from `users`, because they answer different questions and
+ * have different lifetimes: `users` decides access and is read on every
+ * guarded request, while this is a form payload read only during onboarding
+ * and admin review. Keeping them apart means the hot path does not carry a
+ * bio and a photo URL.
+ *
+ * FIELDS MIRROR THE EXISTING WIZARD and nothing more — full name, bio,
+ * languages, creator type, referral source, socials. The wizard previously
+ * kept these in `localStorage` only, which is why signing in on a second
+ * device restarted onboarding from scratch. No new profile schema is invented
+ * here; this is the same data, made durable.
+ */
+export const userProfiles = pgTable(
+  "user_profiles",
+  {
+    firebaseUid: text("firebase_uid")
+      .primaryKey()
+      .references(() => users.firebaseUid),
+
+    /** Display name as typed. Not an identity, and not unique. */
+    fullName: text("full_name"),
+    bio: text("bio"),
+    /** A URL Firebase or the user supplied. No image bytes are stored. */
+    photoUrl: text("photo_url"),
+
+    /** Chosen content languages, as stored by the wizard. */
+    languages: jsonb("languages").$type<string[]>(),
+    /** Creator-only: "Clipper", "UGC Face", and so on. */
+    creatorType: text("creator_type"),
+    /** How they heard about ClipRewards. */
+    referralSource: text("referral_source"),
+    /** Which social platforms they said they publish on. */
+    socials: jsonb("socials").$type<string[]>(),
+
+    /** Brand-only: the company they represent. */
+    companyName: text("company_name"),
+    /** Which onboarding step to return them to. */
+    lastStep: integer("last_step").notNull().default(0),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
+/**
+ * Interview bookings.
+ *
+ * ONE LIVE BOOKING PER USER, enforced by a partial unique index rather than a
+ * read: two rapid submissions must not produce two slots, and an application
+ * check loses that race. Cancelled rows stay for history and are excluded from
+ * the constraint.
+ *
+ * `scheduled_at` IS AN INSTANT, not a wall-clock time. The operating hours a
+ * slot was drawn from live in configuration (see
+ * `src/lib/server/interview-availability.ts`) and are applied when a slot is
+ * offered and re-checked when it is booked — they are not re-derivable from
+ * this column alone, which is why the timezone is configuration and not a
+ * column.
+ *
+ * `meeting_url` IS ADMIN-WRITTEN AND NULLABLE. ClipRewards staff paste a
+ * Google Meet link by hand for now. There is deliberately no Calendar or Meet
+ * API integration in this build, and no user-facing writer for this column.
+ */
+export const bookingStatusEnum = pgEnum("booking_status", [
+  "scheduled",
+  "cancelled",
+  "completed",
+  "no_show",
+]);
+
+export const interviewBookings = pgTable(
+  "interview_bookings",
+  {
+    bookingId: uuid("booking_id").primaryKey().defaultRandom(),
+
+    /** Whose booking. Always taken from the verified session, never a body. */
+    firebaseUid: text("firebase_uid")
+      .notNull()
+      .references(() => users.firebaseUid),
+
+    /** The interview slot, as an absolute instant. */
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
+    /** Slot length in minutes, captured so a later config change cannot
+     *  retroactively resize a booking that was already made. */
+    durationMinutes: integer("duration_minutes").notNull(),
+
+    status: bookingStatusEnum("status").notNull().default("scheduled"),
+
+    /** Pasted by staff. No API writes this, and no user can. */
+    meetingUrl: text("meeting_url"),
+    /** Staff notes from the conversation. Not shown to the applicant. */
+    adminNotes: text("admin_notes"),
+
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // AT MOST ONE LIVE BOOKING PER USER. Partial, so cancelled history does
+    // not collide and a user can rebook after cancelling.
+    uniqueIndex("uniq_bookings_active_user")
+      .on(t.firebaseUid)
+      .where(sql`status = 'scheduled'`),
+    // No two live interviews in the same slot, whoever booked them.
+    uniqueIndex("uniq_bookings_active_slot")
+      .on(t.scheduledAt)
+      .where(sql`status = 'scheduled'`),
+    index("idx_bookings_user").on(t.firebaseUid),
+    index("idx_bookings_scheduled").on(t.scheduledAt),
+    index("idx_bookings_status").on(t.status),
+  ],
+);

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getAdminAuth, getAdminFirestore, isAdminSdkConfigured } from "@/lib/server/firebase-admin";
+import { getUserCounts, listApplicants } from "@/lib/server/users";
 
 export type UserRecord = {
   uid: string;
@@ -9,7 +10,8 @@ export type UserRecord = {
   photoURL: string | null;
   creationTime: string | null;
   lastSignInTime: string | null;
-  role: "creator" | "brand" | "unknown";
+  /** From Postgres. `null` means the user has not chosen yet. */
+  role: "creator" | "brand" | null;
   isAdmin: boolean;
 };
 
@@ -28,6 +30,8 @@ export type DashboardStats = {
   totalUsers: number;
   creators: number;
   brands: number;
+  /** Signed in but has never chosen a role. A real state, not a rounding error. */
+  unassigned: number;
   admins: number;
   totalCampaigns: number;
   activeCampaigns: number;
@@ -55,6 +59,7 @@ export async function getStats(): Promise<Outcome<DashboardStats>> {
     let totalUsers = 0;
     let creators = 0;
     let brands = 0;
+    let unassigned = 0;
     let admins = 0;
 
     let nextPageToken: string | undefined;
@@ -63,11 +68,23 @@ export async function getStats(): Promise<Outcome<DashboardStats>> {
       totalUsers += page.users.length;
       for (const u of page.users) {
         if (u.customClaims?.admin === true) admins++;
-        if (u.customClaims?.role === "brand") brands++;
-        else creators++;
       }
       nextPageToken = page.pageToken;
     } while (nextPageToken);
+
+    // ROLES COME FROM POSTGRES, NOT FROM A FIREBASE CLAIM.
+    //
+    // This previously counted `role === "brand"` as a brand and EVERYONE ELSE
+    // as a creator — so every user without a claim, including every user who
+    // had never chosen at all, was reported as a creator. Nothing writes that
+    // claim, so the figure was fiction.
+    //
+    // `users.role` is the canonical store and is nullable on purpose:
+    // "unassigned" is a real state the dashboard must be able to show.
+    const counts = await getUserCounts();
+    creators = counts.creators;
+    brands = counts.brands;
+    unassigned = counts.unassigned;
 
     let totalCampaigns = 0;
     let activeCampaigns = 0;
@@ -87,7 +104,7 @@ export async function getStats(): Promise<Outcome<DashboardStats>> {
       }
     }
 
-    return { totalUsers, creators, brands, admins, totalCampaigns, activeCampaigns, totalRevenue };
+    return { totalUsers, creators, brands, unassigned, admins, totalCampaigns, activeCampaigns, totalRevenue };
   });
 }
 
@@ -95,6 +112,14 @@ export async function getUsers(): Promise<Outcome<UserRecord[]>> {
   return attempt(async () => {
     const auth = getAdminAuth()!;
     const users: UserRecord[] = [];
+
+    // THE ROLE COMES FROM POSTGRES. This previously read
+    // `customClaims?.role === "brand" ? "brand" : "creator"`, which labelled
+    // every user without that claim — including everyone who had never chosen
+    // — as a creator. Nothing writes that claim, so the column was fiction.
+    // `users.role` is the canonical store and is null until a choice is made.
+    const applicants = await listApplicants(1000);
+    const roleByUid = new Map(applicants.map((a) => [a.firebaseUid, a.role]));
 
     let nextPageToken: string | undefined;
     do {
@@ -107,7 +132,8 @@ export async function getUsers(): Promise<Outcome<UserRecord[]>> {
           photoURL: u.photoURL ?? null,
           creationTime: u.metadata.creationTime ?? null,
           lastSignInTime: u.metadata.lastSignInTime ?? null,
-          role: u.customClaims?.role === "brand" ? "brand" : "creator",
+          // `null` when unknown — never a guess, and never a default.
+          role: roleByUid.get(u.uid) ?? null,
           isAdmin: u.customClaims?.admin === true,
         });
       }

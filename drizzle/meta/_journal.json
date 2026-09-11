@@ -50,6 +50,13 @@
       "when": 1788703614194,
       "tag": "0006_wise_unus",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788962734010,
+      "tag": "0007_abnormal_mentallo",
+      "breakpoints": true
     }
   ]
 }

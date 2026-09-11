@@ -819,6 +819,8 @@ export const en = {
     whopBody: "Link your Whop account to finish setting up your profile.",
     whopLinkedAs: "Linked as @{handle} — payouts will land in that account.",
     connectWhop: "Connect Whop",
+    reviewTitle: "Review and submit",
+    reviewBody: "That is everything we need for now. Submit your application and pick an interview time — we speak with every creator and brand before they join.",
     doneTitle: "You're all set",
     doneBody: "Your creator profile is ready. Campaign matching lands here once the dashboard ships.",
     reviewAnswers: "Review my answers",
@@ -854,7 +856,78 @@ export const en = {
       Chinese: "Chinese",
       Russian: "Russian",
       Arabic: "Arabic",
+      Hebrew: "Hebrew",
     },
+  },
+
+
+  /* The ClipRewards approval flow. A user sits in exactly one of these states
+     between signing in and being let onto the platform. */
+  approval: {
+    awaiting_review: {
+      title: "Your interview is booked",
+      body: "Thanks for applying. We will speak with you at the time below and let you know straight after. You do not need to do anything else for now.",
+    },
+    rejected: {
+      title: "Not approved right now",
+      body: "We are not able to approve your account at this time. If you think this was a mistake, reply to the email we sent and we will take another look.",
+    },
+    needs_followup: {
+      title: "We need one more conversation",
+      body: "We would like to speak with you again before deciding. Our team will be in touch with a time.",
+    },
+    booked: {
+      eyebrow: "Interview booked",
+      detailsTitle: "Interview details",
+      dateLabel: "Date",
+      timeLabel: "Time",
+      join: "Join Google Meet",
+      linkPending: "We will send your Google Meet link before the call.",
+      nextTitle: "What happens next",
+      steps: [
+        "Join the call at the time above.",
+        "Speak with the ClipRewards team about you and your content.",
+        "We will let you know the decision after the interview.",
+      ],
+    },
+    interview: {
+      eyebrow: "Final step",
+      title: "Book your interview",
+      body: "Every ClipRewards creator and brand speaks with us before joining. Pick a time that suits you and we will send a Google Meet link.",
+      unavailable: "Interview booking is not open yet. Please check back shortly.",
+      detailsTitle: "Your interview",
+      durationLabel: "Duration",
+      /* {minutes} is the operator's configured slot length. */
+      durationValue: "{minutes} minutes",
+      formatLabel: "Format",
+      formatValue: "Google Meet",
+      timezoneLabel: "Time zone",
+      expectTitle: "What to expect",
+      expect: [
+        "A short call with the ClipRewards team.",
+        "A few questions about you and the content you make.",
+        "A decision straight after the call.",
+      ],
+      previousDays: "Earlier days",
+      nextDays: "Later days",
+      chooseDay: "Choose a day",
+      chooseTime: "Choose a time",
+      pickTimeHint: "Pick a time above to confirm your interview.",
+      selectedTitle: "Selected interview",
+      cta: "Book interview",
+      ctaBusy: "Booking…",
+      noSlots: "No times are available right now. Please check back shortly.",
+      errors: {
+        slot_taken: "That time was just taken. Please choose another.",
+        already_booked: "You already have an interview booked.",
+        slot_unavailable: "That time is no longer available. Please choose another.",
+        unconfigured: "Booking is unavailable right now. Please try again shortly.",
+        availability_unconfigured: "Booking is not open yet. Please check back shortly.",
+        network: "We could not reach ClipRewards. Check your connection and try again.",
+        generic: "We could not book that time. Please try again.",
+      },
+    },
+    bookedFor: "Scheduled for {when}",
   },
 
   contact: {
@@ -1053,6 +1126,8 @@ export const en = {
     multiCurrencyNote: "Amounts in different currencies are never combined. Each currency is reported separately.",
     authenticatedUsers: "Authenticated users",
     creatorsLabel: "Creators",
+    /** A user who has signed in but never chosen creator or brand. */
+    unassignedLabel: "Unassigned",
     brandsLabel: "Brands",
     adminsLabel: "Admins",
     localeDistribution: "Language",

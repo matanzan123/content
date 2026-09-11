@@ -104,7 +104,10 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
   }
   check("the only accepted body field is a return key", connect.includes("body?.return_to") && connect.includes("in RETURN_PATHS"));
   check("return destinations are a closed set (no open redirect)", connect.includes("RETURN_PATHS: Record<string, string>"));
-  check("the uid comes from a verified token, not the body", connect.includes("auth.user.uid") && connect.includes("getUserFromRequest(request)"));
+  // The uid still comes from a verified credential, never the body — it now
+  // arrives via the approval gate rather than a bare token check.
+  check("the uid comes from a verified credential, not the body",
+    connect.includes("gate.context.uid") && connect.includes("requireWhopEligible(request)"));
 }
 
 /* ==================== Firebase boundary ==================== */
@@ -121,10 +124,22 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
   check("an unconfigured Admin SDK denies rather than passes", userAuth.includes('return { ok: false, reason: "unconfigured" }'));
   check("there is no development bypass", /NODE_ENV|DEV_|allowInsecure/.test(userAuth) === false);
 
-  for (const route of ["connect", "connection", "disconnect"]) {
+  // `connection` and `disconnect` still authenticate directly with a Bearer
+  // token. `connect` is now STRICTER: it goes through `requireWhopEligible`,
+  // which authenticates AND requires an approved creator or brand, because
+  // Whop linking belongs after ClipRewards approval rather than during
+  // onboarding. Both shapes are asserted, neither is assumed.
+  for (const route of ["connection", "disconnect"]) {
     const src = readFileSync(`src/app/api/whop/${route}/route.ts`, "utf8");
     check(`/${route} requires an authenticated user`, src.includes("getUserFromRequest(request)"));
     check(`/${route} refuses when auth fails`, src.includes("if (!auth.ok)"));
+  }
+  {
+    const src = readFileSync("src/app/api/whop/connect/route.ts", "utf8");
+    check("/connect requires an APPROVED user, not merely an authenticated one",
+      src.includes("requireWhopEligible(request)") && src.includes("if (gate.denied)"));
+    check("/connect no longer authenticates with a bare token check",
+      src.includes("getUserFromRequest") === false);
   }
   const disconnect = readFileSync("src/app/api/whop/disconnect/route.ts", "utf8");
   check("disconnect is scoped to the caller's own uid", disconnect.includes("disconnectWhop(auth.user.uid)"));
@@ -220,7 +235,12 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
   check("the legacy /api/whop/me route no longer exists", fs2.existsSync("src/app/api/whop/me/route.ts") === false);
   const wizard = readFileSync("src/components/onboarding/OnboardingWizard.tsx", "utf8");
   check("nothing links to the legacy authorize route", wizard.includes("/api/whop/authorize") === false);
-  check("the wizard uses the authenticated connect endpoint", wizard.includes('fetch("/api/whop/connect"') && wizard.includes("Bearer ${idToken}"));
+  // THE WIZARD NO LONGER CONNECTS WHOP AT ALL. Whop linking moved to after
+  // ClipRewards approval, so onboarding must not reach it — the previous
+  // assertion, that the wizard called the connect endpoint, is now the
+  // opposite of what should be true.
+  check("the onboarding wizard does NOT reach the Whop connect endpoint",
+    wizard.includes("/api/whop/connect") === false);
   // The legacy module is gone entirely — there is one OAuth implementation.
   check("the legacy src/lib/whop.ts module is deleted", fs2.existsSync("src/lib/whop.ts") === false);
   check("nothing anywhere imports it", (() => {

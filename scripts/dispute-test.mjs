@@ -655,9 +655,13 @@ async function sequences() {
     const [publicDisputes] = await client`
       select count(*)::int as n from information_schema.tables
       where table_schema = 'public' and table_name in ('payment_disputes','dispute_alerts','resolution_center_cases')`;
+    // 0006 IS applied now — deliberately, after task 4 was reviewed. What this
+    // suite must still assert is that IT applies nothing and writes nothing
+    // there; the fixtures below all land in the throwaway schema, proved above.
     check(
-      "the dispute tables do NOT exist in public — 0006 is not applied",
-      publicDisputes.n === 0,
+      "the real dispute tables exist in public — 0006 is applied",
+      publicDisputes.n === 3,
+      `${publicDisputes.n}/3`,
     );
 
     const schema = loadTs("src/lib/db/schema.ts");
@@ -1443,15 +1447,15 @@ async function sequences() {
 
     const afterMigrations = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
     check(
-      "this suite applied no migration — 0006 is NOT applied",
-      beforeMigrations[0].n === afterMigrations[0].n && afterMigrations[0].n === 6,
+      "this suite applied no migration",
+      beforeMigrations[0].n === afterMigrations[0].n,
       `${afterMigrations[0].n} migrations`,
     );
 
     const [publicDisputeTables] = await client`
       select count(*)::int as n from information_schema.tables
       where table_schema = 'public' and table_name in ('payment_disputes','dispute_alerts','resolution_center_cases')`;
-    check("the dispute tables still do not exist in public", publicDisputeTables.n === 0);
+    check("the real dispute tables are still present", publicDisputeTables.n === 3);
 
     const afterTxns = await client`select count(*)::int as n from accounting_transactions`;
     check(
@@ -1493,11 +1497,23 @@ async function sequences() {
     const [scratchGone] = await client`
       select count(*)::int as n from information_schema.schemata where schema_name = ${SCRATCH}`;
     check("the throwaway schema is gone", scratchGone.n === 0);
+    // The real table exists now, so this is a genuine leak check rather than
+    // one satisfied by the table's absence.
+    const leaked =
+      syntheticDisputeIds.length === 0
+        ? []
+        : (
+            await client`
+              select whop_dispute_id from public.payment_disputes
+              where whop_dispute_id = any(${syntheticDisputeIds})`
+          ).map((r) => r.whop_dispute_id);
     check(
-      "synthetic dispute ids were created and none can have leaked (the table does not exist in public)",
-      syntheticDisputeIds.length > 0 && publicDisputeTables.n === 0,
-      `${syntheticDisputeIds.length} synthetic disputes`,
+      "not one synthetic dispute id reached the real payment_disputes table",
+      leaked.length === 0,
+      `${syntheticDisputeIds.length} synthetic, ${leaked.length} leaked`,
     );
+    const [realDisputes] = await client`select count(*)::int as n from public.payment_disputes`;
+    check("and the real dispute table is still empty", realDisputes.n === 0);
 
     await client.end();
   }
@@ -1662,7 +1678,9 @@ function sourceInvariants() {
     changed.split("\n").filter((l) => /drizzle\/000[0-5]_/.test(l)).length === 0,
     changed.split("\n").filter((l) => /drizzle\/000[0-5]_/.test(l)).join(" ") || "none",
   );
-  check("0006 exists", changed.includes("0006_wise_unus.sql"));
+  // 0006 is committed now, so it no longer shows in `git status`. Its
+  // existence on disk is the durable assertion.
+  check("the dispute migration 0006 exists on disk", require("node:fs").existsSync("drizzle/0006_wise_unus.sql"));
 }
 
 /* ========================================================================== */

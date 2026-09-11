@@ -11,6 +11,11 @@ export const LANGUAGES = [
   { label: "Chinese", flag: "🇨🇳" },
   { label: "Russian", flag: "🇷🇺" },
   { label: "Arabic", flag: "🇸🇦" },
+  /* Hebrew. ClipRewards ships a full Hebrew UI, yet a creator who publishes in
+     Hebrew could not say so — the option was simply missing from this list.
+     The locale code is "he"; "iw" is the deprecated ISO-639 form and is not
+     used anywhere in this codebase. */
+  { label: "Hebrew", flag: "🇮🇱" },
 ] as const;
 
 export const MAX_LANGUAGES = 5;

@@ -735,9 +735,12 @@ async function sequences() {
       where table_schema = 'public' and table_name = 'payment_refunds'`;
     check("public.payment_refunds EXISTS — migration 0005 is applied", publicRefundsTable.n === 1);
 
+    // The count grows as later tasks ship their own migrations. What matters
+    // to THIS suite is that the refund migration is among those applied and
+    // that the suite applies none of its own.
     check(
-      "6 migrations are applied",
-      beforeMigrations[0].n === 6,
+      "the refund migration 0005 is applied",
+      beforeMigrations[0].n >= 6,
       `${beforeMigrations[0].n} migrations`,
     );
 
@@ -1718,8 +1721,8 @@ async function sequences() {
     // count is 6 — but what is asserted is that THIS RUN did not change it.
     const afterMigrations = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
     check(
-      "this suite applied no migration — the count is unchanged at 6",
-      beforeMigrations[0].n === afterMigrations[0].n && afterMigrations[0].n === 6,
+      "this suite applied no migration",
+      beforeMigrations[0].n === afterMigrations[0].n,
       `${afterMigrations[0].n} migrations`,
     );
 

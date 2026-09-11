@@ -142,13 +142,22 @@ function UserRow({ user, locale, t }: { user: UserRecord; locale: Locale; t: Cop
         </div>
       </td>
       <td className="py-2.5 pe-4">
+        {/* THREE STATES, not two. A null role means the user has never
+            chosen; rendering them as a creator — which this did — reports a
+            fact nobody established. */}
         <span className={[
           "rounded-full px-2 py-0.5 text-[11px] font-bold",
           user.role === "brand"
             ? "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
-            : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+            : user.role === "creator"
+              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+              : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
         ].join(" ")}>
-          {user.role === "brand" ? t.brandsLabel : t.creatorsLabel}
+          {user.role === "brand"
+            ? t.brandsLabel
+            : user.role === "creator"
+              ? t.creatorsLabel
+              : t.unassignedLabel}
         </span>
       </td>
       <td className="py-2.5 pe-4 text-[color:var(--a-text-muted)]">{fmtDate(user.creationTime, locale)}</td>
