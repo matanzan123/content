@@ -394,7 +394,11 @@ export type ApplicantRow = {
   createdAt: Date;
   fullName: string | null;
   companyName: string | null;
+  /** Identifies the live booking a Meet link would attach to. */
+  bookingId: string | null;
   scheduledAt: Date | null;
+  /** Captured on the booking, so a config change cannot resize it later. */
+  durationMinutes: number | null;
   meetingUrl: string | null;
   bookingStatus: string | null;
 };
@@ -418,7 +422,9 @@ export async function listApplicants(limit = 200): Promise<ApplicantRow[]> {
       createdAt: users.createdAt,
       fullName: userProfiles.fullName,
       companyName: userProfiles.companyName,
+      bookingId: interviewBookings.bookingId,
       scheduledAt: interviewBookings.scheduledAt,
+      durationMinutes: interviewBookings.durationMinutes,
       meetingUrl: interviewBookings.meetingUrl,
       bookingStatus: interviewBookings.status,
     })

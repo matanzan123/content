@@ -13,7 +13,7 @@ import {
 import {
   resolveAccessStage,
   stageHasPlatformAccess,
-  stageMayConnectWhop,
+  mayConnectWhopFor,
   STAGE_DESTINATIONS,
   type AccessStage,
 } from "./user-lifecycle";
@@ -63,7 +63,8 @@ export type AccessContext = {
   booking: Booking | null;
   /** May the caller enter operational ClipRewards areas? */
   hasPlatformAccess: boolean;
-  /** May the caller begin Whop connection? Approved applicants only. */
+  /** May the caller begin Whop connection? Approved creators and brands only,
+   *  decided by product role and approval status — never by the admin claim. */
   mayConnectWhop: boolean;
   /** Where a browser in this stage belongs, locale-relative. */
   destination: string;
@@ -139,7 +140,10 @@ async function buildContext(
     profile,
     booking,
     hasPlatformAccess: stageHasPlatformAccess(stage),
-    mayConnectWhop: stageMayConnectWhop(stage),
+    // NOT derived from the stage: the `admin` stage shadows the product one,
+    // and an approved creator who is also staff must keep the access they
+    // earned. The claim is an extra capability, never a replacement identity.
+    mayConnectWhop: mayConnectWhopFor({ role: refreshed.role, status: refreshed.approvalStatus }),
     destination: STAGE_DESTINATIONS[stage],
     unconfigured: false,
   };
@@ -244,10 +248,16 @@ export async function requireApproved(request: Request): Promise<ApiDenial | Api
  * Requires an approved CREATOR or BRAND specifically — the gate in front of
  * Whop connection.
  *
- * Stricter than `requireApproved`, which also admits an administrator. An
- * admin has platform access but is not an applicant and has no Whop account of
- * their own to link, so letting one through here would start an OAuth flow
- * that belongs to nobody.
+ * Stricter than `requireApproved` in what it asks for, and asks it of the
+ * PRODUCT ROLE rather than the stage: `mayConnectWhop` is computed from
+ * `users.role` and `users.approval_status`, so the Firebase `admin` claim
+ * neither grants eligibility nor removes it.
+ *
+ * An administrator who is not also an approved creator or brand is refused —
+ * they have no Whop account of their own to link, and letting one through
+ * would start an OAuth flow that belongs to nobody. An administrator who IS an
+ * approved creator keeps that access: staff status is an additional
+ * capability, not a replacement for the role they were approved as.
  */
 export async function requireWhopEligible(
   request: Request,

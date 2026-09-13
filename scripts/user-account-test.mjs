@@ -253,6 +253,60 @@ check(
   allStages.filter((s) => lifecycle.stageMayConnectWhop(s)).join(",") ===
     "approved_creator,approved_brand",
 );
+/* --- WHOP ELIGIBILITY IS A PRODUCT ROLE QUESTION, NOT A STAGE ONE ---------
+ *
+ * `resolveAccessStage` reports `admin` for anyone holding the Firebase claim,
+ * because a stage has to pick one value and staff belong in the admin area.
+ * Deciding Whop eligibility from that stage stripped an approved creator of
+ * the access they had earned the moment they were also made staff. These
+ * assert the fixed rule directly: role + approval status decide, and the claim
+ * is orthogonal — it can neither grant eligibility nor remove it.
+ */
+{
+  const may = lifecycle.mayConnectWhopFor;
+  check(
+    "approved creator (no admin claim) may connect Whop",
+    may({ role: "creator", status: "approved" }) === true,
+  );
+  check(
+    "approved creator WITH the admin claim may still connect Whop",
+    // The claim is not a parameter here at all — which is the fix.
+    may({ role: "creator", status: "approved" }) === true,
+  );
+  check(
+    "approved brand WITH the admin claim may still connect Whop",
+    may({ role: "brand", status: "approved" }) === true,
+  );
+  check(
+    "an admin with NO approved product role may NOT connect Whop",
+    may({ role: null, status: "approved" }) === false &&
+      may({ role: null, status: "onboarding" }) === false,
+  );
+  check(
+    "a pending creator may NOT connect Whop, admin claim or not",
+    ["onboarding", "pending_interview", "pending_review", "rejected", "needs_followup"].every(
+      (status) => may({ role: "creator", status }) === false,
+    ),
+  );
+  check(
+    "the eligibility predicate takes no admin parameter, so a claim cannot alter it",
+    /function mayConnectWhopFor\(input: \{\s*role: UserRole \| null;\s*status: ApprovalStatus;\s*\}\)/.test(
+      readFileSync("src/lib/server/user-lifecycle.ts", "utf8"),
+    ),
+  );
+  check(
+    "the access context computes eligibility from role and status, never from the stage",
+    readFileSync("src/lib/server/access.ts", "utf8").includes(
+      "mayConnectWhop: mayConnectWhopFor({ role: refreshed.role, status: refreshed.approvalStatus })",
+    ),
+  );
+  check(
+    "the dashboard gates the Whop card on the same context field the API guard uses",
+    readFileSync("src/app/[locale]/dashboard/page.tsx", "utf8").includes("context.mayConnectWhop") &&
+      readFileSync("src/lib/server/access.ts", "utf8").includes("if (!gate.context.mayConnectWhop)"),
+  );
+}
+
 check(
   "every stage has a routing destination",
   allStages.every((s) => typeof lifecycle.STAGE_DESTINATIONS[s] === "string"),
@@ -1114,7 +1168,13 @@ function sourceInvariants() {
     changed.split("\n").filter((l) => /drizzle\/000[0-6]_/.test(l)).length === 0,
     changed.split("\n").filter((l) => /drizzle\/000[0-6]_/.test(l)).join(" ") || "none",
   );
-  check("0007 exists", changed.includes("0007_abnormal_mentallo.sql"));
+  // 0007 is committed now, so it no longer shows in `git status`. Its
+  // existence on disk is the durable assertion — same fix the dispute suite
+  // already made for 0006.
+  check(
+    "the user migration 0007 exists on disk",
+    require("node:fs").existsSync("drizzle/0007_abnormal_mentallo.sql"),
+  );
 }
 
 /* ========================================================================== */

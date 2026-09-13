@@ -14,19 +14,45 @@ import { createHash, randomBytes } from "node:crypto";
    flow here records that the signed-in user also controls a Whop identity, and
    nothing more. No code path turns a Whop token into a ClipRewards session.
 
-   ENDPOINTS are Whop's current OAuth host. Note there is no sandbox-specific
-   OAuth host: unlike the payments API, identity is served from one place, so
-   this module does not take an environment.
+   ENDPOINTS ARE ENVIRONMENT-SPECIFIC, and this module used to claim otherwise.
+   Whop serves OAuth from a sandbox host as well as a production one, and AN
+   APP EXISTS IN EXACTLY ONE OF THEM: an app created at sandbox.whop.com is
+   unknown to the production host, which refuses its client_id outright. The
+   host is therefore resolved from `WHOP_ENV`, the same variable and the same
+   two names the payments client uses, so identity and money cannot end up
+   pointed at different environments.
    ========================================================================== */
 
-const OAUTH_BASE = "https://api.whop.com/oauth";
-
-export const WHOP_OAUTH_ENDPOINTS = {
-  authorize: `${OAUTH_BASE}/authorize`,
-  token: `${OAUTH_BASE}/token`,
-  userinfo: `${OAUTH_BASE}/userinfo`,
-  revoke: `${OAUTH_BASE}/revoke`,
+/**
+ * The only two environments that exist, and the only two OAuth hosts.
+ *
+ * Mirrors `WHOP_API_BASE_URLS` in `whop-payments.ts` deliberately: one pattern
+ * for every Whop host in the codebase, and no implicit production default.
+ */
+export const WHOP_OAUTH_BASE_URLS = {
+  sandbox: "https://sandbox-api.whop.com/oauth",
+  production: "https://api.whop.com/oauth",
 } as const;
+
+export type WhopOAuthEnvironment = keyof typeof WHOP_OAUTH_BASE_URLS;
+
+export type WhopOAuthEndpoints = {
+  authorize: string;
+  token: string;
+  userinfo: string;
+  revoke: string;
+};
+
+/** All four endpoints from one base, so none can be left on another host. */
+export function whopOAuthEndpoints(environment: WhopOAuthEnvironment): WhopOAuthEndpoints {
+  const base = WHOP_OAUTH_BASE_URLS[environment];
+  return {
+    authorize: `${base}/authorize`,
+    token: `${base}/token`,
+    userinfo: `${base}/userinfo`,
+    revoke: `${base}/revoke`,
+  };
+}
 
 /**
  * The only scopes this application asks for.
@@ -44,11 +70,23 @@ export type OAuthConfig = {
   clientId: string;
   clientSecret: string | null;
   redirectUri: string;
+  /** Which Whop the app lives in. Never defaulted. */
+  environment: WhopOAuthEnvironment;
+  /** Resolved from `environment`, so every call uses one host. */
+  endpoints: WhopOAuthEndpoints;
 };
 
 export type ConfigResult =
   | { ok: true; config: OAuthConfig }
-  | { ok: false; reason: "missing_client_id" | "missing_redirect_uri" | "invalid_redirect_uri" };
+  | {
+      ok: false;
+      reason:
+        | "missing_client_id"
+        | "missing_redirect_uri"
+        | "invalid_redirect_uri"
+        | "missing_environment"
+        | "invalid_environment";
+    };
 
 /**
  * Reads OAuth configuration.
@@ -78,8 +116,29 @@ export function resolveOAuthConfig(env: Env = process.env): ConfigResult {
     return { ok: false, reason: "invalid_redirect_uri" };
   }
 
+  /*
+   * The environment is matched EXACTLY against the two known names, and its
+   * absence is a refusal rather than an implied production. Guessing here is
+   * how a sandbox app ends up asking the live host to recognise it — which is
+   * precisely the `client_id is invalid` this rule now prevents.
+   */
+  const environment = env.WHOP_ENV?.trim();
+  if (!environment) return { ok: false, reason: "missing_environment" };
+  if (environment !== "sandbox" && environment !== "production") {
+    return { ok: false, reason: "invalid_environment" };
+  }
+
   const clientSecret = env.WHOP_CLIENT_SECRET?.trim() || null;
-  return { ok: true, config: { clientId, clientSecret, redirectUri } };
+  return {
+    ok: true,
+    config: {
+      clientId,
+      clientSecret,
+      redirectUri,
+      environment,
+      endpoints: whopOAuthEndpoints(environment),
+    },
+  };
 }
 
 export function isOAuthConfigured(env: Env = process.env): boolean {
@@ -154,7 +213,7 @@ export function buildAuthorizeUrl(input: {
   nonce: string;
   codeChallenge: string;
 }): string {
-  const url = new URL(WHOP_OAUTH_ENDPOINTS.authorize);
+  const url = new URL(input.config.endpoints.authorize);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", input.config.clientId);
   url.searchParams.set("redirect_uri", input.config.redirectUri);
@@ -218,7 +277,7 @@ export async function exchangeCode(input: {
 
   let response: Response;
   try {
-    response = await fetch(WHOP_OAUTH_ENDPOINTS.token, {
+    response = await fetch(input.config.endpoints.token, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(payload),
@@ -262,7 +321,7 @@ export async function refreshTokens(input: {
 
   let response: Response;
   try {
-    response = await fetch(WHOP_OAUTH_ENDPOINTS.token, {
+    response = await fetch(input.config.endpoints.token, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(payload),
@@ -304,11 +363,14 @@ export type UserinfoResult =
   | { ok: true; identity: WhopIdentity }
   | { ok: false; reason: "provider_rejected" | "malformed_response" | "network_error" };
 
-export async function fetchUserinfo(accessToken: string): Promise<UserinfoResult> {
+export async function fetchUserinfo(input: {
+  config: OAuthConfig;
+  accessToken: string;
+}): Promise<UserinfoResult> {
   let response: Response;
   try {
-    response = await fetch(WHOP_OAUTH_ENDPOINTS.userinfo, {
-      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    response = await fetch(input.config.endpoints.userinfo, {
+      headers: { authorization: `Bearer ${input.accessToken}`, accept: "application/json" },
     });
   } catch {
     return { ok: false, reason: "network_error" };
@@ -351,7 +413,7 @@ export async function revokeToken(input: {
     };
     if (input.config.clientSecret) payload.client_secret = input.config.clientSecret;
 
-    const response = await fetch(WHOP_OAUTH_ENDPOINTS.revoke, {
+    const response = await fetch(input.config.endpoints.revoke, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),

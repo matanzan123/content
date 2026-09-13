@@ -282,8 +282,42 @@ export function stageHasPlatformAccess(stage: AccessStage): boolean {
  * wizard's final step offered "Connect Whop" to anyone who had signed in —
  * before ClipRewards had approved them at all.
  */
+/**
+ * Whether a STAGE, on its own, may connect Whop.
+ *
+ * Correct for every ordinary account, and deliberately kept — but it is not
+ * the whole rule, because `admin` is a stage that SHADOWS the product one. See
+ * `mayConnectWhopFor`, which is what authorization actually uses.
+ */
 export function stageMayConnectWhop(stage: AccessStage): boolean {
   return stage === "approved_creator" || stage === "approved_brand";
+}
+
+/**
+ * WHETHER AN ACCOUNT MAY CONNECT WHOP. The single source of truth, used by the
+ * API guard and the dashboard alike so the UI cannot offer a button the server
+ * would refuse.
+ *
+ * IT READS THE PRODUCT ROLE AND THE APPROVAL STATUS, NOT THE STAGE. A stage is
+ * one value and has to pick a winner, so `resolveAccessStage` reports `admin`
+ * for anyone holding the Firebase claim — which is right for routing (staff
+ * belong in the admin area) and wrong for this question. An approved creator
+ * who is ALSO staff is still an approved creator: the claim is an additional
+ * capability, not a replacement identity, and it must not silently strip the
+ * product access they earned.
+ *
+ * The claim is therefore absent from this signature entirely. It cannot grant
+ * eligibility and it cannot remove it, because there is no parameter through
+ * which it could do either. An administrator with no approved creator or brand
+ * role has no Whop account of their own to link and is refused here — not for
+ * being staff, but for having no approved product role.
+ */
+export function mayConnectWhopFor(input: {
+  role: UserRole | null;
+  status: ApprovalStatus;
+}): boolean {
+  if (input.status !== "approved") return false;
+  return input.role === "creator" || input.role === "brand";
 }
 
 /**

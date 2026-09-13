@@ -16,6 +16,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <path d="M16 5.2a3.2 3.2 0 010 5.9M17.5 14.9c1.9.6 3.2 2.3 3.2 4.4" />
     </>
   ),
+  applicants: (
+    <>
+      <path d="M6.5 3.8h11a1.7 1.7 0 011.7 1.7v13a1.7 1.7 0 01-1.7 1.7h-11a1.7 1.7 0 01-1.7-1.7v-13A1.7 1.7 0 016.5 3.8z" />
+      <path d="M9 8.5h6M9 12h6" />
+      <path d="M9.2 15.6l1.4 1.4 3-3" />
+    </>
+  ),
   campaigns: (
     <>
       <path d="M4 9v6h3.5l6 4V5l-6 4H4z" />

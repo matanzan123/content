@@ -77,7 +77,13 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
   check("code challenge is S256 of the verifier", oauth.codeChallengeFor(verifier) === expected);
   check("challenge is not the verifier (plain method not used)", oauth.codeChallengeFor(verifier) !== verifier);
 
-  const config = { clientId: "app_x", clientSecret: null, redirectUri: "https://x.test/api/whop/callback" };
+  // The endpoints travel WITH the config now, so this fixture is resolved the
+  // same way the application resolves it rather than being hand-built.
+  const config = oauth.resolveOAuthConfig({
+    WHOP_CLIENT_ID: "app_x",
+    WHOP_REDIRECT_URI: "https://x.test/api/whop/callback",
+    WHOP_ENV: "production",
+  }).config;
   const url = new URL(oauth.buildAuthorizeUrl({ config, state: "S", nonce: "N", codeChallenge: "C" }));
   check("authorize URL is Whop's OAuth host", url.origin + url.pathname === "https://api.whop.com/oauth/authorize");
   check("code_challenge_method is S256", url.searchParams.get("code_challenge_method") === "S256");
@@ -90,13 +96,88 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
 /* ==================== config: no browser input ==================== */
 
 {
-  const ok = { WHOP_CLIENT_ID: "app_x", WHOP_REDIRECT_URI: "https://x.test/cb" };
+  const ok = {
+    WHOP_CLIENT_ID: "app_x",
+    WHOP_REDIRECT_URI: "https://x.test/cb",
+    WHOP_ENV: "sandbox",
+  };
   check("valid config resolves", oauth.resolveOAuthConfig(ok).ok === true);
   check("client_secret is optional under PKCE", oauth.resolveOAuthConfig(ok).config.clientSecret === null);
   check("missing client id fails closed", oauth.resolveOAuthConfig({}).reason === "missing_client_id");
   check("missing redirect fails closed", oauth.resolveOAuthConfig({ WHOP_CLIENT_ID: "a" }).reason === "missing_redirect_uri");
   check("http redirect is refused", oauth.resolveOAuthConfig({ ...ok, WHOP_REDIRECT_URI: "http://x.test/cb" }).reason === "invalid_redirect_uri");
   check("relative redirect is refused", oauth.resolveOAuthConfig({ ...ok, WHOP_REDIRECT_URI: "/cb" }).reason === "invalid_redirect_uri");
+
+  /* --- ENVIRONMENT ISOLATION ------------------------------------------
+   *
+   * A Whop app exists in exactly one environment. The production OAuth host
+   * does not know a sandbox app's client_id and refuses it outright — which
+   * is what a hard-coded production host produced here in practice. These
+   * assert the host follows `WHOP_ENV`, for ALL FOUR endpoints, with no
+   * implicit default in either direction.
+   */
+  {
+    const sandbox = oauth.resolveOAuthConfig({ ...ok, WHOP_ENV: "sandbox" });
+    const production = oauth.resolveOAuthConfig({ ...ok, WHOP_ENV: "production" });
+    const ENDPOINTS = ["authorize", "token", "userinfo", "revoke"];
+
+    check("sandbox resolves the sandbox environment", sandbox.config.environment === "sandbox");
+    check(
+      "EVERY sandbox endpoint is on sandbox-api.whop.com",
+      ENDPOINTS.every((e) =>
+        sandbox.config.endpoints[e].startsWith("https://sandbox-api.whop.com/oauth/"),
+      ),
+      ENDPOINTS.map((e) => sandbox.config.endpoints[e]).join(" "),
+    );
+    check(
+      "no sandbox endpoint leaks to the production host",
+      ENDPOINTS.every((e) => sandbox.config.endpoints[e].includes("//api.whop.com") === false),
+    );
+
+    check("production resolves the production environment", production.config.environment === "production");
+    check(
+      "EVERY production endpoint is on api.whop.com",
+      ENDPOINTS.every((e) =>
+        production.config.endpoints[e].startsWith("https://api.whop.com/oauth/"),
+      ),
+    );
+    check(
+      "no production endpoint leaks to the sandbox host",
+      ENDPOINTS.every((e) => production.config.endpoints[e].includes("sandbox-api") === false),
+    );
+
+    check(
+      "the authorize URL is built on the resolved host, not a constant",
+      oauth
+        .buildAuthorizeUrl({ config: sandbox.config, state: "s", nonce: "n", codeChallenge: "c" })
+        .startsWith("https://sandbox-api.whop.com/oauth/authorize"),
+    );
+
+    // No implicit production: a missing or misspelt environment is a refusal,
+    // exactly as `resolveWhopPayments` treats the same variable.
+    const noEnv = { WHOP_CLIENT_ID: ok.WHOP_CLIENT_ID, WHOP_REDIRECT_URI: ok.WHOP_REDIRECT_URI };
+    check("a missing environment fails closed", oauth.resolveOAuthConfig(noEnv).reason === "missing_environment");
+    // Surrounding whitespace is trimmed, as every env read in this codebase
+    // does — that is a copy-paste artefact, not a different environment.
+    check(
+      "surrounding whitespace is trimmed, not treated as a different name",
+      oauth.resolveOAuthConfig({ ...ok, WHOP_ENV: " production " }).config?.environment === "production",
+    );
+    // Anything else is refused rather than guessed at: a near-miss name must
+    // never resolve to an environment the operator did not write.
+    for (const bad of ["Sandbox", "prod", "live", "test", ""]) {
+      const result = oauth.resolveOAuthConfig({ ...ok, WHOP_ENV: bad });
+      check(
+        `WHOP_ENV=${JSON.stringify(bad)} is refused, never normalised`,
+        result.ok === false && (result.reason === "invalid_environment" || result.reason === "missing_environment"),
+        result.reason,
+      );
+    }
+    check(
+      "the module holds no hard-coded OAuth host outside the environment map",
+      (readFileSync("src/lib/server/whop-oauth.ts", "utf8").match(/https:\/\/(sandbox-)?api\.whop\.com/g) ?? []).length === 2,
+    );
+  }
 
   const connect = readFileSync("src/app/api/whop/connect/route.ts", "utf8");
   for (const field of ["client_id", "scope", "redirect_uri", "whop_user_id", "company_id", "uid"]) {
@@ -260,6 +341,11 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
 if (process.env.DATABASE_URL) {
   const TABLE = `oauth_state_probe_${Math.random().toString(36).slice(2, 10)}`;
   const sql = postgres(process.env.DATABASE_URL, { max: 6, prepare: false, onnotice: () => {} });
+  // Real linked accounts exist in `whop_connections` once the flow has actually
+  // been used, so the leak check below compares against the count captured
+  // HERE. That is what "this suite wrote nothing there" means; a literal zero
+  // would only assert that nobody has ever connected.
+  const [{ n: connectionsBefore }] = await sql`select count(*)::int as n from whop_connections`;
   try {
     await sql.unsafe(`
       create table ${TABLE} (
@@ -310,7 +396,11 @@ if (process.env.DATABASE_URL) {
     const [{ n: applied }] = await sql`select count(*)::int as n from drizzle.__drizzle_migrations`;
     check("migration 0003 is applied", applied >= 4, `${applied} applied`);
     const [{ n: linked }] = await sql`select count(*)::int as n from whop_connections`;
-    check("the real whop_connections table exists and is empty", linked === 0, `${linked} rows`);
+    check(
+      "this suite added no row to the real whop_connections table",
+      linked === connectionsBefore,
+      `${linked} rows (was ${connectionsBefore})`,
+    );
     await sql.end({ timeout: 5 });
   }
 }
@@ -324,7 +414,20 @@ if (process.env.DATABASE_URL) {
   check("the state is consumed before anything is exchanged", callback.indexOf("consumeAuthorization") < callback.indexOf("exchangeCode"));
   check("the uid comes from the consumed row, never the request", callback.includes("firebaseUid: pending.firebaseUid"));
   check("provider errors are reduced to a closed set of outcomes", callback.includes("type Outcome"));
-  check("no provider text is echoed to the browser", /error_description|params.get\("error"\)\s*\)/.test(callback.replace('if (params.get("error")) return back(request, "/onboarding", "cancelled");', "")) === false);
+  // The one legitimate read of the provider's `error` parameter is the guard
+  // that turns ANY provider error into the single word "cancelled". It is
+  // stripped by shape rather than by its exact text, so the assertion survives
+  // a change to where that refusal lands without ever allowing provider text
+  // itself to reach the browser.
+  const withoutCancelGuard = callback.replace(
+    /if \(params\.get\("error"\)\) return back\([^;]*\);/,
+    "",
+  );
+  check("the provider error guard reduces every error to one outcome", withoutCancelGuard !== callback);
+  check(
+    "no provider text is echoed to the browser",
+    /error_description|params\.get\("error"\)/.test(withoutCancelGuard) === false,
+  );
   const connect = readFileSync("src/app/api/whop/connect/route.ts", "utf8");
   // Attribute-by-attribute assertions live in the COOKIE block below; the
   // cookie is now assembled from a list rather than a fixed string, because
@@ -535,6 +638,81 @@ if (process.env.DATABASE_URL) {
   check("CLEAN URL: the return path is never read from the request", /searchParams\.get\("(return|redirect|next)/.test(callbackCode) === false);
   const connect = codeOnly("src/app/api/whop/connect/route.ts");
   check("CLEAN URL: return destinations are a closed map (no open redirect)", connect.includes("RETURN_PATHS[returnKey]") && connect.includes("in RETURN_PATHS"));
+
+  /* --- THE RETURN ORIGIN IS CONFIGURED, NOT DERIVED --------------------
+   *
+   * Behind a tunnel or any reverse proxy, Next rebuilds `request.url` from
+   * the forwarded scheme and the UPSTREAM host — so `new URL(path,
+   * request.url)` sent a visitor who started at a public HTTPS origin to
+   * `https://localhost:3000`, which no browser can load. The origin now comes
+   * from `APP_PUBLIC_URL`, which refuses a localhost value outright.
+   */
+  check(
+    "RETURN ORIGIN: the callback builds its redirect on the configured public origin",
+    callbackCode.includes("getAppPublicUrl()") &&
+      callbackCode.includes("new URL(safePath, configured ?? request.url)"),
+  );
+  check(
+    "RETURN ORIGIN: the callback never trusts a forwarded host header",
+    /x-forwarded|forwarded-host|headers\.get\("host"\)/i.test(callbackCode) === false,
+  );
+
+  // The resolver itself is what makes the guarantee, so it is asserted here
+  // rather than trusted: a public origin resolves, every local one refuses.
+  // `app-url.ts` asks the payments module which environment is configured, so
+  // the REAL resolver is injected rather than a stand-in.
+  const payments = load("src/lib/server/whop-payments.ts", {});
+  const appUrl = load("src/lib/server/app-url.ts", {
+    getWhopEnvironment: payments.getWhopEnvironment,
+  });
+  // A neutral tunnel host: this exercises the same tunnel-suffix rules without
+  // pinning the suite to whichever tunnel a developer happens to be running.
+  const PUBLIC = "https://example-tunnel.ngrok-free.dev";
+  const publicEnv = { APP_PUBLIC_URL: PUBLIC, WHOP_ENV: "sandbox" };
+  const origin = appUrl.getAppPublicUrl(publicEnv);
+  check("RETURN ORIGIN: a public tunnel origin resolves in sandbox", origin === PUBLIC);
+  check(
+    "RETURN ORIGIN: /en/dashboard becomes a public HTTPS URL",
+    new URL("/en/dashboard", origin).toString() === `${PUBLIC}/en/dashboard`,
+  );
+  check(
+    "RETURN ORIGIN: the HE locale keeps its own path",
+    new URL("/he/dashboard", origin).toString() === `${PUBLIC}/he/dashboard`,
+  );
+  for (const local of [
+    "https://localhost:3000",
+    "http://localhost:3000",
+    "https://127.0.0.1:3000",
+    "https://0.0.0.0",
+  ]) {
+    check(
+      `RETURN ORIGIN: ${local} is refused as a public origin`,
+      appUrl.getAppPublicUrl({ APP_PUBLIC_URL: local, WHOP_ENV: "sandbox" }) === null,
+    );
+  }
+  check(
+    "RETURN ORIGIN: with no APP_PUBLIC_URL there is no origin to redirect to",
+    appUrl.getAppPublicUrl({ WHOP_ENV: "sandbox" }) === null,
+  );
+
+  // An absolute or protocol-relative stored path must not override the base —
+  // that is the shape an open redirect would take if the closed map ever leaked.
+  const safePathOf = (path) => (path.startsWith("/") && !path.startsWith("//") ? path : "/");
+  for (const hostile of [
+    "https://evil.test/steal",
+    "//evil.test/steal",
+    "http://evil.test",
+    "javascript:alert(1)",
+  ]) {
+    check(
+      `NO OPEN REDIRECT: ${hostile} cannot escape the configured origin`,
+      new URL(safePathOf(hostile), origin).origin === PUBLIC,
+    );
+  }
+  check(
+    "NO OPEN REDIRECT: an ordinary locale path is left intact",
+    new URL(safePathOf("/he/dashboard"), origin).toString() === `${PUBLIC}/he/dashboard`,
+  );
 }
 
 /* ================= financial_ledger untouched ================= */

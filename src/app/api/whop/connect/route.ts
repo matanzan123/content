@@ -1,4 +1,5 @@
 import { requireWhopEligible } from "@/lib/server/access";
+import { DEFAULT_LOCALE, isLocale, localePath } from "@/i18n/config";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { createAuthorization } from "@/lib/server/whop-connections";
 import { isTokenEncryptionConfigured } from "@/lib/server/token-crypto";
@@ -39,8 +40,9 @@ const LINK_COOKIE_MAX_AGE = 600;
 
 /** Return destinations, as a closed set. An arbitrary path is an open redirect. */
 const RETURN_PATHS: Record<string, string> = {
+  dashboard: "/dashboard",
   onboarding: "/onboarding",
-  settings: "/onboarding",
+  settings: "/dashboard",
 };
 
 function json(body: Record<string, unknown>, status: number) {
@@ -73,12 +75,19 @@ export async function POST(request: Request) {
   const length = Number(request.headers.get("content-length") ?? "0");
   if (length > MAX_BODY_BYTES) return json({ error: "payload_too_large" }, 413);
 
-  let returnKey = "onboarding";
+  let returnKey = "dashboard";
+  // The language to come back in. A LOCALE, NOT A PATH: it is coerced against
+  // the supported set, so the return URL is still assembled here from two
+  // closed lists and a browser cannot steer it anywhere else.
+  let locale = DEFAULT_LOCALE;
   if (length > 0) {
     try {
-      const body = (await request.json()) as { return_to?: unknown } | null;
+      const body = (await request.json()) as { return_to?: unknown; locale?: unknown } | null;
       if (typeof body?.return_to === "string" && body.return_to in RETURN_PATHS) {
         returnKey = body.return_to;
+      }
+      if (typeof body?.locale === "string" && isLocale(body.locale)) {
+        locale = body.locale;
       }
     } catch {
       return json({ error: "invalid_request" }, 400);
@@ -93,7 +102,10 @@ export async function POST(request: Request) {
     state,
     firebaseUid: auth.user.uid,
     codeVerifier,
-    returnPath: RETURN_PATHS[returnKey],
+    // Localised HERE, while the language is known. The callback arrives from
+    // whop.com with no session and no locale of its own, so it can only send
+    // the visitor back to a path that was already decided at this point.
+    returnPath: localePath(locale, RETURN_PATHS[returnKey]),
   });
   if (!stored) return json({ error: "unavailable" }, 503);
 
