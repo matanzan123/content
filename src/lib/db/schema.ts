@@ -1252,3 +1252,71 @@ export const interviewBookings = pgTable(
     index("idx_bookings_status").on(t.status),
   ],
 );
+
+/* =========================================================================
+   WHOP CONNECTED ACCOUNTS — the creator's financial container.
+
+   SEPARATE FROM `whop_connections`, DELIBERATELY. That table is identity: who
+   this ClipRewards user is on Whop, proved by OAuth, holding credentials that
+   are revoked the moment they disconnect. THIS table is finance: an Account
+   (`biz_…`) created under the ClipRewards platform account, which outlives a
+   disconnect and must never be dropped by one. Merging them would mean an
+   applicant unlinking their login silently discarded the account their money
+   is owed into.
+
+   ONE ROW PER CREATOR PER ENVIRONMENT. A sandbox `biz_` and a production
+   `biz_` are different objects in different worlds, and the unique indexes are
+   scoped accordingly so a sandbox row can never satisfy a production lookup or
+   collide with one.
+
+   WHAT IS DELIBERATELY ABSENT: no payout account id, no verification or KYC
+   state, no capabilities, no balances, no transfers. Those live on other Whop
+   resources and belong to later tasks; recording them here would imply this
+   row knows things it has not been told.
+   ========================================================================= */
+
+export const whopAccounts = pgTable(
+  "whop_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+
+    /** Whose account. The only identity, taken from a verified session. */
+    firebaseUid: text("firebase_uid")
+      .notNull()
+      .references(() => users.firebaseUid),
+
+    /** The Whop Account id, prefixed `biz_`. */
+    whopAccountId: text("whop_account_id").notNull(),
+
+    /** The Whop `sub` this was provisioned for, from the OAuth connection. */
+    whopUserId: text("whop_user_id").notNull(),
+
+    /**
+     * The platform account it hangs from, read back from the provider
+     * response. NOT NULL on purpose: an Account with no parent is a STANDALONE
+     * company, not a connected account, and must never be recorded as one.
+     */
+    parentAccountId: text("parent_account_id").notNull(),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** `active` or `suspended`, as last reported. Null when not computed. */
+    status: text("status"),
+    /** Whatever onboarding the account has completed. Null until it has. */
+    onboardingType: text("onboarding_type"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // ONE connected account per creator, per environment. This is what makes a
+    // double-clicked button, a retried request and a concurrent race all
+    // resolve to the same row instead of two provisioned accounts.
+    uniqueIndex("uniq_whop_account_user_env").on(t.firebaseUid, t.environment),
+    // And one row per provider account, so the same `biz_` cannot be attached
+    // to two ClipRewards users.
+    uniqueIndex("uniq_whop_account_id_env").on(t.whopAccountId, t.environment),
+    index("idx_whop_accounts_uid").on(t.firebaseUid),
+    index("idx_whop_accounts_whop_user").on(t.whopUserId),
+  ],
+);
