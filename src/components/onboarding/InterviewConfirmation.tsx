@@ -19,6 +19,8 @@ export function InterviewConfirmation({
   meetingUrl,
   joinLabel,
   linkPending,
+  linkDelayed,
+  calendarStatus,
   nextTitle,
   steps,
 }: {
@@ -28,10 +30,19 @@ export function InterviewConfirmation({
   detailsTitle: string;
   /** Already-formatted booking facts, in display order. */
   rows: { label: string; value: ReactNode; icon: "calendar" | "clock" | "timer" | "video" | "globe" }[];
-  /** The real link from the booking row, or null when staff have not set one. */
+  /** The real link from the booking row, or null when there is not one yet. */
   meetingUrl: string | null;
   joinLabel: string;
+  /** Shown while the Meet room is still being created. */
   linkPending: string;
+  /**
+   * Shown when provisioning failed. It does NOT say the booking failed,
+   * because it did not: the interview is confirmed either way, and the link
+   * is something ClipRewards owes them before the call.
+   */
+  linkDelayed: string;
+  /** `ready` | `pending` | `failed`, from the booking row. */
+  calendarStatus: string;
   nextTitle: string;
   steps: readonly string[];
 }) {
@@ -98,7 +109,7 @@ export function InterviewConfirmation({
               </a>
             ) : (
               <p className="text-center text-[13.5px] leading-relaxed text-ink-soft">
-                {linkPending}
+                {calendarStatus === "failed" ? linkDelayed : linkPending}
               </p>
             )}
           </div>

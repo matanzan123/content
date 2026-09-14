@@ -86,6 +86,8 @@ export default async function Page({ params }: Params) {
       meetingUrl={booking.meetingUrl}
       joinLabel={detail.join}
       linkPending={detail.linkPending}
+      linkDelayed={detail.linkDelayed}
+      calendarStatus={booking.calendarProvisioningStatus}
       nextTitle={detail.nextTitle}
       steps={detail.steps}
     />

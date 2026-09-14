@@ -401,6 +401,8 @@ export type ApplicantRow = {
   durationMinutes: number | null;
   meetingUrl: string | null;
   bookingStatus: string | null;
+  /** How far Google Calendar provisioning got for the live booking. */
+  calendarStatus: string | null;
 };
 
 /**
@@ -427,6 +429,7 @@ export async function listApplicants(limit = 200): Promise<ApplicantRow[]> {
       durationMinutes: interviewBookings.durationMinutes,
       meetingUrl: interviewBookings.meetingUrl,
       bookingStatus: interviewBookings.status,
+      calendarStatus: interviewBookings.calendarProvisioningStatus,
     })
     .from(users)
     .leftJoin(userProfiles, eq(userProfiles.firebaseUid, users.firebaseUid))

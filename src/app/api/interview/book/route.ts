@@ -1,6 +1,7 @@
 import { requireUser } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { bookInterview, cancelOwnBooking, getActiveBooking } from "@/lib/server/interviews";
+import { provisionBookingCalendar } from "@/lib/server/interview-calendar";
 
 /* ==========================================================================
    INTERVIEW BOOKING.
@@ -71,6 +72,15 @@ export async function POST(request: Request) {
     );
   }
 
+  /*
+   * THE BOOKING IS ALREADY CONFIRMED. Provisioning the Google Calendar event
+   * happens after it, outside any transaction, and CANNOT undo it: a Google
+   * outage leaves a real interview whose Meet link arrives later, which is
+   * the honest outcome. The provisioning path records its own status and is
+   * safe to call again, so nothing is lost by this attempt failing.
+   */
+  const calendar = await provisionBookingCalendar(result.booking.bookingId);
+
   return Response.json(
     {
       ok: true,
@@ -78,6 +88,10 @@ export async function POST(request: Request) {
         id: result.booking.bookingId,
         scheduled_at: result.booking.scheduledAt,
         duration_minutes: result.booking.durationMinutes,
+        // What the applicant's page should expect to show. Never an error
+        // detail — a failure here is not the applicant's problem to solve.
+        calendar_status: calendar.ok ? calendar.status : "pending",
+        meeting_url: calendar.ok && calendar.status === "ready" ? calendar.meetingUrl : null,
       },
     },
     { headers: NO_STORE },

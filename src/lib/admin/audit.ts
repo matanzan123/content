@@ -24,6 +24,7 @@ export const AUDIT_ACTIONS = [
   "applicant_rejected",
   "applicant_needs_followup",
   "interview_meeting_url_set",
+  "interview_calendar_retried",
   "admin_role_granted",
   "admin_role_revoked",
   "user_suspended",

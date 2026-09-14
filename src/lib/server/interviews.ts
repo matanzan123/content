@@ -32,6 +32,8 @@ export type Booking = {
   durationMinutes: number;
   status: "scheduled" | "cancelled" | "completed" | "no_show";
   meetingUrl: string | null;
+  /** `pending` | `ready` | `failed` — provisioning, not the interview. */
+  calendarProvisioningStatus: "pending" | "ready" | "failed";
   adminNotes: string | null;
   cancelledAt: Date | null;
   createdAt: Date;

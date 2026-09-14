@@ -472,6 +472,20 @@ async function sequences() {
     }
     check("migration 0007 applies cleanly on its own", true);
 
+    /*
+     * 0009 ADDED COLUMNS TO `interview_bookings`, and the real module selects
+     * them. A fixture frozen at 0007 would fail on a column the code
+     * legitimately reads, so the later migration's booking changes are
+     * replayed too: the fixture tracks the schema, not a moment in its history.
+     */
+    const ddl0009 = readFileSync("drizzle/0009_flippant_black_tarantula.sql", "utf8");
+    for (const stmt of ddl0009
+      .split("--> statement-breakpoint")
+      .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
+      .filter((x) => /interview_bookings|calendar_provisioning_status/.test(x))) {
+      await client.unsafe(stmt);
+    }
+
     scoped = postgres(direct.toString(), { max: 1, prepare: false, onnotice: () => {} });
     await scoped.unsafe(`set search_path = ${SCRATCH}`);
 

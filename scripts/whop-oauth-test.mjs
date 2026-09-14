@@ -233,7 +233,11 @@ const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
   const store = readFileSync("src/lib/server/whop-connections.ts", "utf8");
   const oauthSrc = readFileSync("src/lib/server/whop-oauth.ts", "utf8");
   const schema = readFileSync("src/lib/db/schema.ts", "utf8");
-  const connectionsTable = schema.slice(schema.indexOf("whop_connections"), schema.indexOf("(t) => [\n    index(\"idx_whop_connections_uid\")"));
+  // Bounded by the table literal itself. The previous end anchor never
+  // matched, so this read most of the file — it would have been satisfied, or
+  // broken, by any unrelated table that happened to have an email column.
+  const connectionsStart = schema.indexOf('pgTable(\n  "whop_connections"');
+  const connectionsTable = schema.slice(connectionsStart, schema.indexOf("\n);", connectionsStart));
 
   check("the connection store never reads an email", /\bemail\b/i.test(store) === false);
   check("the connection table has no email column", /email[a-zA-Z]*:\s*(text|char)\(/i.test(connectionsTable) === false);

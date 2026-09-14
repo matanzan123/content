@@ -33,7 +33,8 @@ export type AuditWrite = {
   /** Snapshot at the time, so a later read needs no live lookup. */
   adminEmail: string | null;
   action: string;
-  targetType: "user";
+  /** What the action was about. A booking is not a user. */
+  targetType: "user" | "booking";
   targetId: string;
   metadata?: Record<string, string | number | boolean | null>;
 };

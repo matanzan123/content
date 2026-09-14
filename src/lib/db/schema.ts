@@ -1202,6 +1202,18 @@ export const userProfiles = pgTable(
  * Google Meet link by hand for now. There is deliberately no Calendar or Meet
  * API integration in this build, and no user-facing writer for this column.
  */
+/**
+ * How far Google Calendar provisioning has got for a booking.
+ *
+ * SEPARATE FROM THE BOOKING'S OWN STATUS on purpose: a confirmed interview
+ * whose Meet room could not be created is still a confirmed interview.
+ */
+export const calendarProvisioningStatusEnum = pgEnum("calendar_provisioning_status", [
+  "pending",
+  "ready",
+  "failed",
+]);
+
 export const bookingStatusEnum = pgEnum("booking_status", [
   "scheduled",
   "cancelled",
@@ -1227,8 +1239,34 @@ export const interviewBookings = pgTable(
 
     status: bookingStatusEnum("status").notNull().default("scheduled"),
 
-    /** Pasted by staff. No API writes this, and no user can. */
+    /**
+     * The Google Meet URL for this interview.
+     *
+     * REUSED, NOT REPLACED. It was previously pasted by staff; it is now
+     * written by calendar provisioning from the event Google returns, and
+     * staff may still set one. Every reader already understands this column,
+     * so the applicant and admin surfaces needed no new field.
+     */
     meetingUrl: text("meeting_url"),
+
+    /* --- Google Calendar provisioning ---------------------------------- */
+
+    /** The event id in the ClipRewards interview calendar. */
+    googleCalendarEventId: text("google_calendar_event_id"),
+    /**
+     * Where provisioning got to. A BOOKING IS VALID IN EVERY ONE OF THESE
+     * STATES: `failed` means Google could not be reached, not that the
+     * interview is off, which is why it is a separate column from `status`.
+     */
+    calendarProvisioningStatus: calendarProvisioningStatusEnum(
+      "calendar_provisioning_status",
+    ).notNull().default("pending"),
+    /** Attempts made, so a poison booking cannot be retried forever. */
+    calendarRetryCount: integer("calendar_retry_count").notNull().default(0),
+    /** A short, safe code — never a provider body, never a token. */
+    lastCalendarErrorCode: text("last_calendar_error_code"),
+    /** When provisioning last changed state. */
+    calendarUpdatedAt: timestamp("calendar_updated_at", { withTimezone: true }),
     /** Staff notes from the conversation. Not shown to the applicant. */
     adminNotes: text("admin_notes"),
 
@@ -1319,4 +1357,82 @@ export const whopAccounts = pgTable(
     index("idx_whop_accounts_uid").on(t.firebaseUid),
     index("idx_whop_accounts_whop_user").on(t.whopUserId),
   ],
+);
+
+/* =========================================================================
+   GOOGLE CALENDAR — the ClipRewards interview account's connection.
+
+   AN INTERNAL INTEGRATION, NOT A USER'S ACCOUNT. This is one dedicated Google
+   account that owns every interview event, connected once by an
+   administrator. There is deliberately no `firebase_uid` column: tying it to
+   a person would mean their leaving, or simply signing out, silently stopped
+   the company's interviews from being scheduled.
+
+   ONE ACTIVE CONNECTION PER ENVIRONMENT, enforced by a partial unique index.
+   Reconnecting revokes the previous row rather than editing it, so the
+   history of which account was in use, and when, survives.
+
+   `whop_environment` IS REUSED AS THE ENVIRONMENT TYPE. It is the single
+   deployment switch this application has — the same `WHOP_ENV` that decides
+   every provider host — and minting a parallel enum with identical values
+   would invite the two to disagree.
+
+   TOKENS ARE CIPHERTEXT, under the Google-specific key. See `google-crypto`.
+   ========================================================================= */
+
+export const googleCalendarConnections = pgTable(
+  "google_calendar_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** The connected Google account, when it can be learned safely. */
+    accountEmail: text("account_email"),
+
+    /** AES-256-GCM envelopes. The refresh token is the durable credential. */
+    refreshTokenCiphertext: text("refresh_token_ciphertext"),
+    accessTokenCiphertext: text("access_token_ciphertext"),
+    /** When the access token stops working; refresh is driven from this. */
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+
+    /** Exactly what Google granted, so a scope change is detectable. */
+    scopes: text("scopes").notNull(),
+
+    /** Which administrator connected it. Attribution, never authorization. */
+    connectedByUid: text("connected_by_uid"),
+
+    connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastRefreshedAt: timestamp("last_refreshed_at", { withTimezone: true }),
+    /** Set on disconnect or on a refresh Google refuses. */
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("uniq_google_calendar_active_env")
+      .on(t.environment)
+      .where(sql`revoked_at is null`),
+    index("idx_google_calendar_env").on(t.environment),
+  ],
+);
+
+/* =========================================================================
+   GOOGLE OAUTH STATES — one-time, expiring, exactly like the Whop flow.
+
+   The callback arrives as a top-level redirect with no session of its own, so
+   the row written when the flow started is what says it was legitimate. It is
+   consumed by `DELETE … RETURNING`: a replay, an expiry and a forgery are all
+   the same refusal.
+   ========================================================================= */
+
+export const googleOauthStates = pgTable(
+  "google_oauth_states",
+  {
+    state: text("state").primaryKey(),
+    /** The administrator who began the flow. Recorded, never trusted later. */
+    adminUid: text("admin_uid").notNull(),
+    environment: whopEnvironmentEnum("environment").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("idx_google_oauth_states_expires").on(t.expiresAt)],
 );

@@ -1,5 +1,6 @@
 import { Panel, Resolved } from "../Panel";
 import { ApplicantDecision } from "../ApplicantDecision";
+import { CalendarRetry } from "../CalendarRetry";
 import { getApplicantQueue, type ApplicantView } from "@/lib/admin/firebase-queries";
 import { ADMIN_TIMEZONE } from "@/lib/analytics/range";
 import type { Dictionary } from "@/i18n/dictionaries/en";
@@ -204,9 +205,43 @@ function ApplicantRowView({ a, t, locale }: { a: ApplicantView; t: Copy; locale:
                 : "—"}
               {a.bookingStatus ? ` · ${bookingLabel(copy, a.bookingStatus)}` : ""}
             </p>
-            <p className={a.meetingUrl ? "text-[color:var(--a-positive)]" : "text-[color:var(--a-warning)]"}>
-              {a.meetingUrl ? copy.meetSet : copy.meetMissing}
+            {/* PROVISIONING, NOT APPROVAL. This says whether the Meet room
+                exists; whether the applicant is approved is the column to the
+                right and the two must not be read as one. */}
+            <p
+              className={
+                a.calendarStatus === "ready"
+                  ? "text-[color:var(--a-positive)]"
+                  : a.calendarStatus === "failed"
+                    ? "text-[color:var(--a-negative)]"
+                    : "text-[color:var(--a-warning)]"
+              }
+            >
+              {a.calendarStatus === "ready"
+                ? copy.meetReady
+                : a.calendarStatus === "failed"
+                  ? copy.meetFailed
+                  : copy.meetPreparing}
             </p>
+            {a.meetingUrl && (
+              <a
+                href={a.meetingUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-block text-[12px] font-semibold text-[color:var(--a-accent)] underline underline-offset-2"
+              >
+                {copy.meetJoin}
+              </a>
+            )}
+            {a.calendarStatus === "failed" && a.bookingId && (
+              <CalendarRetry
+                bookingId={a.bookingId}
+                label={copy.meetRetry}
+                busyLabel={copy.meetRetrying}
+                doneLabel={copy.meetRetryDone}
+                failedLabel={copy.meetRetryFailed}
+              />
+            )}
           </div>
         ) : (
           <span className="text-[color:var(--a-text-dim)]">{copy.noInterview}</span>

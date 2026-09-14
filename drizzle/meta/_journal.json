@@ -64,6 +64,13 @@
       "when": 1789334033351,
       "tag": "0008_acoustic_human_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789403523776,
+      "tag": "0009_flippant_black_tarantula",
+      "breakpoints": true
     }
   ]
 }
