@@ -101,12 +101,21 @@ export type AccountFailure =
   | "malformed_response"
   /** A STANDALONE account came back. Recorded nowhere; see the caller. */
   | "standalone_account_returned"
+  /** No matching account found at the provider. */
+  | "not_found"
   | "network_error"
   | "unconfigured";
 
 export type AccountResult =
   | { ok: true; account: WhopAccount }
   | { ok: false; reason: AccountFailure; detail?: string };
+
+/** A WhopAccount enriched with the `whop_user_id` we stored in its metadata. */
+export type FoundAccount = WhopAccount & { whopUserId: string };
+
+export type FindAccountResult =
+  | { ok: true; account: FoundAccount }
+  | { ok: false; reason: AccountFailure };
 
 /** `biz_` and something after it. Checked here and again by the database. */
 export function isWhopAccountId(value: unknown): value is string {
@@ -262,4 +271,82 @@ export async function createConnectedAccount(
   }
 
   return { ok: true, account };
+}
+
+export type AccountLinkResult =
+  | { ok: true; url: string }
+  | { ok: false; reason: AccountFailure };
+
+/**
+ * Creates a Whop-hosted onboarding/KYC link for a connected account.
+ *
+ * The creator is redirected to this URL to complete identity verification and
+ * payout setup. Whop renders the entire flow; we never touch KYC data directly.
+ *
+ * `returnUrl` is where Whop sends the creator when they are done (or abandon).
+ */
+export async function createAccountLink(
+  config: PlatformConfig,
+  accountId: string,
+  returnUrl: string,
+): Promise<AccountLinkResult> {
+  if (!isWhopAccountId(accountId)) return { ok: false, reason: "malformed_response" };
+
+  const result = await request(config, `/accounts/${accountId}/links`, {
+    method: "POST",
+    body: { type: "onboarding", return_url: returnUrl },
+  });
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  const body = result.body as Record<string, unknown> | null;
+  const url = typeof body?.url === "string" && body.url.startsWith("https://") ? body.url : null;
+  if (!url) return { ok: false, reason: "malformed_response" };
+
+  return { ok: true, url };
+}
+
+/**
+ * Searches Whop for a connected account whose metadata contains the given
+ * `firebase_uid` and `source: "cliprewards"`, and whose parent is the
+ * expected platform account.
+ *
+ * Used for reconciliation: when the local DB is empty but the account already
+ * exists at Whop (e.g. after a DB reset or a first deploy against an existing
+ * Whop environment), this finds it so we can record it rather than create a
+ * duplicate.
+ */
+export async function findConnectedAccountByUid(
+  config: PlatformConfig,
+  platformAccountId: string,
+  firebaseUid: string,
+): Promise<FindAccountResult> {
+  const qs = new URLSearchParams({
+    "metadata[firebase_uid]": firebaseUid,
+    "metadata[source]": "cliprewards",
+    per_page: "10",
+  });
+
+  const result = await request(config, `/accounts?${qs.toString()}`, { method: "GET" });
+  if (!result.ok) return { ok: false, reason: result.reason };
+
+  const body = result.body as { data?: unknown[] } | null;
+  const items = Array.isArray(body?.data) ? body.data : [];
+
+  for (const item of items) {
+    const account = readAccount(item);
+    if (!account) continue;
+    if (account.parentAccountId !== platformAccountId) continue;
+
+    const raw = item as Record<string, unknown>;
+    const meta = raw.metadata;
+    const whopUserId =
+      meta && typeof meta === "object"
+        ? ((meta as Record<string, unknown>).whop_user_id as string | undefined)
+        : undefined;
+    if (!whopUserId) continue;
+
+    return { ok: true, account: { ...account, whopUserId } };
+  }
+
+  return { ok: false, reason: "not_found" };
 }

@@ -84,9 +84,9 @@ export const ACCOUNTS = {
   creator_payable: {
     kind: "liability",
     normalBalance: "credit",
-    postable: false,
+    postable: true,
     description:
-      "What a creator has earned and not been paid. BLOCKED: the revenue split does not exist yet, so no amount can be assigned without inventing it.",
+      "What a creator has earned and not been paid. Posted by the revenue_split event: gross × (1 - platform_fee_bps/10000). The fee rate is captured on each creator_earnings row so a later rate change cannot alter past postings.",
   },
 
   campaign_funds: {
@@ -118,9 +118,9 @@ export const ACCOUNTS = {
   platform_revenue: {
     kind: "revenue",
     normalBalance: "credit",
-    postable: false,
+    postable: true,
     description:
-      "ClipRewards fees actually earned. BLOCKED: the platform fee has not been decided. Never derived from gross volume by assuming a rate.",
+      "ClipRewards fees actually earned. Posted by the revenue_split event: gross × platform_fee_bps/10000. Rate is configurable via PLATFORM_FEE_BPS (default 2000 = 20%). Captured per-earning so historical rows are not affected by a rate change.",
   },
 
   /* ------------------------------ expenses ------------------------------ */
@@ -187,6 +187,10 @@ export const ECONOMIC_EVENTS = [
   "payout_sent",
   /** A payout that failed or was clawed back. */
   "payout_reversed",
+  /** Gross payment split into platform fee and creator share. */
+  "revenue_split",
+  /** Revenue split unwound for a refund or dispute loss. */
+  "revenue_split_reversed",
   /** A human correction, which always carries an audit record. */
   "manual_adjustment",
   /** The exact opposite of an earlier transaction. See `reverseTransaction`. */
@@ -209,6 +213,10 @@ export const IMPLEMENTED_EVENTS: ReadonlySet<EconomicEvent> = new Set<EconomicEv
   "dispute_opened",
   "dispute_won",
   "dispute_lost",
+  "payout_sent",
+  "payout_reversed",
+  "revenue_split",
+  "revenue_split_reversed",
   "reversal",
 ]);
 

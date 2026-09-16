@@ -12,7 +12,10 @@ import {
 import { useRouter } from "next/navigation";
 import {
   GoogleAuthProvider,
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signOut as fbSignOut,
   type User,
@@ -57,7 +60,16 @@ async function closeServerSession(): Promise<void> {
 }
 
 /** Keys into `onboarding` in the dictionaries. */
-export type AuthErrorKey = "signInNotConfigured" | "unauthorizedDomain" | "signInFailed";
+export type AuthErrorKey =
+  | "signInNotConfigured"
+  | "unauthorizedDomain"
+  | "signInFailed"
+  | "emailInUse"
+  | "wrongPassword"
+  | "userNotFound"
+  | "weakPassword"
+  | "invalidEmail"
+  | "resetSent";
 
 type AuthValue = {
   user: User | null;
@@ -68,6 +80,9 @@ type AuthValue = {
    *  message follows a language switch and the provider stays locale-neutral. */
   error: AuthErrorKey | null;
   signInWithGoogle: () => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
+  signUpWithEmail: (email: string, password: string) => Promise<void>;
+  resetPassword: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
 };
 
@@ -160,6 +175,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    setError(null);
+    const auth = getFirebaseAuth();
+    if (!auth) { setError("signInNotConfigured"); return; }
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (e) {
+      const code = (e as { code?: string }).code ?? "";
+      if (code === "auth/wrong-password" || code === "auth/invalid-credential") setError("wrongPassword");
+      else if (code === "auth/user-not-found") setError("userNotFound");
+      else if (code === "auth/invalid-email") setError("invalidEmail");
+      else setError("signInFailed");
+    }
+  }, []);
+
+  const signUpWithEmail = useCallback(async (email: string, password: string) => {
+    setError(null);
+    const auth = getFirebaseAuth();
+    if (!auth) { setError("signInNotConfigured"); return; }
+    try {
+      await createUserWithEmailAndPassword(auth, email, password);
+    } catch (e) {
+      const code = (e as { code?: string }).code ?? "";
+      if (code === "auth/email-already-in-use") setError("emailInUse");
+      else if (code === "auth/weak-password") setError("weakPassword");
+      else if (code === "auth/invalid-email") setError("invalidEmail");
+      else setError("signInFailed");
+    }
+  }, []);
+
+  const resetPassword = useCallback(async (email: string) => {
+    setError(null);
+    const auth = getFirebaseAuth();
+    if (!auth) { setError("signInNotConfigured"); return; }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      setError("resetSent");
+    } catch (e) {
+      const code = (e as { code?: string }).code ?? "";
+      if (code === "auth/user-not-found") setError("userNotFound");
+      else if (code === "auth/invalid-email") setError("invalidEmail");
+      else setError("signInFailed");
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     // The server session is cleared by the `onAuthStateChanged` handler above,
     // so EVERY way of losing the Firebase user — this button, another tab, a
@@ -175,9 +235,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       configured: isFirebaseConfigured,
       error,
       signInWithGoogle,
+      signInWithEmail,
+      signUpWithEmail,
+      resetPassword,
       signOut,
     }),
-    [user, loading, error, signInWithGoogle, signOut]
+    [user, loading, error, signInWithGoogle, signInWithEmail, signUpWithEmail, resetPassword, signOut]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -5,6 +5,7 @@ import { getActiveConnection } from "@/lib/server/whop-connections";
 import { getConnectedAccount, recordConnectedAccount } from "@/lib/server/connected-accounts";
 import {
   createConnectedAccount,
+  findConnectedAccountByUid,
   getPlatformAccount,
   resolvePlatformConfig,
 } from "@/lib/server/whop-accounts";
@@ -83,7 +84,46 @@ export async function POST(request: Request) {
   const connection = await getActiveConnection(firebaseUid);
   if (!connection) return json({ error: "whop_identity_required" }, 409);
 
-  /* --- 3. Inputs, every one of them resolved on the server. ------------ */
+  /* --- 3. Platform account (needed for reconciliation and creation). --- */
+  const parent = await getPlatformAccount(platform.config);
+  if (!parent.ok) {
+    const status = parent.reason === "platforms_access_required" ? 403 : 502;
+    return json({ error: parent.reason }, status);
+  }
+
+  /* --- 4. Reconcile: account may exist at Whop but not in our DB. ----- */
+  const found = await findConnectedAccountByUid(platform.config, parent.account.id, firebaseUid);
+  if (found.ok) {
+    const stored = await recordConnectedAccount({
+      firebaseUid,
+      whopAccountId: found.account.id,
+      whopUserId: found.account.whopUserId,
+      parentAccountId: found.account.parentAccountId as string,
+      environment,
+      status: found.account.status,
+      onboardingType: found.account.onboardingType,
+    });
+    if (!stored.ok) return json({ error: stored.reason }, 503);
+    return json(
+      {
+        ok: true,
+        created: stored.created,
+        reconciled: true,
+        account: {
+          whop_account_id: stored.account.whopAccountId,
+          environment: stored.account.environment,
+          status: stored.account.status,
+          onboarding_type: stored.account.onboardingType,
+        },
+      },
+      200,
+    );
+  }
+  if (found.reason !== "not_found") {
+    return json({ error: found.reason }, 502);
+  }
+
+  /* --- 5. Inputs, every one of them resolved on the server. ------------ */
   const auth = getAdminAuth();
   if (!auth) return json({ error: "unavailable", reason: "unconfigured" }, 503);
 
@@ -111,14 +151,7 @@ export async function POST(request: Request) {
   // trustworthy exists; Whop falls back to the owner's email.
   const title = gate.context.profile?.fullName?.trim() || connection.whopUsername || undefined;
 
-  /* --- 4. The parent is read from the provider, never hard-coded. ------ */
-  const parent = await getPlatformAccount(platform.config);
-  if (!parent.ok) {
-    const status = parent.reason === "platforms_access_required" ? 403 : 502;
-    return json({ error: parent.reason }, status);
-  }
-
-  /* --- 5. Create, with a key stable for this creator and environment. -- */
+  /* --- 6. Create, with a key stable for this creator and environment. -- */
   const created = await createConnectedAccount(platform.config, parent.account.id, {
     email,
     title,
@@ -149,7 +182,7 @@ export async function POST(request: Request) {
     return json({ error: created.reason }, status);
   }
 
-  /* --- 6. Persist; a lost race reads back the winner. ------------------ */
+  /* --- 7. Persist; a lost race reads back the winner. ------------------ */
   const stored = await recordConnectedAccount({
     firebaseUid,
     whopAccountId: created.account.id,

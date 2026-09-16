@@ -592,6 +592,22 @@ export const economicEventEnum = pgEnum("economic_event", [
   "payout_reversed",
   "manual_adjustment",
   "reversal",
+  /**
+   * The second transaction that moves settled funds out of suspense:
+   * DR unallocated_customer_funds (clears suspense)
+   * CR platform_revenue           (fee earned)
+   * CR creator_payable            (net owed to creator)
+   *
+   * Written once per payment settlement, after the revenue model is applied.
+   */
+  "revenue_split",
+  /**
+   * Unwinds a revenue_split for a refund or dispute loss:
+   * DR creator_payable            (no longer owed)
+   * DR platform_revenue           (percentage fee returned; processing fee kept)
+   * CR unallocated_customer_funds (back to suspense, drained by payment_refunded)
+   */
+  "revenue_split_reversed",
 ]);
 
 /** The chart of accounts. Mirrors ACCOUNTS in src/lib/server/accounting/accounts.ts. */
@@ -1356,6 +1372,433 @@ export const whopAccounts = pgTable(
     uniqueIndex("uniq_whop_account_id_env").on(t.whopAccountId, t.environment),
     index("idx_whop_accounts_uid").on(t.firebaseUid),
     index("idx_whop_accounts_whop_user").on(t.whopUserId),
+  ],
+);
+
+/* =========================================================================
+   CREATOR EARNINGS — the operational record of what each creator has earned.
+
+   SEPARATE FROM THE ACCOUNTING JOURNAL, AND DELIBERATELY SO.
+
+   `accounting_entries` is the financial ledger — it records amounts with
+   double-entry discipline, summing to zero. It answers "is the ledger
+   balanced?" It does NOT answer "which creator can I pay and how much?" in
+   a form that an application can query efficiently per-creator with hold
+   logic applied.
+
+   `creator_earnings` is the operational record that answers that question.
+   ONE ROW PER EARNING EVENT (typically one brand payment → one creator share).
+   The amounts here must match the corresponding journal entries; they are not
+   derived independently.
+
+   THE 6 STATES a creator's money moves through:
+     held        — in hold window (refund period) or frozen by open dispute
+     available   — hold expired and no dispute; ready to transfer
+     transferred — a creator_transfer has been initiated for this earning
+     reversed    — refunded, chargeback lost, or payout reversed
+
+   EARNED (derived) = held + available + transferred (lifetime non-reversed)
+   PENDING (UI)     = sum of held earnings
+   AVAILABLE (UI)   = sum of available earnings
+   TRANSFERRED (UI) = sum of transferred earnings
+
+   WITHDRAWN is Whop's domain. We track "transferred" (money sent to Whop
+   account); what happens between the Whop account and the creator's bank is
+   managed by Whop's own payout schedule, which the creator controls via the
+   payout portal (Task #12).
+
+   THE HOLD POLICY:
+     - A new earning is `held` for CREATOR_HOLD_DAYS (default 7) from
+       payment settlement date. This covers the brand refund window.
+     - If a dispute opens on the payment, the earning is frozen (`held` with
+       `frozen_by_dispute = true`) until the dispute resolves — win or lose.
+     - The `hold_until` column is authoritative; the application never
+       promotes `held` → `available` without checking it.
+
+   FEES:
+     - Platform fee (PLATFORM_FEE_BPS, default 20%) is deducted from gross
+       before `net_amount_minor` is recorded here.
+     - Provider fees (Whop processor fees) are a PLATFORM EXPENSE — they do
+       not reduce creator earnings. The creator's share is calculated on gross.
+     - Tax is not posted here; it flows through `tax_payable` in the journal.
+   ========================================================================= */
+
+export const creatorEarningStatusEnum = pgEnum("creator_earning_status", [
+  "held",
+  "available",
+  "transferred",
+  "reversed",
+]);
+
+/**
+ * ONE ROW PER EARNING EVENT.
+ *
+ * Amounts are BIGINT minor units, never float. `currency` is always present
+ * so a row can never be ambiguous about what it measures.
+ *
+ * ACCOUNTING LINK: `accounting_transaction_id` points to the `revenue_split`
+ * transaction in `accounting_transactions` that logged the same amounts. If
+ * the two ever disagree, the journal is the authority.
+ */
+export const creatorEarnings = pgTable(
+  "creator_earnings",
+  {
+    earningId: uuid("earning_id").primaryKey().defaultRandom(),
+
+    firebaseUid: text("firebase_uid")
+      .notNull()
+      .references(() => users.firebaseUid),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** The Whop payment that triggered this earning. Idempotency anchor. */
+    whopPaymentId: text("whop_payment_id").notNull(),
+
+    /** The ClipRewards order the payment settled, when there is one. */
+    orderId: uuid("order_id").references(() => paymentOrders.orderId),
+
+    /** What the brand actually paid, before any fees. Minor units. */
+    grossAmountMinor: bigint("gross_amount_minor", { mode: "bigint" }).notNull(),
+    /** Platform fee taken (PLATFORM_FEE_BPS basis points of gross). */
+    platformFeeMinor: bigint("platform_fee_minor", { mode: "bigint" }).notNull(),
+    /** What the creator actually receives: gross - platformFee. */
+    netAmountMinor: bigint("net_amount_minor", { mode: "bigint" }).notNull(),
+    /** Lowercase ISO 4217. Currently always "usd". */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    /** Platform fee rate applied, in basis points. Captured so a later rate change
+     *  cannot retroactively alter the calculation for this row. */
+    platformFeeBps: integer("platform_fee_bps").notNull(),
+
+    status: creatorEarningStatusEnum("status").notNull().default("held"),
+
+    /**
+     * When this earning becomes payable, absent any dispute.
+     * Set to payment settlement time + CREATOR_HOLD_DAYS.
+     * The application must not promote to `available` before this.
+     */
+    holdUntil: timestamp("hold_until", { withTimezone: true }).notNull(),
+
+    /**
+     * TRUE when there is an open dispute on `whop_payment_id`.
+     * Freezes the earning regardless of `hold_until`.
+     * Cleared when the dispute resolves; reversal is separate.
+     */
+    frozenByDispute: boolean("frozen_by_dispute").notNull().default(false),
+
+    /** The whop_dispute_id that froze this earning, for traceability. */
+    frozenByDisputeId: text("frozen_by_dispute_id"),
+
+    /**
+     * The `creator_transfers.transfer_id` that claimed this earning.
+     * Set when a transfer includes this earning.
+     */
+    transferId: uuid("transfer_id"),
+
+    /** The journal entry that recorded the revenue split for this earning. */
+    accountingTransactionId: uuid("accounting_transaction_id"),
+
+    /** Short free-form label. e.g. "Campaign payout — Q3 UGC". */
+    description: text("description"),
+
+    /** When the payment settled (copied from the payment, for querying). */
+    paymentSettledAt: timestamp("payment_settled_at", { withTimezone: true }),
+
+    availableAt: timestamp("available_at", { withTimezone: true }),
+    transferredAt: timestamp("transferred_at", { withTimezone: true }),
+    reversedAt: timestamp("reversed_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // ONE earning per creator per payment. A payment may appear once per creator.
+    uniqueIndex("uniq_creator_earnings_payment_creator")
+      .on(t.whopPaymentId, t.firebaseUid),
+    index("idx_creator_earnings_uid").on(t.firebaseUid, t.status),
+    index("idx_creator_earnings_payment").on(t.whopPaymentId),
+    index("idx_creator_earnings_hold_until").on(t.holdUntil, t.status),
+    index("idx_creator_earnings_created").on(t.createdAt),
+    index("idx_creator_earnings_transfer").on(t.transferId),
+  ],
+);
+
+/* =========================================================================
+   CREATOR TRANSFERS — platform-initiated payouts to creator accounts.
+
+   ONE TABLE FOR ALL CREATOR PAYOUT ATTEMPTS.
+
+   This table is OPERATIONAL, not financial. It tracks where each transfer
+   attempt stands with the provider. The money is in `accounting_transactions`
+   and `accounting_entries` — this table is what lets us ask "did we try to
+   send this, and what did Whop say?"
+
+   KEY DESIGN DECISIONS:
+
+   LEDGER FIRST: a row here is written BEFORE the Whop API call, with status
+   `pending`. This means a crash between writing and calling leaves a row that
+   is clearly not `submitted`, which a sweep can detect and alert on. It is
+   better to have a stuck `pending` row than to have a transfer with no record.
+
+   IDEMPOTENCY IS A DATABASE CONSTRAINT. `idempotency_key` is UNIQUE. Two
+   concurrent threads attempting the same payout converge to one row — the
+   winner commits; the loser gets a unique-constraint violation and must read
+   the winner's row rather than proceeding. A read-then-check loses this race;
+   a unique index does not.
+
+   PROVIDER ID IS UNIQUE WHEN PRESENT. `provider_transfer_id` has a partial
+   unique index covering non-null values, so the same Whop transfer cannot
+   be recorded twice even if a webhook is delivered more than once.
+
+   NEVER AUTO-RETRY. A failed transfer requires human review before a retry.
+   A retry is safe (using the same idempotency key Whop received) but must be
+   explicitly triggered by an administrator, not by the application.
+
+   AMOUNTS ARE BIGINT MINOR UNITS, never float and never a JS number at rest.
+   A currency column is always present, so a row can never be ambiguous about
+   what it measures.
+   ========================================================================= */
+
+export const creatorTransferStatusEnum = pgEnum("creator_transfer_status", [
+  /** Written to DB. Whop call not yet made (or in progress). */
+  "pending",
+  /** Whop accepted the call and returned a transfer id. Funds in transit. */
+  "submitted",
+  /** Provider confirmed funds reached the creator. Set by webhook. */
+  "completed",
+  /** Whop rejected the call, or a network error occurred. Never auto-retried. */
+  "failed",
+  /** Provider reversed the transfer after settlement. Rare; set by webhook. */
+  "reversed",
+]);
+
+/**
+ * ONE ROW PER TRANSFER ATTEMPT.
+ *
+ * APPEND-ONLY in the sense that amounts and parties are never changed. Status,
+ * provider_transfer_id and timestamps are updated as the transfer progresses.
+ * A reversal does NOT modify this row — it sets `status = reversed` and the
+ * accounting journal carries a separate reversal entry.
+ */
+export const creatorTransfers = pgTable(
+  "creator_transfers",
+  {
+    transferId: uuid("transfer_id").primaryKey().defaultRandom(),
+
+    firebaseUid: text("firebase_uid")
+      .notNull()
+      .references(() => users.firebaseUid),
+
+    /** The Whop `biz_` account the money goes to. */
+    whopAccountId: text("whop_account_id").notNull(),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** Minor units of `currency`. 1000 = $10.00 USD. BIGINT — never float. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+    /** Lowercase ISO 4217, always present. `usd` unless we expand later. */
+    currency: char("currency", { length: 3 }).notNull(),
+
+    status: creatorTransferStatusEnum("status").notNull().default("pending"),
+
+    /**
+     * THE IDEMPOTENCY KEY sent to Whop and enforced locally.
+     * Unique so a duplicate insert is refused rather than a second row created.
+     * Never changes after insert.
+     */
+    idempotencyKey: text("idempotency_key").notNull(),
+
+    /** Set when Whop returns a transfer id on the POST response. */
+    providerTransferId: text("provider_transfer_id"),
+    /** Short code when Whop rejects. Never a raw provider body. */
+    failureReason: text("failure_reason"),
+
+    /** What this transfer is for — audit + reconciliation. */
+    purpose: text("purpose").notNull(),
+    /** The campaign this payout belongs to, when applicable. */
+    campaignId: text("campaign_id"),
+
+    /**
+     * The accounting transaction that debited `creator_payable` when this
+     * transfer was initiated. Null only while the accounting write is in-flight.
+     */
+    accountingTransactionId: uuid("accounting_transaction_id"),
+
+    /** The administrator who initiated this. All transfers are admin-initiated. */
+    initiatedByUid: text("initiated_by_uid").notNull(),
+
+    /** Set when Whop accepted the call. */
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    /** Set by a `payout.sent` webhook confirming the funds moved. */
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    reversedAt: timestamp("reversed_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // THE idempotency constraint — database-enforced, race-proof.
+    uniqueIndex("uniq_creator_transfers_idempotency").on(t.idempotencyKey),
+    // The provider id must be unique when it exists.
+    uniqueIndex("uniq_creator_transfers_provider_id")
+      .on(t.providerTransferId)
+      .where(sql`provider_transfer_id is not null`),
+    index("idx_creator_transfers_uid").on(t.firebaseUid),
+    index("idx_creator_transfers_account").on(t.whopAccountId),
+    index("idx_creator_transfers_status").on(t.status, t.createdAt),
+    index("idx_creator_transfers_campaign").on(t.campaignId),
+    index("idx_creator_transfers_created").on(t.createdAt),
+  ],
+);
+
+/* =========================================================================
+   CREATOR WITHDRAWALS — creator-requested payouts from their available balance.
+
+   WITHDRAWAL vs TRANSFER:
+     `creator_transfers` = the platform pushes money to a creator's Whop account.
+       Admin-initiated. Happens after a withdrawal is approved.
+     `creator_withdrawals` = a creator says "I want to withdraw $X of my balance."
+       Creator-initiated. Creates a transfer when processed by admin.
+
+   PARTIAL WITHDRAWAL:
+     A creator may request any amount ≤ their available balance. We reserve
+     whole earnings (FIFO) until the total covered ≥ requested amount. If the
+     last reserved earning overshoots the requested amount, the overage is
+     returned as a new earning row when the withdrawal completes or fails.
+
+   CONCURRENCY PROTECTION:
+     1. UNIQUE(firebase_uid) WHERE status is active — one active withdrawal per
+        creator at a time. Prevents two simultaneous requests creating two rows.
+     2. UNIQUE(earning_id) in `creator_withdrawal_earnings` — an earning can
+        only be in one withdrawal at a time. Prevents the same earnings being
+        reserved by two concurrent withdrawal requests racing.
+
+   STATE MACHINE:
+     requested     — created, balance reserved, payout account NOT yet verified
+     eligible      — payout account verified; ready for admin to process
+     processing    — admin triggered the Whop transfer call
+     provider_pending — Whop accepted; funds in transit
+     paid          — webhook confirms funds reached creator account
+     failed        — Whop rejected or webhook failure
+     canceled      — canceled before processing (creator or admin)
+     reversed      — reversed by Whop after payment (rare)
+
+   IDEMPOTENCY: withdrawal is created once per request; the UNIQUE index on
+   (firebase_uid) WHERE active is the database-level guard, not a check-first.
+   ========================================================================= */
+
+export const creatorWithdrawalStatusEnum = pgEnum("creator_withdrawal_status", [
+  "requested",
+  "eligible",
+  "processing",
+  "provider_pending",
+  "paid",
+  "failed",
+  "canceled",
+  "reversed",
+]);
+
+/**
+ * ONE ROW PER WITHDRAWAL REQUEST.
+ *
+ * OPERATIONAL, NOT FINANCIAL. Amounts and parties are immutable after insert.
+ * Status, transfer link, and timestamps change as the request progresses.
+ * Money lives in `accounting_transactions`; this table tracks lifecycle state.
+ */
+export const creatorWithdrawals = pgTable(
+  "creator_withdrawals",
+  {
+    withdrawalId: uuid("withdrawal_id").primaryKey().defaultRandom(),
+
+    firebaseUid: text("firebase_uid")
+      .notNull()
+      .references(() => users.firebaseUid),
+
+    environment: whopEnvironmentEnum("environment").notNull(),
+
+    /** The amount the creator requested to withdraw. Minor units, always ≥ 1. */
+    amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+
+    /**
+     * The total of all reserved earnings — may be > amount_minor if the last
+     * reserved earning overshoots. The difference is returned as a new earning
+     * on completion or cancellation.
+     */
+    reservedAmountMinor: bigint("reserved_amount_minor", { mode: "bigint" }).notNull(),
+
+    currency: char("currency", { length: 3 }).notNull(),
+
+    status: creatorWithdrawalStatusEnum("status").notNull().default("requested"),
+
+    /**
+     * The creator_transfers row that was created when admin processed this.
+     * Null until processing begins.
+     */
+    transferId: uuid("transfer_id").references(() => creatorTransfers.transferId),
+
+    /** Why it failed, when Whop or the application set a reason. */
+    failureReason: text("failure_reason"),
+
+    /** Why it was canceled. */
+    cancelReason: text("cancel_reason"),
+
+    /** Who processed (admin uid), set when admin triggers the transfer. */
+    processedByUid: text("processed_by_uid"),
+
+    /** When the creator submitted the request. */
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    eligibleAt: timestamp("eligible_at", { withTimezone: true }),
+    processingAt: timestamp("processing_at", { withTimezone: true }),
+    providerPendingAt: timestamp("provider_pending_at", { withTimezone: true }),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    canceledAt: timestamp("canceled_at", { withTimezone: true }),
+    reversedAt: timestamp("reversed_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // ONE ACTIVE WITHDRAWAL PER CREATOR. Prevents double-submission while one
+    // is in flight. Terminal states (paid/failed/canceled/reversed) are excluded
+    // so a creator can withdraw again after a previous request concludes.
+    uniqueIndex("uniq_withdrawal_active_creator")
+      .on(t.firebaseUid)
+      .where(sql`status NOT IN ('paid', 'failed', 'canceled', 'reversed')`),
+    index("idx_withdrawals_uid").on(t.firebaseUid, t.status),
+    index("idx_withdrawals_status").on(t.status, t.createdAt),
+    index("idx_withdrawals_transfer").on(t.transferId),
+    index("idx_withdrawals_created").on(t.createdAt),
+  ],
+);
+
+/**
+ * JUNCTION TABLE: which earnings are reserved for which withdrawal.
+ *
+ * UNIQUE on `earning_id` is the concurrency guard: if two concurrent withdrawal
+ * requests race to reserve the same earning, only one INSERT succeeds.
+ *
+ * An earning stays in this table until the withdrawal reaches a terminal state
+ * (paid, failed, canceled, reversed). On failure or cancellation, rows are
+ * deleted and earnings returned to `available`. On payment, rows stay as an
+ * audit trail (earnings are marked `transferred`).
+ */
+export const creatorWithdrawalEarnings = pgTable(
+  "creator_withdrawal_earnings",
+  {
+    withdrawalId: uuid("withdrawal_id")
+      .notNull()
+      .references(() => creatorWithdrawals.withdrawalId),
+    earningId: uuid("earning_id")
+      .notNull()
+      .references(() => creatorEarnings.earningId),
+    reservedAt: timestamp("reserved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // THE CONCURRENCY GUARD. An earning in one withdrawal cannot be in another.
+    uniqueIndex("uniq_withdrawal_earning").on(t.earningId),
+    index("idx_withdrawal_earnings_withdrawal").on(t.withdrawalId),
   ],
 );
 

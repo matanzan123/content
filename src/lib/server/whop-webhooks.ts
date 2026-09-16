@@ -30,6 +30,10 @@ import {
   verifyCaseOwnership,
   verifyDisputeOwnership,
 } from "./whop-disputes";
+import { updateConnectedAccountStatus } from "./connected-accounts";
+import { markTransferCompleted, markTransferReversed } from "./creator-transfers";
+import { resolveChildAccount } from "./whop-child-router";
+import { reverseForRefund, reverseForDispute } from "./creator-earnings";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -94,6 +98,8 @@ export const SUPPORTED_EVENTS = [
   "payout.created",
   "payout.updated",
   "payout.reversed",
+  // Connected account KYC / onboarding status changes.
+  "account.updated",
 ] as const;
 
 export type SupportedEvent = (typeof SUPPORTED_EVENTS)[number];
@@ -363,6 +369,18 @@ export async function handleWhopRefund(
 
   if (!posted.ok) return { kind: "failed", category: `refund_accounting_${posted.reason}` };
 
+  // Unwind the creator earning and its revenue-split journal. A failure here is
+  // logged but does not fail the delivery — the provider-side accounting is
+  // already posted and idempotent, and the earning status will be visibly wrong
+  // in reconciliation until a manual fix or redelivery resolves it.
+  await reverseForRefund({
+    whopPaymentId: outcome.paymentId,
+    refundId: outcome.refundId,
+    refundAmountMinor: outcome.amountMinor,
+    currency: outcome.currency,
+    environment,
+  });
+
   return { kind: "handled" };
 }
 
@@ -431,6 +449,22 @@ export async function handleWhopDispute(
   if (!posted.ok) {
     return { kind: "failed", category: `dispute_accounting_${posted.reason ?? "unknown"}` };
   }
+
+  // When the dispute is lost, unwind the creator earning and its revenue-split
+  // journal. Like the refund path, a failure is not fatal to the delivery (the
+  // chargeback accounting already posted), but the inconsistency will surface in
+  // reconciliation.
+  if (outcome.status === "lost") {
+    const environment = getWhopEnvironment();
+    if (environment) {
+      await reverseForDispute({
+        whopPaymentId: outcome.paymentId,
+        whopDisputeId: outcome.resourceId,
+        environment,
+      });
+    }
+  }
+
   return { kind: "handled" };
 }
 
@@ -497,8 +531,97 @@ function describeDisputeMapping(outcome: DisputeMappingOutcome | AlertMappingOut
   }
 }
 
-export async function handleWhopPayoutUpdated(): Promise<HandlerResult> {
+/**
+ * Handles payout lifecycle events from Whop:
+ *   payout.created  — a payout has been initiated (already tracked by us)
+ *   payout.updated  — status change; we look for "paid"/"completed" to confirm
+ *   payout.reversed — the payout was reversed; write a reversal journal entry
+ *
+ * The provider transfer id (`tr_…` or `pay_…`) is the key. We match it
+ * against `creator_transfers.provider_transfer_id`.
+ *
+ * A payout.created event for an id we do not recognise is silently acknowledged
+ * — it may be a non-creator payout (e.g. platform-to-platform) that we do not
+ * track.
+ */
+export async function handleWhopPayoutUpdated(
+  resourceId: string | null,
+  _webhookId: string,
+  body: unknown,
+): Promise<HandlerResult> {
+  const root = (body ?? {}) as Record<string, unknown>;
+  const data = (root.data ?? root.object ?? root) as Record<string, unknown>;
+
+  // Extract the provider transfer id from the payload
+  const payoutId =
+    resourceId ??
+    readString(data, "id") ??
+    readString(data, "transfer_id") ??
+    readString(data, "payout_id");
+
+  if (!payoutId) return { kind: "business_mapping_not_implemented" };
+
+  // Determine the event from the payload status or the event_type field
+  const eventType = readString(root, "event") ?? readString(root, "type") ?? "";
+  const payoutStatus = readString(data, "status") ?? "";
+
+  const isReversed =
+    eventType.includes("reversed") ||
+    payoutStatus === "reversed" ||
+    payoutStatus === "failed";
+
+  const isCompleted =
+    !isReversed && (
+      payoutStatus === "paid" ||
+      payoutStatus === "completed" ||
+      payoutStatus === "succeeded"
+    );
+
+  if (isReversed) {
+    const result = await markTransferReversed(payoutId);
+    // If we don't recognise the id, it's not our payout — acknowledge silently.
+    if (!result.ok) return { kind: "business_mapping_not_implemented" };
+    return { kind: "handled" };
+  }
+
+  if (isCompleted) {
+    const result = await markTransferCompleted(payoutId);
+    if (!result.ok) return { kind: "business_mapping_not_implemented" };
+    return { kind: "handled" };
+  }
+
+  // payout.created / other statuses — no action needed
   return { kind: "business_mapping_not_implemented" };
+}
+
+/**
+ * Updates the local status of a connected account when Whop reports a KYC or
+ * onboarding status change.
+ *
+ * The account `id` and `status` come from the webhook payload. We only update
+ * rows that already exist in our DB — this handler never creates new rows.
+ * An account we do not recognise is acknowledged and ignored: it belongs to
+ * another ClipRewards environment or predates the current DB.
+ */
+export async function handleWhopAccountUpdated(
+  body: unknown,
+): Promise<HandlerResult> {
+  const environment = getWhopEnvironment();
+  if (!environment) return { kind: "failed", category: "unconfigured" };
+
+  const root = (body ?? {}) as Record<string, unknown>;
+  const data = (root.data ?? root.object ?? root) as Record<string, unknown>;
+
+  const accountId = readString(data, "id");
+  const status = readString(data, "status");
+
+  if (!accountId || !status) return { kind: "business_mapping_not_implemented" };
+  if (!/^biz_[A-Za-z0-9]{4,}$/.test(accountId)) return { kind: "business_mapping_not_implemented" };
+
+  const result = await updateConnectedAccountStatus(accountId, environment, status);
+  if (!result.ok) return { kind: "failed", category: result.reason };
+
+  return { kind: "handled" };
 }
 
 /**
@@ -558,7 +681,7 @@ type OwnershipOutcome =
   /** Disputes and cases: readable, but names no payment. A refusal. */
   | { kind: "no_payment_reference" };
 
-type Handler = (resourceId: string | null, webhookId: string) => Promise<HandlerResult>;
+type Handler = (resourceId: string | null, webhookId: string, body?: unknown) => Promise<HandlerResult>;
 
 const HANDLERS: Record<SupportedEvent, Handler> = {
   // Five of the six route to the same resolver. That is deliberate: the
@@ -587,9 +710,10 @@ const HANDLERS: Record<SupportedEvent, Handler> = {
   "resolution_center_case.created": handleWhopResolutionCase,
   "resolution_center_case.updated": handleWhopResolutionCase,
   "resolution_center_case.decided": handleWhopResolutionCase,
-  "payout.created": handleWhopPayoutUpdated,
-  "payout.updated": handleWhopPayoutUpdated,
-  "payout.reversed": handleWhopPayoutUpdated,
+  "payout.created": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
+  "payout.updated": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
+  "payout.reversed": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
+  "account.updated": (_id, _wid, body) => handleWhopAccountUpdated(body),
 };
 
 /* ------------------------------ processing -------------------------------- */
@@ -670,14 +794,19 @@ export async function processVerifiedWebhook(
 
   const { eventType, resourceId, companyId } = readEnvelope(body);
 
-  // A verified event for someone else's company is quarantined, not processed.
-  // It is still acknowledged: the signature was valid, so retrying it would
-  // only repeat the same conclusion.
+  // A verified event for someone else's company is quarantined, not processed —
+  // UNLESS it originates from a known child (connected) account. Whop delivers
+  // ALL events (platform + child) to the platform endpoint; child events carry
+  // the child's `biz_` id as `company_id`. We check the DB before quarantining
+  // so that payout and account events from creators flow through normally.
   const expectedCompany = getWhopCompanyId();
   const wrongCompany = Boolean(companyId && expectedCompany && companyId !== expectedCompany);
+  const isChildAccount = wrongCompany && companyId
+    ? (await resolveChildAccount(companyId)) !== null
+    : false;
 
   const supported = isSupportedEvent(eventType);
-  const initialStatus = wrongCompany ? "rejected_company" : supported ? "received" : "unsupported";
+  const initialStatus = (wrongCompany && !isChildAccount) ? "rejected_company" : supported ? "received" : "unsupported";
 
   // (1) First delivery. The primary key decides the winner, not the caller.
   const claimed = await db
@@ -747,7 +876,7 @@ export async function processVerifiedWebhook(
     // Reclaimed: we now own a previously failed or abandoned delivery.
   }
 
-  if (wrongCompany) return { ack: true, status: "rejected_company" };
+  if (wrongCompany && !isChildAccount) return { ack: true, status: "rejected_company" };
   if (!supported) return { ack: true, status: "unsupported" };
 
   // AUTHORITATIVE OWNERSHIP, before any handler.
@@ -821,7 +950,7 @@ export async function processVerifiedWebhook(
   }
 
   try {
-    const result = await HANDLERS[eventType](resourceId, webhookId);
+    const result = await HANDLERS[eventType](resourceId, webhookId, body);
 
     if (result.kind === "failed") {
       await db

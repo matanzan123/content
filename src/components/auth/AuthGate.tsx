@@ -1,14 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { Link } from "@/i18n/Link";
 import { useAuth } from "./AuthProvider";
 import { useT } from "@/i18n/provider";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 
 /**
- * Renders `children` once a Google account is signed in; otherwise shows the
- * sign-in panel. Used by /onboarding so "Become a Creator" lands on sign-in
- * first and continues into the wizard without a second navigation.
+ * Renders `children` once a user is signed in; otherwise shows the sign-in
+ * panel (Google + email/password). Used by /onboarding so "Become a Creator"
+ * lands on sign-in first and continues into the wizard without a second
+ * navigation.
  */
 export function AuthGate({
   title,
@@ -19,8 +21,14 @@ export function AuthGate({
   subtitle: string;
   children: React.ReactNode;
 }) {
-  const { user, loading, configured, error } = useAuth();
+  const { user, loading, configured, error, signInWithEmail, signUpWithEmail, resetPassword } =
+    useAuth();
   const t = useT().onboarding;
+
+  const [mode, setMode] = useState<"signin" | "signup" | "reset">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
 
   if (loading) {
     return (
@@ -31,6 +39,27 @@ export function AuthGate({
   }
 
   if (user) return <>{children}</>;
+
+  const isReset = mode === "reset";
+  const isSignUp = mode === "signup";
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      if (isReset) {
+        await resetPassword(email);
+      } else if (isSignUp) {
+        await signUpWithEmail(email, password);
+      } else {
+        await signInWithEmail(email, password);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const isSuccess = error === "resetSent";
 
   return (
     <div className="mx-auto max-w-[440px] rounded-[var(--radius-token-lg)] bg-surface p-9 text-center shadow-[var(--shadow-float)]">
@@ -60,8 +89,103 @@ export function AuthGate({
         <GoogleSignInButton />
       </div>
 
+      {/* Divider */}
+      <div className="my-5 flex items-center gap-3">
+        <span className="h-px flex-1 bg-line" />
+        <span className="text-[12px] font-medium text-ink-soft">{t.orContinueWith}</span>
+        <span className="h-px flex-1 bg-line" />
+      </div>
+
+      {/* Email / password form */}
+      <form onSubmit={handleSubmit} className="space-y-3 text-start">
+        <div>
+          <label
+            className="mb-1 block text-[12.5px] font-medium text-ink-soft"
+            htmlFor="auth-email"
+          >
+            {t.emailLabel}
+          </label>
+          <input
+            id="auth-email"
+            type="email"
+            autoComplete="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder={t.emailPlaceholder}
+            className="w-full rounded-[var(--radius-token-md)] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+          />
+        </div>
+
+        {!isReset && (
+          <div>
+            <label
+              className="mb-1 block text-[12.5px] font-medium text-ink-soft"
+              htmlFor="auth-password"
+            >
+              {t.passwordLabel}
+            </label>
+            <input
+              id="auth-password"
+              type="password"
+              autoComplete={isSignUp ? "new-password" : "current-password"}
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={t.passwordPlaceholder}
+              className="w-full rounded-[var(--radius-token-md)] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+            />
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy}
+          className="w-full rounded-[var(--radius-token-md)] bg-accent py-2.5 text-[14px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {busy
+            ? t.loading
+            : isReset
+              ? t.sendReset
+              : isSignUp
+                ? t.createAccount
+                : t.signInWithEmail}
+        </button>
+      </form>
+
+      {/* Mode toggles */}
+      <div className="mt-4 flex justify-center gap-4 text-[12.5px] text-ink-soft">
+        {!isReset && (
+          <button
+            type="button"
+            className="font-medium text-ink underline underline-offset-2"
+            onClick={() => setMode(isSignUp ? "signin" : "signup")}
+          >
+            {isSignUp ? t.alreadyHaveAccount : t.noAccount}
+          </button>
+        )}
+        {!isReset && !isSignUp && (
+          <button
+            type="button"
+            className="font-medium text-ink underline underline-offset-2"
+            onClick={() => setMode("reset")}
+          >
+            {t.forgotPassword}
+          </button>
+        )}
+        {isReset && (
+          <button
+            type="button"
+            className="font-medium text-ink underline underline-offset-2"
+            onClick={() => setMode("signin")}
+          >
+            {t.backToSignIn}
+          </button>
+        )}
+      </div>
+
       {error && (
-        <p role="alert" className="mt-4 text-[13px] font-medium text-red-600">
+        <p role="alert" className={`mt-4 text-[13px] font-medium ${isSuccess ? "text-green-700" : "text-red-600"}`}>
           {t[error]}
         </p>
       )}

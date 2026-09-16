@@ -3,6 +3,10 @@ import { requireApprovedPage } from "@/lib/server/page-guard";
 import { getI18n } from "@/i18n/server";
 import { alternateLanguages } from "@/i18n/config";
 import { WhopConnectionCard } from "@/components/dashboard/WhopConnectionCard";
+import { WhopVerificationCard } from "@/components/dashboard/WhopVerificationCard";
+import { WhopPayoutStatusCard } from "@/components/dashboard/WhopPayoutStatusCard";
+import { CreatorEarningsCard } from "@/components/dashboard/CreatorEarningsCard";
+import { CreatorWithdrawCard } from "@/components/dashboard/CreatorWithdrawCard";
 
 type Params = {
   params: Promise<{ locale: string }>;
@@ -48,6 +52,11 @@ export default async function DashboardPage({ params, searchParams }: Params) {
   const raw = search.whop;
   const notice = typeof raw === "string" && raw.length <= 32 ? raw : null;
 
+  // When the creator returns from Whop's hosted KYC flow, the query param
+  // triggers a fresh status read. It is NEVER treated as proof of completion.
+  const kycReturn = search.step === "kyc_return";
+  const payoutReturn = search.step === "payout_return";
+
   return (
     <main id="main-content" className="flex-1 px-5 py-14 sm:py-16">
       <div className="mx-auto max-w-[720px]">
@@ -61,9 +70,15 @@ export default async function DashboardPage({ params, searchParams }: Params) {
           {t.dashboard.subtitle}
         </p>
 
-        <div className="mt-9">
+        <div className="mt-9 space-y-5">
           {context.mayConnectWhop ? (
-            <WhopConnectionCard locale={locale} notice={notice} />
+            <>
+              <WhopConnectionCard locale={locale} notice={notice} />
+              <WhopVerificationCard kycReturn={kycReturn} />
+              <WhopPayoutStatusCard payoutReturn={payoutReturn} />
+              <CreatorEarningsCard />
+              <CreatorWithdrawCard />
+            </>
           ) : (
             /* An administrator reaching this page: approved, but with no Whop
                account of their own. Saying so beats a button that 403s. */

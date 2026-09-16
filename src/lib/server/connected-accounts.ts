@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { whopAccounts } from "@/lib/db/schema";
 import type { WhopEnvironmentName } from "./whop-payments";
@@ -31,6 +31,42 @@ export type ConnectedAccount = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+export type StatusUpdateResult =
+  | { ok: true; updated: boolean }
+  | { ok: false; reason: "unconfigured" | "storage_error" };
+
+/**
+ * Updates the status of a connected account, keyed by its Whop account id.
+ *
+ * Called by the `account.updated` webhook when Whop reports that KYC or
+ * onboarding status has changed. The row is never created here — only an
+ * account that already exists in our DB is updated.
+ */
+export async function updateConnectedAccountStatus(
+  whopAccountId: string,
+  environment: WhopEnvironmentName,
+  status: string,
+): Promise<StatusUpdateResult> {
+  const db = getDb();
+  if (!db) return { ok: false, reason: "unconfigured" };
+
+  try {
+    const updated = await db
+      .update(whopAccounts)
+      .set({ status, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(whopAccounts.whopAccountId, whopAccountId),
+          eq(whopAccounts.environment, environment),
+        ),
+      )
+      .returning({ id: whopAccounts.id });
+    return { ok: true, updated: updated.length > 0 };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
 
 function toAccount(row: typeof whopAccounts.$inferSelect): ConnectedAccount {
   return {
