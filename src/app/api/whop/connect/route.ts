@@ -10,6 +10,7 @@ import {
   createRandomToken,
   resolveOAuthConfig,
 } from "@/lib/server/whop-oauth";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    START "CONNECT WHOP".
@@ -65,6 +66,9 @@ export async function POST(request: Request) {
   const gate = await requireWhopEligible(request);
   if (gate.denied) return gate.response;
   const auth = { ok: true as const, user: { uid: gate.context.uid as string } };
+
+  const rl = await checkRateLimit(`whop:connect:${auth.user.uid}`, 10);
+  if (!rl.ok) return rateLimitResponse();
 
   const config = resolveOAuthConfig();
   if (!config.ok) return json({ error: "unavailable" }, 503);

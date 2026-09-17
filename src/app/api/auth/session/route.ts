@@ -9,6 +9,7 @@ import {
   userSessionCookieOptions,
 } from "@/lib/server/user-session";
 import { provisionUser } from "@/lib/server/users";
+import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    ORDINARY-USER SESSION EXCHANGE
@@ -51,6 +52,9 @@ export async function POST(request: Request) {
   // A session mint is a state-changing POST; a cross-site page must not be
   // able to trigger one on a visitor's behalf.
   if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
+
+  const rl = await checkRateLimit(`auth:session:${getClientIp(request.headers)}`, 10);
+  if (!rl.ok) return rateLimitResponse();
 
   const auth = getAdminAuth();
   // Deny by default: with no service account the server can verify nobody.

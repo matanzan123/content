@@ -78,7 +78,7 @@ export const ACCOUNTS = {
     normalBalance: "credit",
     postable: true,
     description:
-      "Sales tax or VAT collected from a customer and owed onwards. Posted only from the provider's own `tax_amount`; never derived from a rate.",
+      "Sales tax or VAT collected from a customer and owed onwards. Whop is Merchant of Record and handles remittance in most jurisdictions. Posted only from the provider's own `tax_amount`; never derived from a rate. The `source_detail` column on each leg carries the buyer's billing country (ISO 3166-1 alpha-2) as a jurisdiction proxy — query on that column for per-country breakdowns. This is informational: the country code is not a substitute for a formal tax-reporting integration.",
   },
 
   creator_payable: {
@@ -138,7 +138,7 @@ export const ACCOUNTS = {
     normalBalance: "debit",
     postable: false,
     description:
-      "Difference arising when a movement settles in a currency other than the one it was charged in. Declared so a multi-currency posting has somewhere honest to go; nothing posts to it, and no posting is ever forced to balance through it.",
+      "Difference arising when a movement settles in a currency other than the one it was charged in. POLICY DECISION: Whop is Merchant of Record and performs the FX conversion internally before paying out to the platform. The net we receive is already in the settlement currency; no FX leg is ever needed on our side. This account remains declared but non-postable — if policy changes, enable it here.",
   },
 } as const satisfies Record<string, AccountDefinition>;
 
@@ -191,6 +191,12 @@ export const ECONOMIC_EVENTS = [
   "revenue_split",
   /** Revenue split unwound for a refund or dispute loss. */
   "revenue_split_reversed",
+  /**
+   * Correction posted when actual provider fees differ from what was posted at
+   * settlement time. Positive delta = fees higher than originally recorded;
+   * negative delta = fees lower (e.g. refund or fee cap applied later).
+   */
+  "provider_fee_reconciled",
   /** A human correction, which always carries an audit record. */
   "manual_adjustment",
   /** The exact opposite of an earlier transaction. See `reverseTransaction`. */
@@ -217,6 +223,7 @@ export const IMPLEMENTED_EVENTS: ReadonlySet<EconomicEvent> = new Set<EconomicEv
   "payout_reversed",
   "revenue_split",
   "revenue_split_reversed",
+  "provider_fee_reconciled",
   "reversal",
 ]);
 

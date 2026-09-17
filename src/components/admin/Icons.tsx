@@ -35,6 +35,21 @@ const PATHS: Record<IconName, React.ReactNode> = {
       <path d="M16.5 7.5c0-1.7-2-2.5-4.5-2.5s-4.5.9-4.5 2.6S9.3 10 12 10.5s4.5 1 4.5 2.9-2 2.6-4.5 2.6-4.5-.8-4.5-2.5" />
     </>
   ),
+  finance: (
+    <>
+      <path d="M4 6h16M4 12h16M4 18h10" />
+      <circle cx="18" cy="18" r="3" />
+      <path d="M18 16.5v1.5l1 1" />
+    </>
+  ),
+  migration: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="1.2" />
+      <rect x="14" y="14" width="7" height="7" rx="1.2" />
+      <path d="M10 6.5h2.5a2 2 0 012 2V10" />
+      <path d="M14 9l2.5 1-2.5 1" />
+    </>
+  ),
 };
 
 export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) {

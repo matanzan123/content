@@ -2,6 +2,7 @@ import { withAdminApi } from "@/lib/server/admin-guard";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { writeAudit } from "@/lib/server/admin-audit";
 import { initiateCreatorTransfer } from "@/lib/server/creator-transfers";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    POST /api/admin/transfer/creator
@@ -69,6 +70,9 @@ export async function POST(request: Request) {
   if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
 
   return withAdminApi(async (adminContext) => {
+    const rl = await checkRateLimit(`admin:transfer:${adminContext.uid}`, 20);
+    if (!rl.ok) return rateLimitResponse();
+
     // Parse body
     let body: Record<string, unknown>;
     try {

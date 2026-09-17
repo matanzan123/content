@@ -1,12 +1,14 @@
 import "server-only";
 
-import { and, asc, eq, inArray, not, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, not, or } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
-import { canRelease, type EarningStatus } from "./creator-earnings-policy";
+import { canRelease } from "./creator-earnings-policy";
 import { fetchPayoutStatus } from "./whop-payout-status";
 import { initiateCreatorTransfer } from "./creator-transfers";
 import { getConnectedAccount } from "./connected-accounts";
 import { resolvePlatformConfig } from "./whop-accounts";
+import { getWhopEnvironment } from "./whop-payments";
+import { notifyWithdrawalProcessing } from "./notification-triggers";
 
 /* ==========================================================================
    CREATOR WITHDRAWALS — lifecycle management for creator-requested payouts.
@@ -198,6 +200,12 @@ export async function requestWithdrawal(
 
   const reservedAmountMinor = runningTotal;
 
+  // Resolve the environment before inserting. A row written with the wrong
+  // environment would be permanently miscategorised if the subsequent platform
+  // check never ran (e.g. process crash, unconfigured WHOP_ENV).
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false, reason: "db_unavailable" };
+
   // Create the withdrawal row
   let withdrawalId: string;
   try {
@@ -205,7 +213,7 @@ export async function requestWithdrawal(
       .insert(schema.creatorWithdrawals)
       .values({
         firebaseUid,
-        environment: "sandbox", // will be overridden below
+        environment,
         amountMinor,
         reservedAmountMinor,
         currency,
@@ -258,12 +266,6 @@ export async function requestWithdrawal(
   let finalStatus: WithdrawalStatus = "requested";
 
   if (platform.ok) {
-    // Update the environment now that we know it
-    await db
-      .update(schema.creatorWithdrawals)
-      .set({ environment: platform.config.environment, updatedAt: now })
-      .where(eq(schema.creatorWithdrawals.withdrawalId, withdrawalId));
-
     const account = await getConnectedAccount(firebaseUid, platform.config.environment);
     if (account) {
       const payoutStatus = await fetchPayoutStatus(account.whopAccountId).catch(() => null);
@@ -355,6 +357,8 @@ export async function processWithdrawal(
       updatedAt: now,
     })
     .where(eq(schema.creatorWithdrawals.withdrawalId, withdrawalId));
+
+  notifyWithdrawalProcessing(withdrawal.firebaseUid, withdrawalId).catch(() => {});
 
   return { ok: true, transferId: transferResult.transferId };
 }

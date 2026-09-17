@@ -8,6 +8,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -608,6 +609,13 @@ export const economicEventEnum = pgEnum("economic_event", [
    * CR unallocated_customer_funds (back to suspense, drained by payment_refunded)
    */
   "revenue_split_reversed",
+  /**
+   * Correction when actual provider fees differ from the settlement posting:
+   * DR provider_fee_expense  [positive delta — fees higher than recorded]
+   * CR provider_balance      [balancing leg]
+   * (signs flip for a negative delta — fees lower than recorded)
+   */
+  "provider_fee_reconciled",
 ]);
 
 /** The chart of accounts. Mirrors ACCOUNTS in src/lib/server/accounting/accounts.ts. */
@@ -1878,4 +1886,96 @@ export const googleOauthStates = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
   (t) => [index("idx_google_oauth_states_expires").on(t.expiresAt)],
+);
+
+/* =========================================================================
+   NOTIFICATIONS — append-only, per-user, deduplication by idempotency key.
+
+   DEDUPLICATION CONTRACT: `idempotency_key` is UNIQUE. Every writer is
+   responsible for choosing a key that is stable across retries for the same
+   logical event. A webhook redelivery must produce the same key → ON CONFLICT
+   DO NOTHING → exactly one notification per event.
+
+   KEY FORMAT: "{type}:{stable_resource_id}"
+     e.g. "kyc_required:biz_abc123", "payout_succeeded:tr_xyz"
+   For state-transition notifications (KYC), include the state in the key so
+   a cycle (approved → revoked → approved) can re-notify.
+
+   CHANNEL is "in_app" only today. Email delivery can be added by:
+     1. Adding "email" to the enum
+     2. Writing a separate email-delivery worker that reads undelivered rows
+
+   STATUS tracks read state, not delivery state. "unread" → "read". The row
+   is never deleted — the audit trail must survive.
+   ========================================================================= */
+
+/* =========================================================================
+   RATE LIMITING — fixed-window counters, one row per (key, hourly window).
+
+   KEY FORMAT: "{route_slug}:{identifier}"
+     identifier is the client IP for unauthenticated endpoints, or the
+     firebaseUid for authenticated ones.
+
+   WINDOW KEY: Math.floor(Date.now() / 3_600_000).toString()
+     All requests in the same UTC hour share one row. Old rows accumulate
+     harmlessly and can be purged with:
+       DELETE FROM rate_limit_counters WHERE window_key < '<current_hour - 24>'
+
+   ATOMICITY: the UPSERT increments the counter in a single statement, so
+     concurrent requests on separate connections do not race.
+   ========================================================================= */
+
+export const rateLimitCounters = pgTable(
+  "rate_limit_counters",
+  {
+    key: text("key").notNull(),
+    windowKey: text("window_key").notNull(),
+    count: integer("count").notNull().default(1),
+  },
+  (t) => [primaryKey({ columns: [t.key, t.windowKey] })],
+);
+
+export const notificationChannelEnum = pgEnum("notification_channel", ["in_app"]);
+export const notificationStatusEnum = pgEnum("notification_status", ["unread", "read"]);
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    notificationId: uuid("notification_id").primaryKey().defaultRandom(),
+
+    /** Owner. FK enforces the user exists; the row is theirs, period. */
+    firebaseUid: text("firebase_uid").notNull(),
+
+    /**
+     * Semantic type — plain text, no enum migration needed to add a new one.
+     * Known values: kyc_required | kyc_approved | kyc_rejected |
+     *   payout_account_incomplete | earnings_held | payout_succeeded |
+     *   payout_failed | payout_reversed | dispute_opened | withdrawal_processing
+     */
+    type: text("type").notNull(),
+
+    channel: notificationChannelEnum("channel").notNull().default("in_app"),
+    status: notificationStatusEnum("status").notNull().default("unread"),
+
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+
+    /** Deep link shown alongside the notification. */
+    actionUrl: text("action_url"),
+
+    /** Source event context — never used for logic, only for debugging. */
+    metadata: jsonb("metadata").$type<Record<string, string | number | boolean | null>>(),
+
+    /**
+     * Deduplication key. Unique. A conflicting insert is silently ignored,
+     * which is the correct behaviour for a webhook retry.
+     */
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    readAt: timestamp("read_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_notifications_uid_created").on(t.firebaseUid, t.createdAt),
+  ],
 );

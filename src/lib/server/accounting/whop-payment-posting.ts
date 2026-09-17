@@ -67,11 +67,27 @@ export type SettlementFacts = {
   totalMinor: bigint;
   /** Tax portion of the total. Zero when no tax applied. */
   taxMinor: bigint;
+  /** Whether `tax_amount` was inside (`inclusive`) or on top of (`exclusive`) the price. */
+  taxBehavior: string | null;
+  /**
+   * ISO 3166-1 alpha-2 country code from the buyer's billing address, used as
+   * a proxy jurisdiction for the `tax_payable` leg's `sourceDetail`. Whop does
+   * not expose the exact tax authority; this is the best approximation
+   * available from their API without a separate tax-reporting integration.
+   * Null when no billing address was captured.
+   */
+  taxJurisdiction: string | null;
   /** What Whop keeps for us after its fees. */
   afterFeesMinor: bigint;
   /** One entry per fee line Whop reported. */
   fees: { origin: string; label: string; amountMinor: bigint }[];
   paidAt: Date | null;
+  /**
+   * True when `listFees` returned at least one line — fees are actual, not
+   * implied by the total/afterFees difference. False when fees were zero at
+   * posting time (provider may report them later via a reconciliation call).
+   */
+  feesAreActual: boolean;
 };
 
 export type FactsResult =
@@ -197,9 +213,12 @@ export async function fetchSettlementFacts(paymentId: string): Promise<FactsResu
       currency,
       totalMinor: total.minor,
       taxMinor,
+      taxBehavior: payment.tax_behavior ?? null,
+      taxJurisdiction: payment.billing_address?.country?.trim().toUpperCase() ?? null,
       afterFeesMinor: afterFees.minor,
       fees,
       paidAt: payment.paid_at ? new Date(payment.paid_at) : null,
+      feesAreActual: fees.length > 0,
     },
   };
 }
@@ -240,11 +259,18 @@ export function buildSettlementPosting(
   // Tax collected is owed onwards, not ours. Split out of the gross so the
   // suspense balance is money that might one day be earned, and the tax
   // balance is money that never can be.
+  //
+  // `sourceDetail` carries the buyer's billing country (ISO 3166-1 alpha-2) as
+  // the best available proxy for jurisdiction. Whop is Merchant of Record and
+  // does not expose the exact tax authority in their API, so this country code
+  // is informational — it enables per-country queries on the journal but is
+  // NOT a substitute for a proper tax reporting integration.
   if (facts.taxMinor !== BigInt(0)) {
     legs.push({
       account: "tax_payable",
       amountMinor: -facts.taxMinor,
       counterpartyType: "tax_authority",
+      sourceDetail: facts.taxJurisdiction ?? undefined,
     });
   }
 
@@ -265,6 +291,11 @@ export function buildSettlementPosting(
     sourceWebhookId: context.sourceWebhookId ?? null,
     description: "Whop payment settled",
     occurredAt: facts.paidAt,
+    metadata: {
+      fees_are_actual: facts.feesAreActual,
+      ...(facts.taxBehavior ? { tax_behavior: facts.taxBehavior } : {}),
+      ...(facts.taxJurisdiction ? { tax_jurisdiction: facts.taxJurisdiction } : {}),
+    },
     legs,
   };
 }

@@ -19,7 +19,7 @@ import { classifyRefundStatus } from "../refund-lifecycle";
 import { listRefundsForPayment } from "../whop-refunds";
 import { listRefundsForPaymentLocal } from "../payment-refunds";
 import { refundableBalance } from "../whop-refund-mapping";
-import { getWhopEnvironment } from "../whop-payments";
+import { getWhopEnvironment, getWhopPaymentsClient } from "../whop-payments";
 import { listDisputesForAccount, listLedgerMovementsForPayment } from "../whop-disputes";
 import { listDisputesForPaymentLocal } from "../payment-disputes";
 import {
@@ -27,6 +27,7 @@ import {
   isDisputeLineType,
   isPostableDisputeLine,
 } from "./whop-dispute-posting";
+import { currencyDecimals, decimalToMinor, normaliseCurrency } from "../money";
 
 /* ==========================================================================
    RECONCILIATION — four records, compared, nothing repaired.
@@ -1501,3 +1502,401 @@ export async function reconcileDisputesAgainstProvider(
 
   return findings;
 }
+
+/* ==========================================================================
+   PAYOUT RECONCILIATION.
+
+   THE SAME RULE, STATED ONCE MORE: nothing here writes. A payout posted in our
+   ledger that the provider has no record of, or one the provider completed that
+   never reached our journal, is a finding — not a fix. The operator decides.
+
+   NOTE ON SCOPE: `payout_sent` and `payout_reversed` are declared and
+   implemented events but the webhook posting rule for them does not yet exist.
+   This reconciliation therefore exists to detect the moment a payout the
+   provider completed has no journal entry, which is the signal that the posting
+   rule needs to be implemented or that a crash left a gap.
+
+   PAYOUT AMOUNT PARSING: the payouts API returns amounts as decimal strings
+   without a `decimals` field. We derive precision from the currency code using
+   the same table the rest of the build uses.
+   ========================================================================== */
+
+export type PayoutDiscrepancyCode =
+  /** Provider completed a payout; no `payout_sent` posting exists for it. */
+  | "payout_missing_ledger"
+  /** We hold a `payout_sent` posting; provider has no matching payout. */
+  | "payout_missing_at_provider"
+  /** Provider and our ledger disagree on the payout amount. */
+  | "payout_amount_mismatch"
+  /** Provider and our ledger disagree on the payout currency. */
+  | "payout_currency_mismatch"
+  /** More than one `payout_sent` transaction for one provider payout. */
+  | "payout_duplicate_ledger"
+  /** Provider could not be asked. Not a discrepancy — an unknown. */
+  | "payout_provider_unavailable"
+  /** A state that should not be reachable at all. */
+  | "payout_impossible_state";
+
+export type PayoutDiscrepancy = {
+  code: PayoutDiscrepancyCode;
+  payoutId: string | null;
+  transactionId: string | null;
+  detail: string;
+};
+
+export type PayoutReconciliationReport = {
+  configured: boolean;
+  payoutsChecked: number;
+  ledgerPayoutsChecked: number;
+  providerConsulted: boolean;
+  discrepancies: PayoutDiscrepancy[];
+};
+
+const EMPTY_PAYOUT_REPORT: PayoutReconciliationReport = {
+  configured: false,
+  payoutsChecked: 0,
+  ledgerPayoutsChecked: 0,
+  providerConsulted: false,
+  discrepancies: [],
+};
+
+/**
+ * Compares Whop's payout list against our `payout_sent` journal entries.
+ *
+ * `limit` caps how many provider payouts to examine in one pass. The provider
+ * returns newest-first; a limit of 100 covers the most recent payouts, which
+ * are the most likely to be affected by a recent incident.
+ *
+ * `payout_provider_unavailable` is its own code and never a conflict: an
+ * outage during the call is different from asking and disagreeing.
+ */
+export async function reconcilePayoutsAgainstProvider(
+  limit = 100,
+): Promise<PayoutReconciliationReport> {
+  const db = getDb();
+  const environment = getWhopEnvironment();
+  const client = getWhopPaymentsClient();
+
+  if (!db || !environment || !client) return EMPTY_PAYOUT_REPORT;
+
+  const findings: PayoutDiscrepancy[] = [];
+
+  // --- Provider side --------------------------------------------------
+  let providerPayouts: { id: string; status: string; amount: string; currency: string }[] = [];
+
+  try {
+    const page = await client.payouts.list({ first: limit } as Parameters<typeof client.payouts.list>[0]);
+    const items: unknown[] = Array.isArray((page as { data?: unknown[] }).data)
+      ? ((page as { data: unknown[] }).data)
+      : [];
+    providerPayouts = items.map((p) => {
+      const row = p as { id: string; status: string; amount: string; currency: string };
+      return { id: row.id, status: row.status, amount: row.amount, currency: row.currency };
+    });
+  } catch {
+    return {
+      configured: true,
+      payoutsChecked: 0,
+      ledgerPayoutsChecked: 0,
+      providerConsulted: false,
+      discrepancies: [
+        {
+          code: "payout_provider_unavailable",
+          payoutId: null,
+          transactionId: null,
+          detail: "payouts.list failed",
+        },
+      ],
+    };
+  }
+
+  // --- Ledger side ----------------------------------------------------
+  const ledgerPayouts = await db
+    .select({
+      transactionId: accountingTransactions.transactionId,
+      providerResourceId: accountingTransactions.providerResourceId,
+      currency: accountingTransactions.currency,
+      idempotencyKey: accountingTransactions.idempotencyKey,
+    })
+    .from(accountingTransactions)
+    .where(eq(accountingTransactions.economicEvent, "payout_sent"));
+
+  // provider_balance legs: sum per payout_sent transaction (negative = leaving).
+  const ledgerAmounts = new Map<string, bigint>();
+  if (ledgerPayouts.length > 0) {
+    const ledgerIds = ledgerPayouts.map((t) => t.transactionId);
+    const amountLegs = await db
+      .select({
+        transactionId: accountingEntries.transactionId,
+        total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
+      })
+      .from(accountingEntries)
+      .where(
+        and(
+          inArray(accountingEntries.transactionId, ledgerIds),
+          eq(accountingEntries.account, "provider_balance"),
+        ),
+      )
+      .groupBy(accountingEntries.transactionId);
+    for (const row of amountLegs) {
+      ledgerAmounts.set(row.transactionId, BigInt(row.total ?? "0"));
+    }
+  }
+
+  // Index ledger by provider payout id (stored in providerResourceId).
+  const ledgerByPayoutId = new Map<string, typeof ledgerPayouts>();
+  for (const t of ledgerPayouts) {
+    const key = t.providerResourceId ?? "";
+    const list = ledgerByPayoutId.get(key) ?? [];
+    list.push(t);
+    ledgerByPayoutId.set(key, list);
+  }
+  const providerIdSet = new Set(providerPayouts.map((p) => p.id));
+
+  // --- Compare provider → ledger --------------------------------------
+  for (const payout of providerPayouts) {
+    // Only completed payouts should have a posting.
+    if (payout.status !== "completed") continue;
+
+    const posted = ledgerByPayoutId.get(payout.id) ?? [];
+    if (posted.length === 0) {
+      findings.push({
+        code: "payout_missing_ledger",
+        payoutId: payout.id,
+        transactionId: null,
+        detail: `provider completed payout of ${payout.amount} ${payout.currency} has no payout_sent transaction`,
+      });
+      continue;
+    }
+    if (posted.length > 1) {
+      findings.push({
+        code: "payout_duplicate_ledger",
+        payoutId: payout.id,
+        transactionId: posted[0].transactionId,
+        detail: `${posted.length} payout_sent transactions for one payout`,
+      });
+    }
+
+    const t = posted[0];
+    const normalised = normaliseCurrency(payout.currency);
+    if (!normalised || normalised !== t.currency) {
+      findings.push({
+        code: "payout_currency_mismatch",
+        payoutId: payout.id,
+        transactionId: t.transactionId,
+        detail: `provider ${payout.currency}, ledger ${t.currency}`,
+      });
+      continue;
+    }
+
+    const decimals = currencyDecimals(normalised);
+    if (decimals === null) {
+      findings.push({
+        code: "payout_impossible_state",
+        payoutId: payout.id,
+        transactionId: t.transactionId,
+        detail: `unsupported currency ${normalised}`,
+      });
+      continue;
+    }
+    const providerMinor = decimalToMinor(payout.amount, decimals);
+    if (providerMinor === null) {
+      findings.push({
+        code: "payout_impossible_state",
+        payoutId: payout.id,
+        transactionId: t.transactionId,
+        detail: `could not parse provider amount "${payout.amount}" for ${normalised}`,
+      });
+      continue;
+    }
+    const ledgerMinor = ledgerAmounts.get(t.transactionId);
+    // provider_balance DR is negative (leaving balance) — absolute value should equal payout.
+    if (ledgerMinor !== undefined && -ledgerMinor !== providerMinor) {
+      findings.push({
+        code: "payout_amount_mismatch",
+        payoutId: payout.id,
+        transactionId: t.transactionId,
+        detail: `provider ${providerMinor.toString()}, ledger ${(-ledgerMinor).toString()}`,
+      });
+    }
+  }
+
+  // --- Compare ledger → provider --------------------------------------
+  for (const [payoutId, posted] of ledgerByPayoutId) {
+    if (payoutId.length > 0 && !providerIdSet.has(payoutId)) {
+      findings.push({
+        code: "payout_missing_at_provider",
+        payoutId,
+        transactionId: posted[0].transactionId,
+        detail: `payout_sent posting names ${payoutId}, which the provider does not list`,
+      });
+    }
+  }
+
+  return {
+    configured: true,
+    payoutsChecked: providerPayouts.length,
+    ledgerPayoutsChecked: ledgerPayouts.length,
+    providerConsulted: true,
+    discrepancies: findings,
+  };
+}
+
+/* ==========================================================================
+   PROVIDER FEE DRIFT SCAN.
+
+   This is the READ-ONLY counterpart of `reconcileProviderFees` in
+   `whop-fee-reconciliation.ts`. It does not correct anything; it identifies
+   which payment settlements were posted with `fees_are_actual: false` — meaning
+   Whop had not yet reported any fee lines at settlement time — and flags them
+   for human review or for a fee-reconciliation pass.
+
+   The flag is stored in the transaction's `metadata.fees_are_actual` field,
+   which `buildSettlementPosting` now sets on every payment settlement.
+   ========================================================================== */
+
+export type FeeDriftFinding = {
+  paymentId: string;
+  transactionId: string;
+  grossMinor: bigint;
+  currency: string;
+};
+
+export type FeeDriftReport = {
+  configured: boolean;
+  settlementsScanned: number;
+  /** Settlements posted without actual fee data — candidates for `reconcileProviderFees`. */
+  driftCandidates: FeeDriftFinding[];
+};
+
+/**
+ * Scans payment settlements for those posted without confirmed fee data.
+ *
+ * `fees_are_actual: false` in the metadata means either:
+ *   (a) The payment genuinely had no fees — unlikely for most payment methods.
+ *   (b) Whop had not yet reported fees when `payment.succeeded` fired.
+ *
+ * For (b), calling `reconcileProviderFees` later will post the missing delta.
+ * This function names the candidates; the operator or a scheduler decides when
+ * and whether to run the correction.
+ */
+export async function reconcileFeeDrift(limit = 500): Promise<FeeDriftReport> {
+  const db = getDb();
+  if (!db) return { configured: false, settlementsScanned: 0, driftCandidates: [] };
+
+  const settlements = await db
+    .select({
+      transactionId: accountingTransactions.transactionId,
+      providerResourceId: accountingTransactions.providerResourceId,
+      currency: accountingTransactions.currency,
+    })
+    .from(accountingTransactions)
+    .where(
+      and(
+        eq(accountingTransactions.economicEvent, "payment_settled"),
+        sql`(${accountingTransactions.metadata}->>'fees_are_actual')::text = 'false'`,
+      ),
+    )
+    .limit(limit);
+
+  if (settlements.length === 0) {
+    return { configured: true, settlementsScanned: 0, driftCandidates: [] };
+  }
+
+  const txnIds = settlements.map((s) => s.transactionId);
+  const grossRows = await db
+    .select({
+      transactionId: accountingEntries.transactionId,
+      total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
+    })
+    .from(accountingEntries)
+    .where(
+      and(
+        inArray(accountingEntries.transactionId, txnIds),
+        sql`${accountingEntries.account} in ('unallocated_customer_funds', 'tax_payable')`,
+      ),
+    )
+    .groupBy(accountingEntries.transactionId);
+
+  const grossByTxn = new Map(grossRows.map((r) => [r.transactionId, -BigInt(r.total ?? "0")]));
+
+  return {
+    configured: true,
+    settlementsScanned: settlements.length,
+    driftCandidates: settlements.map((s) => ({
+      paymentId: s.providerResourceId ?? "",
+      transactionId: s.transactionId,
+      grossMinor: grossByTxn.get(s.transactionId) ?? BigInt(0),
+      currency: s.currency,
+    })),
+  };
+}
+
+/* ==========================================================================
+   LEDGER TRIAL BALANCE.
+
+   Sums every journal entry per account. The result is the ledger's own view
+   of how much each account holds — not the provider's, not the database row's,
+   but what the accounting entries themselves add up to.
+
+   SIGN CONVENTION carries through: asset accounts should show a positive total
+   (debit normal balance), liability and revenue accounts a negative total
+   (credit normal balance). A reversed sign on an asset is not a balance check
+   failure, but it is a useful signal.
+
+   THIS FUNCTION NEVER TOUCHES THE PROVIDER. It is pure arithmetic on the local
+   journal and is safe to run at any time with no API cost.
+   ========================================================================== */
+
+export type TrialBalanceLine = {
+  account: string;
+  totalMinor: bigint;
+  entryCount: number;
+};
+
+export type TrialBalance = {
+  configured: boolean;
+  /** The sum of ALL entry legs. Must be zero if the journal is balanced. */
+  grandTotal: bigint;
+  lines: TrialBalanceLine[];
+  /** True when grand_total is exactly zero. */
+  balanced: boolean;
+};
+
+/**
+ * Returns the running balance for every account in the journal.
+ *
+ * The grand total should always be zero: every transaction's legs sum to zero,
+ * and the sum of all transactions is therefore also zero. A non-zero grand
+ * total means a posting violated the double-entry constraint.
+ */
+export async function ledgerTrialBalance(): Promise<TrialBalance> {
+  const db = getDb();
+  if (!db) return { configured: false, grandTotal: BigInt(0), lines: [], balanced: false };
+
+  const rows = await db
+    .select({
+      account: accountingEntries.account,
+      total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(accountingEntries)
+    .groupBy(accountingEntries.account)
+    .orderBy(accountingEntries.account);
+
+  const lines: TrialBalanceLine[] = rows.map((r) => ({
+    account: r.account,
+    totalMinor: BigInt(r.total ?? "0"),
+    entryCount: r.count,
+  }));
+
+  const grandTotal = lines.reduce((sum, l) => sum + l.totalMinor, BigInt(0));
+
+  return {
+    configured: true,
+    grandTotal,
+    lines,
+    balanced: grandTotal === BigInt(0),
+  };
+}
+

@@ -2,6 +2,7 @@ import { requireWhopEligible } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { getConnectedAccount } from "@/lib/server/connected-accounts";
 import { createPayoutPortalLink, resolvePlatformConfig } from "@/lib/server/whop-kyc";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    POST /api/whop/payout/portal
@@ -39,6 +40,9 @@ export async function POST(request: Request) {
   const gate = await requireWhopEligible(request);
   if (gate.denied) return gate.response;
   const firebaseUid = gate.context.uid as string;
+
+  const rl = await checkRateLimit(`whop:payout_portal:${firebaseUid}`, 20);
+  if (!rl.ok) return rateLimitResponse();
 
   const platform = resolvePlatformConfig();
   if (!platform.ok) return json({ error: "unavailable", reason: platform.reason }, 503);

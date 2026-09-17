@@ -5,6 +5,7 @@ import {
   getAdminCheck,
 } from "@/lib/server/admin-guard";
 import { getAdminAuth } from "@/lib/server/firebase-admin";
+import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    ADMIN SESSION EXCHANGE
@@ -33,6 +34,9 @@ function readIdToken(value: unknown): string | null {
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function POST(request: Request) {
+  const rl = await checkRateLimit(`admin:session:${getClientIp(request.headers)}`, 10);
+  if (!rl.ok) return rateLimitResponse();
+
   const auth = getAdminAuth();
   // Deny by default: with no service account the server cannot verify anyone.
   if (!auth) {

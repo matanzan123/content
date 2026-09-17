@@ -6,6 +6,7 @@ import {
   cancelWithdrawal,
   getWithdrawal,
 } from "@/lib/server/creator-withdrawals";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    /api/admin/withdrawals/[id]
@@ -56,6 +57,9 @@ export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
 
   return withAdminApi(async (adminCtx) => {
+    const rl = await checkRateLimit(`admin:withdrawal:${adminCtx.uid}`, 30);
+    if (!rl.ok) return rateLimitResponse();
+
     await writeAudit({
       adminUid: adminCtx.uid,
       adminEmail: adminCtx.email,

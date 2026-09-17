@@ -36,9 +36,24 @@ export default async function AdminLayout({
     // Sending them to the public /login would drop them into creator
     // onboarding, which cannot produce one.
     if (check.reason === "unauthenticated") {
+      // Pass ONLY the 8 labels AdminSignIn actually renders. The full t.admin
+      // object contains every admin nav label and would be serialized into the
+      // RSC payload that unauthenticated visitors receive.
       return (
         <div className="admin-root flex min-h-screen flex-col">
-          <AdminSignIn locale={locale} t={t.admin} />
+          <AdminSignIn
+            locale={locale}
+            t={{
+              signInTitle: t.admin.signInTitle,
+              signInBody: t.admin.signInBody,
+              signInContinueAs: t.admin.signInContinueAs,
+              signInWorking: t.admin.signInWorking,
+              signInAnother: t.admin.signInAnother,
+              signInStale: t.admin.signInStale,
+              signInForbidden: t.admin.signInForbidden,
+              signInFailed: t.admin.signInFailed,
+            }}
+          />
         </div>
       );
     }

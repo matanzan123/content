@@ -2,6 +2,7 @@ import { requireUser } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { bookInterview, cancelOwnBooking, getActiveBooking } from "@/lib/server/interviews";
 import { provisionBookingCalendar } from "@/lib/server/interview-calendar";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    INTERVIEW BOOKING.
@@ -50,6 +51,9 @@ export async function POST(request: Request) {
 
   const gate = await requireUser(request);
   if (gate.denied) return gate.response;
+
+  const rl = await checkRateLimit(`interview:book:${gate.context.uid as string}`, 5);
+  if (!rl.ok) return rateLimitResponse();
 
   const length = Number(request.headers.get("content-length") ?? "0");
   if (length > MAX_BODY_BYTES) {

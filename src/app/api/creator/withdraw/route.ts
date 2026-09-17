@@ -6,6 +6,7 @@ import {
   getActiveWithdrawal,
   listWithdrawals,
 } from "@/lib/server/creator-withdrawals";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,6 +47,9 @@ export async function POST(request: Request) {
   const gate = await requireWhopEligible(request);
   if (gate.denied) return gate.response;
   const firebaseUid = gate.context.uid as string;
+
+  const rl = await checkRateLimit(`creator:withdraw:${firebaseUid}`, 5);
+  if (!rl.ok) return rateLimitResponse();
 
   let body: Record<string, unknown>;
   try {

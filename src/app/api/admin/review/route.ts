@@ -74,7 +74,18 @@ export async function POST(request: Request) {
 
   /* --- optionally attach the Meet link staff pasted --- */
   if (typeof body?.meeting_url === "string" && typeof body?.booking_id === "string") {
-    const linked = await setMeetingUrl(body.booking_id, body.meeting_url);
+    // Validate that the URL is an absolute https: URL before storage. A
+    // javascript: or data: URL stored here could become a stored XSS vector
+    // if the URL is ever rendered as an <a href>.
+    let validatedUrl: string;
+    try {
+      const parsed = new URL(body.meeting_url);
+      if (parsed.protocol !== "https:") throw new Error("not https");
+      validatedUrl = parsed.toString();
+    } catch {
+      return Response.json({ error: "invalid_meeting_url" }, { status: 400, headers: NO_STORE });
+    }
+    const linked = await setMeetingUrl(body.booking_id, validatedUrl);
     if (!linked.ok) {
       return Response.json({ error: linked.reason }, { status: 400, headers: NO_STORE });
     }

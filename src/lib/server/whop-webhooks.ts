@@ -34,6 +34,7 @@ import { updateConnectedAccountStatus } from "./connected-accounts";
 import { markTransferCompleted, markTransferReversed } from "./creator-transfers";
 import { resolveChildAccount } from "./whop-child-router";
 import { reverseForRefund, reverseForDispute } from "./creator-earnings";
+import { fireWebhookNotifications } from "./notification-triggers";
 
 /* ==========================================================================
    WHOP WEBHOOK RECEIVER — server only.
@@ -961,6 +962,13 @@ export async function processVerifiedWebhook(
     }
 
     const status = result.kind === "handled" ? "processed" : "awaiting_mapping";
+
+    // Best-effort notifications: fire after the handler succeeds but before
+    // the receipt is committed. A notification failure NEVER fails the delivery.
+    if (status === "processed") {
+      await fireWebhookNotifications(eventType, resourceId, body).catch(() => {});
+    }
+
     await db
       .update(whopWebhookReceipts)
       .set({ status, processedAt: dbNow, failureCategory: null, claimedAt: null })
