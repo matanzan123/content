@@ -972,6 +972,10 @@ export const en = {
         provider_rejected: "Whop could not open the payout portal. Please try again.",
         unconfigured: "Whop is not configured on this server.",
         portal: "We could not open the payout portal. Please try again.",
+        unavailable: "Payout setup is temporarily unavailable. Please try again shortly.",
+        malformed_response: "Whop sent back an unexpected response. Please try again shortly.",
+        invalid_account_id: "There is a problem with your connected Whop account. Please contact support.",
+        not_found: "Your payout account could not be found at Whop. Please contact support.",
       } as Record<string, string>,
     },
     withdraw: {

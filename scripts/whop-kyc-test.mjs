@@ -245,7 +245,11 @@ console.log("\n--- A. account link request contract ---");
   check("the request sends NOTHING beyond the four contract fields",
     Object.keys(body).sort().join(",") === "company_id,refresh_url,return_url,use_case",
     Object.keys(body).sort().join(","));
-  check("expires_at is carried through without being persisted", r.expiresAt === "2026-01-01T00:00:00Z");
+  // The helper returns ONLY the url. `expires_at` is deliberately dropped —
+  // nothing consumed it, nothing persists a link, and a link is spent on the
+  // next click. A bounded result is the assertion that keeps it that way.
+  check("the result carries ONLY ok and url — no expires_at, no provider extras",
+    Object.keys(r).sort().join(",") === "ok,url", Object.keys(r).sort().join(","));
 }
 
 /* ==========================================================================
@@ -268,6 +272,32 @@ console.log("\n--- B/C. use cases ---");
   check("the two flows are distinguishable by their return step",
     kyc.calls[0].return_url.includes("step=kyc_return") &&
     portal.calls[0].return_url.includes("step=payout_return"));
+
+  // BOTH portal URLs asserted by EXACT VALUE, not by substring or by reading
+  // the source. The refresh url is the one Whop uses when the hosted session
+  // expires before the creator finishes; it was previously only covered
+  // indirectly (that the dashboard reads the token, and that the module
+  // contains the template), so a wrong origin, a missing locale segment or a
+  // swapped step would have gone unnoticed for the portal specifically.
+  check("the portal return_url is exactly the localized dashboard + payout_return",
+    portal.calls[0].return_url === "https://app.cliprewards.test/en/dashboard?step=payout_return",
+    portal.calls[0].return_url);
+  check("the portal refresh_url is exactly the localized dashboard + payout_refresh",
+    portal.calls[0].refresh_url === "https://app.cliprewards.test/en/dashboard?step=payout_refresh",
+    portal.calls[0].refresh_url);
+  check("the portal urls differ ONLY in the step token",
+    portal.calls[0].return_url.replace("payout_return", "X") ===
+    portal.calls[0].refresh_url.replace("payout_refresh", "X"));
+  check("the portal never borrows the KYC step tokens",
+    !portal.calls[0].return_url.includes("kyc") && !portal.calls[0].refresh_url.includes("kyc"));
+
+  // And in the other locale, so the portal's locale handling is proved too.
+  const portalHe = loadLinks({ locale: "he" });
+  await withEnv("https://app.cliprewards.test", () => portalHe.mod.createAccountLink(ACCOUNT, "payouts_portal"));
+  check("the portal urls follow the validated locale",
+    portalHe.calls[0].return_url === "https://app.cliprewards.test/he/dashboard?step=payout_return" &&
+    portalHe.calls[0].refresh_url === "https://app.cliprewards.test/he/dashboard?step=payout_refresh",
+    portalHe.calls[0].return_url);
 }
 
 /* ==========================================================================

@@ -3,6 +3,11 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { useT } from "@/i18n/provider";
+import {
+  resolvePortalOutcome,
+  shouldOfferPortal,
+  type PortalReadiness,
+} from "@/lib/dashboard/payout-portal";
 
 /* ==========================================================================
    WHOP PAYOUT STATUS CARD.
@@ -25,9 +30,8 @@ import { useT } from "@/i18n/provider";
    untranslated or unreviewed.
    ========================================================================== */
 
-type PayoutReadiness =
-  | "ready" | "pending" | "action_required"
-  | "destination_missing" | "restricted" | "not_ready" | "unknown";
+/** Shared with the pure helpers so the card and its tests cannot drift. */
+type PayoutReadiness = PortalReadiness;
 
 /** Closed-set tokens from the server. Never provider prose. */
 type BlockReason =
@@ -107,12 +111,15 @@ export function WhopPayoutStatusCard({ payoutReturn }: { payoutReturn?: boolean 
         headers: { authorization: `Bearer ${idToken}` },
       });
       const body = (await res.json().catch(() => null)) as { url?: string; error?: string } | null;
-      if (!res.ok || !body?.url) {
-        setActionError(errors[body?.error ?? ""] ?? t.errors.portal);
+
+      // One decision, made in one place, exercised directly by tests.
+      const outcome = resolvePortalOutcome(res.ok, body);
+      if (outcome.kind === "error") {
+        setActionError(errors[outcome.key] ?? t.errors.portal);
         setBusy(false);
         return;
       }
-      window.location.assign(body.url);
+      window.location.assign(outcome.url);
     } catch {
       setActionError(t.errors.network);
       setBusy(false);
@@ -205,7 +212,7 @@ function PayoutBody({
 
   // A suspended account is not recoverable by opening the payout portal, and
   // a button that cannot help is worse than none. Support is the next step.
-  const showButton = readiness !== "ready" && readiness !== "restricted";
+  const showButton = shouldOfferPortal(readiness);
 
   return (
     <>

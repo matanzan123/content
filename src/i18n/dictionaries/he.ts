@@ -955,6 +955,10 @@ export const he: Dictionary = {
         provider_rejected: "Whop לא הצליחו לפתוח את פורטל התשלום. נסו שוב.",
         unconfigured: "Whop לא מוגדר בשרת זה.",
         portal: "לא הצלחנו לפתוח את פורטל התשלום. נסו שוב.",
+        unavailable: "הגדרת התשלום אינה זמינה זמנית. נסו שוב בקרוב.",
+        malformed_response: "Whop החזירו תשובה לא צפויה. נסו שוב בקרוב.",
+        invalid_account_id: "קיימת תקלה בחשבון ה-Whop המחובר שלכם. אנא פנו לתמיכה.",
+        not_found: "לא נמצא חשבון התשלום שלכם ב-Whop. אנא פנו לתמיכה.",
       } as Record<string, string>,
     },
     withdraw: {

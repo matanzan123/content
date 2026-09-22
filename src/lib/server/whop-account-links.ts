@@ -74,7 +74,7 @@ export type AccountLinkFailure =
   | "invalid_account_id";
 
 export type AccountLinkResult =
-  | { ok: true; url: string; expiresAt: string | null }
+  | { ok: true; url: string }
   | { ok: false; reason: AccountLinkFailure };
 
 /* -------------------------------------------------------------------------
@@ -196,13 +196,11 @@ export async function createAccountLink(
       return { ok: false, reason: "malformed_response" };
     }
 
-    return {
-      ok: true,
-      url,
-      // Carried through because it costs nothing and lets a caller reason
-      // about staleness. Not persisted — a link is spent on the next click.
-      expiresAt: typeof link?.expires_at === "string" ? link.expires_at : null,
-    };
+    // ONLY the url. The response also carries `expires_at`, and it is
+    // deliberately dropped: no caller ever read it, nothing persists a link,
+    // and a link is spent on the next click. Plumbing a value nobody consumes
+    // invites a future reader to assume something depends on it.
+    return { ok: true, url };
   } catch (error) {
     logProviderRejection(useCase, error);
     return { ok: false, reason: classify(error) };

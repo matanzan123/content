@@ -656,8 +656,169 @@ console.log("\n--- P. translation coverage ---");
   const card = codeOnly("src/components/dashboard/WhopPayoutStatusCard.tsx");
   check("the card renders reasons through the dictionary, not raw tokens",
     card.includes("t.reasons") && card.includes("reasonCopy[r]"));
-  check("a restricted account is not offered a portal button it cannot use",
-    /showButton = readiness !== "ready" && readiness !== "restricted"/.test(card));
+  check("the card delegates the CTA decision rather than inlining it",
+    /showButton = shouldOfferPortal\(readiness\)/.test(card));
+  check("the card delegates the navigation decision too",
+    /resolvePortalOutcome\(res\.ok, body\)/.test(card));
+}
+
+/* ==========================================================================
+   PORTAL CTA AND NAVIGATION — the real product logic, called directly.
+
+   These two rules used to live as expressions inside the component, where a
+   test could only re-type them and watch its own copy pass. They are now pure
+   functions in `lib/dashboard/payout-portal.ts`, so the assertions below call
+   exactly what the card calls. No React, no DOM, no test framework — the same
+   transpile-and-invoke pattern the rest of this repo uses.
+   ========================================================================== */
+
+console.log("\n--- portal CTA and navigation ---");
+
+{
+  const js = ts.transpileModule(readFileSync("src/lib/dashboard/payout-portal.ts", "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const mod = { exports: {} };
+  new Function("module", "exports", "require", js)(mod, mod.exports, require);
+  const { shouldOfferPortal, resolvePortalOutcome } = mod.exports;
+
+  /* --- CTA availability, state by state --- */
+
+  for (const readiness of ["action_required", "destination_missing", "pending", "not_ready", "unknown"]) {
+    check(`CTA IS offered for ${readiness}`, shouldOfferPortal(readiness) === true);
+  }
+  // `ready` has nothing to set up; `restricted` is a provider suspension the
+  // hosted portal cannot lift, so the button would lead nowhere useful.
+  for (const readiness of ["ready", "restricted"]) {
+    check(`CTA is NOT offered for ${readiness}`, shouldOfferPortal(readiness) === false);
+  }
+  check("exactly two states withhold the CTA — no state is accidentally excluded",
+    ["ready", "pending", "action_required", "destination_missing", "restricted", "not_ready", "unknown"]
+      .filter((r) => !shouldOfferPortal(r)).sort().join(",") === "ready,restricted");
+
+  /* --- navigation safety --- */
+
+  const HTTPS = "https://sandbox.whop.com/payouts/abc";
+
+  check("a successful https url navigates",
+    JSON.stringify(resolvePortalOutcome(true, { url: HTTPS })) ===
+    JSON.stringify({ kind: "navigate", url: HTTPS }));
+
+  for (const [label, body] of [
+    ["a missing url", {}],
+    ["a null url", { url: null }],
+    ["an empty url", { url: "" }],
+    ["a non-string url", { url: 42 }],
+    ["a relative path", { url: "/dashboard" }],
+    ["an http url", { url: "http://whop.com/payouts" }],
+    ["a javascript: url", { url: "javascript:alert(1)" }],
+    ["a protocol-relative url", { url: "//evil.test/payouts" }],
+    ["a null body", null],
+  ]) {
+    const out = resolvePortalOutcome(true, body);
+    check(`${label} on a 200 does NOT navigate`,
+      out.kind === "error" && out.key === "portal", JSON.stringify(out));
+  }
+
+  check("a failed response never navigates, even carrying a url",
+    resolvePortalOutcome(false, { url: HTTPS, error: "provider_rejected" }).kind === "error");
+  check("and it surfaces the provider's TOKEN, not provider text",
+    resolvePortalOutcome(false, { error: "provider_rejected" }).key === "provider_rejected");
+  check("a failure with no token falls back to the generic portal key",
+    resolvePortalOutcome(false, {}).key === "portal" &&
+    resolvePortalOutcome(false, null).key === "portal");
+  check("a non-string error token cannot become the key",
+    resolvePortalOutcome(false, { error: { nested: "obj" } }).key === "portal");
+
+  /* --- busy guard --- */
+
+  // The guard is `if (!user || busy) return;` at the top of openPortal, with
+  // `busy` left SET through navigation so the button cannot be pressed again
+  // while the tab is loading away.
+  const card2 = codeOnly("src/components/dashboard/WhopPayoutStatusCard.tsx");
+  const openPortalBody = card2.slice(
+    card2.indexOf("async function openPortal()"),
+    card2.indexOf("const pillClass"),
+  );
+  check("openPortal returns early while busy — no duplicate link is minted",
+    /if \(!user \|\| busy\) return;/.test(openPortalBody));
+  check("busy is set before the request, not after",
+    openPortalBody.indexOf("setBusy(true)") < openPortalBody.indexOf("fetch("));
+  check("busy is cleared on every error path",
+    (openPortalBody.match(/setBusy\(false\)/g) ?? []).length === 2);
+  // On the SUCCESS path busy is deliberately NOT cleared: the tab is
+  // navigating away, and clearing it would re-enable the button during the
+  // load. (The catch block clears it, but that is a different path.)
+  check("busy stays SET through navigation, so the button cannot be re-pressed",
+    (() => {
+      const errorBranchEnd = openPortalBody.indexOf("window.location.assign");
+      const successPath = openPortalBody.slice(
+        openPortalBody.indexOf("return;", openPortalBody.indexOf("outcome.kind === \"error\"")),
+        errorBranchEnd,
+      );
+      return errorBranchEnd > 0 && !successPath.includes("setBusy(false)");
+    })());
+  check("the button is disabled and marked busy for assistive tech",
+    /disabled=\{busy\}/.test(card2) && /aria-busy=\{busy\}/.test(card2));
+  check("the portal link url is never logged or stored by the card",
+    !/console\.(log|error|warn)/.test(card2) && !/localStorage|sessionStorage/.test(card2));
+}
+
+/* ==========================================================================
+   DICTIONARY COMPLETENESS FOR THE PORTAL ROUTE
+
+   Route and dictionary drift silently: adding an error branch is a one-line
+   change, and the card's `errors[key] ?? t.errors.portal` fallback means a
+   missing string degrades to generic copy rather than crashing. This derives
+   the token set FROM THE ROUTE so a new branch fails here instead.
+   ========================================================================== */
+
+console.log("\n--- portal dictionary completeness ---");
+
+{
+  const route = codeOnly("src/app/api/whop/payout/portal/route.ts");
+
+  // Every `error: "..."` literal and every `{ error: result.reason }` branch.
+  const literals = [...route.matchAll(/error:\s*"([a-z_]+)"/g)].map((m) => m[1]);
+  // `result.reason` forwards the helper's failure union verbatim.
+  const helper = codeOnly("src/lib/server/whop-account-links.ts");
+  const union = helper.slice(helper.indexOf("export type AccountLinkFailure"), helper.indexOf("export type AccountLinkResult"));
+  const reasons = [...union.matchAll(/\|\s*"([a-z_]+)"/g)].map((m) => m[1]);
+
+  const emitted = [...new Set([...literals, ...reasons])]
+    // `forbidden` is the pre-auth origin rejection: the browser never renders
+    // it because the request was not same-origin in the first place.
+    .filter((k) => k !== "forbidden");
+
+  check("the token set was derived from the route and the helper, not hardcoded",
+    emitted.length >= 7, emitted.sort().join(","));
+
+  for (const dict of ["en", "he"]) {
+    const src = readFileSync(`src/i18n/dictionaries/${dict}.ts`, "utf8");
+    const start = src.indexOf("    payout: {");
+    const block = src.slice(start, src.indexOf("    withdraw: {", start));
+    const missing = emitted.filter((k) => !block.includes(`${k}:`));
+    check(`${dict}: every portal error token has payout copy`,
+      missing.length === 0 && block.length > 0, missing.join(",") || `${emitted.length} tokens`);
+  }
+
+  // Both dictionaries must carry the SAME key set, or one locale silently
+  // falls back to generic copy while the other explains the problem.
+  const keysOf = (dict) => {
+    const src = readFileSync(`src/i18n/dictionaries/${dict}.ts`, "utf8");
+    const start = src.indexOf("    payout: {");
+    const block = src.slice(start, src.indexOf("    withdraw: {", start));
+    const errs = block.slice(block.indexOf("errors: {"));
+    return [...errs.matchAll(/^\s{8}([a-z_]+):/gm)].map((m) => m[1]).sort();
+  };
+  check("en and he declare the identical payout error key set",
+    keysOf("en").join(",") === keysOf("he").join(","),
+    `en=${keysOf("en").length} he=${keysOf("he").length}`);
+
+  for (const k of ["unavailable", "malformed_response", "invalid_account_id", "not_found"]) {
+    check(`the newly added key "${k}" exists in both dictionaries`,
+      keysOf("en").includes(k) && keysOf("he").includes(k));
+  }
 }
 
 /* ============================== summary ============================== */
