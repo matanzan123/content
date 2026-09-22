@@ -3,6 +3,7 @@ import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { getConnectedAccount } from "@/lib/server/connected-accounts";
 import { fetchPayoutStatus } from "@/lib/server/whop-payout-status";
 import { resolvePlatformConfig } from "@/lib/server/whop-accounts";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    GET /api/whop/payout/status
@@ -41,6 +42,11 @@ export async function GET(request: Request) {
   const platform = resolvePlatformConfig();
   if (!platform.ok) return json({ error: "unavailable", reason: platform.reason }, 503);
 
+  // Every call is TWO live provider reads (account + payout methods), so an
+  // authenticated session must not be able to amplify into the provider.
+  const rl = await checkRateLimit(`whop:payout_status:${firebaseUid}`, 30);
+  if (!rl.ok) return rateLimitResponse();
+
   const account = await getConnectedAccount(firebaseUid, platform.config.environment);
   if (!account) return json({ ok: true, provisioned: false }, 200);
 
@@ -60,12 +66,21 @@ export async function GET(request: Request) {
       whop_account_id: account.whopAccountId,
       can_receive_payout: status.canReceivePayout,
       readiness: status.readiness,
+      // Closed-set tokens the card maps to controlled copy. This is what
+      // finally lets "not ready" say WHY.
+      reasons: status.reasons,
       capabilities: {
-        outbound: status.capabilities.outbound,
-        any_outbound_active: status.capabilities.anyOutboundActive,
+        payout: status.capabilities.payout,
+        any_payout_active: status.capabilities.anyPayoutActive,
+        any_payout_pending: status.capabilities.anyPayoutPending,
       },
-      pending_requirements: status.pendingRequirements,
-      past_due_requirements: status.pastDueRequirements,
+      // Counts and outcome only — never a masked account number, institution
+      // name or payer name.
+      destinations: {
+        outcome: status.destinations.outcome,
+        configured_count: status.destinations.configuredCount,
+      },
+      account_status: status.accountStatus,
     },
     200,
   );

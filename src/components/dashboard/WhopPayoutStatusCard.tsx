@@ -15,19 +15,29 @@ import { useT } from "@/i18n/provider";
    not yet added a bank account or completed the provider's payout setup.
 
    THE SERVER STAYS THE AUTHORITY. Status always comes from
-   GET /api/whop/payout/status, which reads account capabilities live.
+   GET /api/whop/payout/status, which reads the account AND the creator's
+   payout destinations live from the provider.
 
-   GET /payout_methods?account_id=... is NOT used here — it returned 403 in
-   sandbox (scope unavailable with the platform key). This is tracked in the
-   server response and shown in the "not_attempted" note if present.
+   "NOT READY" MUST SAY WHY. The server sends `reasons` as closed-set tokens
+   (`payout_method`, `verify_identity`, …) which map to copy in the
+   dictionaries. Provider prose, CTA URLs and bank details never reach the
+   browser, so the card can explain the blocker without rendering anything
+   untranslated or unreviewed.
    ========================================================================== */
 
-type PayoutReadiness = "ready" | "pending" | "restricted" | "not_ready" | "unknown";
+type PayoutReadiness =
+  | "ready" | "pending" | "action_required"
+  | "destination_missing" | "restricted" | "not_ready" | "unknown";
+
+/** Closed-set tokens from the server. Never provider prose. */
+type BlockReason =
+  | "verify_identity" | "payout_profile" | "payout_method"
+  | "information_request" | "action_required";
 
 type Phase =
   | { phase: "loading" }
   | { phase: "not_provisioned" }
-  | { phase: "ready"; readiness: PayoutReadiness; canReceive: boolean; pendingReqs: string[]; pastDueReqs: string[] }
+  | { phase: "ready"; readiness: PayoutReadiness; canReceive: boolean; reasons: BlockReason[] }
   | { phase: "error"; message: string };
 
 export function WhopPayoutStatusCard({ payoutReturn }: { payoutReturn?: boolean }) {
@@ -55,8 +65,7 @@ export function WhopPayoutStatusCard({ payoutReturn }: { payoutReturn?: boolean 
           provisioned?: boolean;
           readiness?: PayoutReadiness;
           can_receive_payout?: boolean;
-          pending_requirements?: string[];
-          past_due_requirements?: string[];
+          reasons?: BlockReason[];
           error?: string;
         } | null;
 
@@ -75,8 +84,7 @@ export function WhopPayoutStatusCard({ payoutReturn }: { payoutReturn?: boolean 
           phase: "ready",
           readiness: body.readiness ?? "unknown",
           canReceive: body.can_receive_payout ?? false,
-          pendingReqs: body.pending_requirements ?? [],
-          pastDueReqs: body.past_due_requirements ?? [],
+          reasons: body.reasons ?? [],
         });
       } catch {
         if (!cancelled) setPhase({ phase: "error", message: t.errors.network });
@@ -144,8 +152,7 @@ export function WhopPayoutStatusCard({ payoutReturn }: { payoutReturn?: boolean 
         {phase.phase === "ready" && (
           <PayoutBody
             readiness={phase.readiness}
-            pendingReqs={phase.pendingReqs}
-            pastDueReqs={phase.pastDueReqs}
+            reasons={phase.reasons}
             payoutReturn={payoutReturn}
             busy={busy}
             onOpen={openPortal}
@@ -169,16 +176,14 @@ type Copy = ReturnType<typeof useT>["dashboard"]["payout"];
 
 function PayoutBody({
   readiness,
-  pendingReqs,
-  pastDueReqs,
+  reasons,
   payoutReturn,
   busy,
   onOpen,
   t,
 }: {
   readiness: PayoutReadiness;
-  pendingReqs: string[];
-  pastDueReqs: string[];
+  reasons: BlockReason[];
   payoutReturn?: boolean;
   busy: boolean;
   onOpen: () => void;
@@ -187,12 +192,20 @@ function PayoutBody({
   const bodyText =
     readiness === "ready" ? t.readyBody :
     readiness === "pending" ? t.pendingBody :
+    readiness === "action_required" ? t.actionRequiredBody :
+    readiness === "destination_missing" ? t.destinationMissingBody :
     readiness === "restricted" ? t.restrictedBody :
     readiness === "not_ready" ? t.notReadyBody :
     t.unknownBody;
 
-  const blockingReqs = pastDueReqs.length > 0 ? pastDueReqs : pendingReqs;
-  const showButton = readiness !== "ready";
+  // Each server reason maps to copy WE control and translate. An unrecognised
+  // token renders nothing rather than leaking a raw provider string.
+  const reasonCopy: Record<string, string> = t.reasons;
+  const lines = reasons.map((r) => reasonCopy[r]).filter(Boolean);
+
+  // A suspended account is not recoverable by opening the payout portal, and
+  // a button that cannot help is worse than none. Support is the next step.
+  const showButton = readiness !== "ready" && readiness !== "restricted";
 
   return (
     <>
@@ -207,21 +220,21 @@ function PayoutBody({
 
       <p className="max-w-[58ch] text-[14px] leading-relaxed text-ink-soft">{bodyText}</p>
 
-      {blockingReqs.length > 0 && (
+      {lines.length > 0 && (
         <ul className="mt-3 space-y-1.5">
-          {blockingReqs.map((req) => (
-            <li key={req} className="flex items-start gap-2 text-[13.5px] font-medium text-ink">
+          {lines.map((line) => (
+            <li key={line} className="flex items-start gap-2 text-[13.5px] font-medium text-ink">
               <span className="mt-0.5 shrink-0 text-amber-500">
                 <AlertIcon />
               </span>
-              {req}
+              {line}
             </li>
           ))}
         </ul>
       )}
 
-      {readiness === "not_ready" && (
-        <p className="mt-4 text-[13px] text-ink-soft">{t.notReadyHint}</p>
+      {readiness === "restricted" && (
+        <p className="mt-4 text-[13px] text-ink-soft">{t.restrictedHint}</p>
       )}
 
       {showButton && (
@@ -258,6 +271,12 @@ function pillFor(phase: Phase, t: Copy): { className: string; label: string } {
   }
   if (phase.readiness === "pending") {
     return { className: `${base} bg-amber-100 text-amber-800`, label: t.statusPending };
+  }
+  if (phase.readiness === "action_required") {
+    return { className: `${base} bg-amber-100 text-amber-800`, label: t.statusActionRequired };
+  }
+  if (phase.readiness === "destination_missing") {
+    return { className: `${base} bg-amber-100 text-amber-800`, label: t.statusDestinationMissing };
   }
   if (phase.readiness === "restricted") {
     return { className: `${base} bg-red-100 text-red-800`, label: t.statusRestricted };

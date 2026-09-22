@@ -54,8 +54,13 @@ export default async function DashboardPage({ params, searchParams }: Params) {
 
   // When the creator returns from Whop's hosted KYC flow, the query param
   // triggers a fresh status read. It is NEVER treated as proof of completion.
-  const kycReturn = search.step === "kyc_return";
-  const payoutReturn = search.step === "payout_return";
+  // BOTH the return AND the refresh step re-read status. Whop sends the
+  // creator to `refresh_url` when the hosted session expired before they
+  // finished; landing there with a stale card would show an answer from
+  // before they started. Neither value is proof of anything — each is only a
+  // trigger to ask the provider again.
+  const kycReturn = search.step === "kyc_return" || search.step === "kyc_refresh";
+  const payoutReturn = search.step === "payout_return" || search.step === "payout_refresh";
 
   return (
     <main id="main-content" className="flex-1 px-5 py-14 sm:py-16">
