@@ -51,13 +51,39 @@ const check = (name, pass, detail) => {
 
 const SOURCE = "src/lib/server/whop-account-links.ts";
 
+/**
+ * A stand-in for the SDK's WhopError, reproducing the parts that matter.
+ *
+ * `message` is built the way the real SDK builds it — `buildMessage()` appends
+ * `Body: ${toJson(body)}`, so the message is a full body dump wearing a
+ * string's clothes. Reproduced exactly, because the diagnostic added for the
+ * 502 must be proved never to reach for it.
+ *
+ * `body` carries a realistic Whop error envelope AND a planted credential, so
+ * the allowlist is tested against something that would leak if it dumped.
+ */
 class FakeWhopError extends Error {
-  constructor(statusCode) {
-    super("provider said no");
+  constructor(statusCode, body) {
+    const realBody = body ?? {
+      error: {
+        code: "invalid_request",
+        type: "invalid_request_error",
+        param: "company_id",
+        message: "company must be a sub-merchant of the API key's company",
+      },
+      errors: [{ field: "company_id", code: "not_a_submerchant", message: "not owned by you" }],
+      // Things Whop would never send, planted to prove they cannot escape.
+      request: { headers: { authorization: "Bearer apik_SECRET_VALUE" } },
+      access_token: "tok_SECRET_VALUE",
+    };
+    super(`Bad Request\nStatus code: ${statusCode}\nBody: ${JSON.stringify(realBody, null, 2)}`);
     this.statusCode = statusCode;
-    // The real SDK error can quote the request it made, including the
-    // Authorization header. Reproduced so the leak assertions are meaningful.
-    this.body = { request: { headers: { authorization: "Bearer apik_SECRET_VALUE" } } };
+    this.body = realBody;
+    // The SDK reads `x-request-id` off the RESPONSE headers via this getter.
+    this.requestId = "req_abc123";
+    // Present on the real error; must never be touched.
+    this.rawResponse = { headers: new Map([["authorization", "Bearer apik_SECRET_VALUE"]]) };
+    this.cause = new Error("inner: apik_SECRET_VALUE");
   }
 }
 
@@ -112,7 +138,23 @@ function loadLinks({
         localePath: (loc, path) => `/${loc}${path === "/" ? "" : path}`,
       };
     }
-    if (spec.endsWith("whop-payments")) return { getWhopPaymentsClient: () => stubClient };
+    if (spec.endsWith("whop-payments")) {
+      return {
+        getWhopPaymentsClient: () => stubClient,
+        // The REAL implementation's logic, not a no-op: it splits the text on
+        // the configured secret. `WHOP_API_KEY` is set to the planted value
+        // below, so the scrub assertions exercise the real contract rather
+        // than a stub that pretends to redact.
+        redactWhopSecrets: (text) => {
+          let out = text;
+          for (const name of ["WHOP_API_KEY", "WHOP_WEBHOOK_SECRET"]) {
+            const secret = process.env[name];
+            if (secret) out = out.split(secret).join("[redacted]");
+          }
+          return out;
+        },
+      };
+    }
     if (spec.endsWith("whop-accounts")) {
       return { isWhopAccountId: (v) => typeof v === "string" && /^biz_[A-Za-z0-9]{4,}$/.test(v) };
     }
@@ -138,6 +180,24 @@ function loadLinks({
   return { mod: mod.exports, calls, logged };
 }
 
+/**
+ * Captures console.error around an awaited call.
+ *
+ * The diagnostic fires during the CALL, not during module construction, so it
+ * has to be captured here rather than in the loader.
+ */
+async function capturing(fn) {
+  const lines = [];
+  const original = console.error;
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    const value = await fn();
+    return { value, lines };
+  } finally {
+    console.error = original;
+  }
+}
+
 /** Re-applies APP_PUBLIC_URL around an awaited call, since the module reads it lazily. */
 async function withEnv(appUrl, fn) {
   const prev = process.env.APP_PUBLIC_URL;
@@ -152,6 +212,10 @@ async function withEnv(appUrl, fn) {
 }
 
 const ACCOUNT = "biz_creator123";
+
+// The planted credential, set as the real env var the scrubber reads. Every
+// leak assertion below hunts for this exact string.
+process.env.WHOP_API_KEY = "apik_SECRET_VALUE";
 
 /* ==========================================================================
    A. THE ACCOUNT LINK REQUEST CONTRACT
@@ -335,7 +399,132 @@ console.log("\n--- J. secret handling ---");
   check("the raw provider body never reaches the result", !JSON.stringify(r).includes("authorization"));
   check("the failure is a closed-set token, not a provider message",
     r.ok === false && /^[a-z_]+$/.test(r.reason), r.reason);
-  check("nothing is logged at all on a provider failure", logged.length === 0, `${logged.length} log line(s)`);
+  check("the browser response carries NO provider detail",
+    r.ok === false && Object.keys(r).sort().join(",") === "ok,reason", Object.keys(r).join(","));
+}
+
+/* ==========================================================================
+   DEV DIAGNOSTIC — added to explain a real sandbox 502.
+
+   The route answers `{ error: "provider_rejected" }` and always will. This
+   asserts the server-side detail is genuinely useful AND genuinely safe: an
+   allowlist that leaks is worse than no diagnostic, because it is trusted.
+   ========================================================================== */
+
+console.log("\n--- diagnostic: useful ---");
+
+{
+  const { mod } = loadLinks();
+  const d = mod.describeProviderRejection(new FakeWhopError(400));
+
+  check("the provider HTTP status is captured", d.status === 400, String(d.status));
+  check("the provider request id is captured — the id to quote to support",
+    d.requestId === "req_abc123", d.requestId);
+  check("the provider error code is captured", d.code === "invalid_request", d.code);
+  check("the provider error type is captured", d.type === "invalid_request_error", d.type);
+  check("the offending field is captured", d.field === "company_id", d.field);
+  check("the provider message is captured", typeof d.message === "string" && d.message.includes("sub-merchant"), d.message);
+  check("per-field validation errors are captured",
+    d.validation.length === 1 && d.validation[0] === "company_id: not_a_submerchant", d.validation.join("|"));
+
+  // A flat envelope, which Whop has also used.
+  const flat = mod.describeProviderRejection(new FakeWhopError(422, {
+    code: "unprocessable", type: "validation_error", message: "nope", field: "return_url",
+  }));
+  check("a FLAT provider envelope is read too",
+    flat.code === "unprocessable" && flat.field === "return_url", `${flat.code}/${flat.field}`);
+
+  const empty = mod.describeProviderRejection(new FakeWhopError(500, {}));
+  check("an empty body degrades to nulls rather than throwing",
+    empty.status === 500 && empty.code === null && empty.validation.length === 0);
+  const notWhop = mod.describeProviderRejection(new Error("plain"));
+  check("a non-WhopError degrades safely", notWhop.status === null && notWhop.message === null);
+}
+
+console.log("\n--- diagnostic: safe ---");
+
+{
+  const { mod } = loadLinks({ respond: () => new FakeWhopError(400) });
+  const run = await capturing(() =>
+    withEnv("https://app.cliprewards.test", () => mod.createAccountLink(ACCOUNT, "account_onboarding")));
+
+  const d = mod.describeProviderRejection(new FakeWhopError(400));
+  const detail = JSON.stringify(d);
+  const output = run.lines.join("\n");
+  const everything = detail + "\n" + output;
+
+  check("the diagnostic logged exactly one line", run.lines.length === 1, `${run.lines.length} line(s)`);
+
+  // The planted credential lives in body.request.headers.authorization,
+  // body.access_token, error.message, error.cause and error.rawResponse.
+  // Five different paths to the same secret; the allowlist must miss all five.
+  for (const [label, needle] of [
+    ["the API key", "apik_SECRET_VALUE"],
+    ["an access token", "tok_SECRET_VALUE"],
+    ["the authorization header name", "authorization"],
+    ["the Bearer prefix", "Bearer "],
+  ]) {
+    check(`${label} appears in NEITHER the detail nor the log`, !everything.includes(needle));
+  }
+
+  check("the SDK message is never used — it embeds the whole body by construction",
+    !everything.includes("Status code: 400") && !everything.includes("Body: {"));
+  check("rawResponse and cause are never touched",
+    !everything.includes("rawResponse") && !everything.includes("inner:"));
+  check("the detail has ONLY the allowlisted keys",
+    Object.keys(d).sort().join(",") === "code,field,message,requestId,status,type,validation",
+    Object.keys(d).sort().join(","));
+  // One line, key=value, no object dump. Brackets are fine — the prefix and
+  // the validation list use them; a brace or a newline would mean a dump.
+  check("the log line is one flat key=value line, not an object dump",
+    output.startsWith("[whop:account_links] rejected") &&
+    !output.includes("{") && !output.includes(String.fromCharCode(10)),
+    output.slice(0, 60));
+
+  // A hostile provider message cannot smuggle a credential through the
+  // allowlist: the scrubber is a second line of defence behind it.
+  const planted = loadLinks({
+    respond: () => new FakeWhopError(400, { error: { message: "failed using apik_SECRET_VALUE" } }),
+  });
+  const pd = planted.mod.describeProviderRejection(
+    new FakeWhopError(400, { error: { message: "failed using apik_SECRET_VALUE" } }));
+  check("a credential inside an ALLOWLISTED field is still scrubbed",
+    !JSON.stringify(pd).includes("apik_SECRET_VALUE") && pd.message.includes("[redacted]"), pd.message);
+
+  // An over-long provider message cannot flood a log.
+  const long = mod.describeProviderRejection(new FakeWhopError(400, { error: { message: "x".repeat(5000) } }));
+  check("an over-long provider message is truncated", long.message.length <= 300, `${long.message.length} chars`);
+
+  // The minted link is a bearer credential for the hosted flow.
+  const okMod = loadLinks().mod;
+  const okRun = await capturing(() =>
+    withEnv("https://app.cliprewards.test", () => okMod.createAccountLink(ACCOUNT, "account_onboarding")));
+  check("a SUCCESSFUL mint logs nothing at all — the link url is never printed",
+    okRun.lines.length === 0, okRun.lines.join("|"));
+}
+
+{
+  // Production silence, asserted by running the real code path with NODE_ENV set.
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  const { mod } = loadLinks({ respond: () => new FakeWhopError(400) });
+  const run = await capturing(() =>
+    withEnv("https://app.cliprewards.test", () => mod.createAccountLink(ACCOUNT, "account_onboarding")));
+  if (prev === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prev;
+
+  check("in production the diagnostic is silent", run.lines.length === 0, `${run.lines.length} line(s)`);
+  check("and the classification is unchanged by the diagnostic",
+    run.value.ok === false && run.value.reason === "provider_rejected",
+    run.value.ok ? "ok!" : run.value.reason);
+}
+
+{
+  // The public contract the browser sees must not have moved.
+  const routeCode = readFileSync("src/app/api/whop/kyc/start/route.ts", "utf8");
+  check("the route still answers the browser with only an error token",
+    /json\(\{ error: link\.reason \}, 502\)/.test(routeCode));
+  check("the route never forwards provider detail to the browser",
+    !/describeProviderRejection|statusCode|requestId|providerMessage/.test(routeCode));
 }
 
 /* ==========================================================================

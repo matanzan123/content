@@ -9,7 +9,7 @@ import {
   localePath,
   type Locale,
 } from "@/i18n/config";
-import { getWhopPaymentsClient } from "./whop-payments";
+import { getWhopPaymentsClient, redactWhopSecrets } from "./whop-payments";
 import { isWhopAccountId } from "./whop-accounts";
 
 /* ==========================================================================
@@ -204,6 +204,7 @@ export async function createAccountLink(
       expiresAt: typeof link?.expires_at === "string" ? link.expires_at : null,
     };
   } catch (error) {
+    logProviderRejection(useCase, error);
     return { ok: false, reason: classify(error) };
   }
 }
@@ -226,6 +227,121 @@ function classify(error: unknown): AccountLinkFailure {
 /* -------------------------------------------------------------------------
    Exposed for tests only
    ------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+   Development-only diagnostics
+   ------------------------------------------------------------------------- */
+
+/**
+ * WHY THIS EXISTS AND WHY IT IS SHAPED LIKE THIS.
+ *
+ * A real sandbox call returned 502 `provider_rejected` and the server log said
+ * only `POST /api/whop/kyc/start 502` — Whop's own explanation was being
+ * thrown away by the catch above. Without it there is nothing to act on.
+ *
+ * WHAT MUST NOT BE LOGGED, and why each is a real hazard here:
+ *
+ *   - `error.message`. Looks harmless; is not. The SDK BUILDS the message by
+ *     appending `Body: ${toJson(body)}` (see WhopError.js `buildMessage`), so
+ *     logging it is a full unfiltered body dump wearing a string's clothes.
+ *   - `error.rawResponse`. The Response object, headers included.
+ *   - `error.cause`. Arbitrary nested shape, may carry the request.
+ *   - The error object itself, or any spread/JSON.stringify of it.
+ *   - The minted link URL, which is a bearer credential for the hosted flow.
+ *
+ * So nothing is dumped. Named scalars are lifted out of the parsed provider
+ * body one at a time, each truncated, then passed through the same credential
+ * scrubber the rest of the codebase uses as a second line of defence. A field
+ * that is not on the allowlist cannot reach the log by any path.
+ */
+type SafeProviderDetail = {
+  status: number | null;
+  requestId: string | null;
+  code: string | null;
+  type: string | null;
+  message: string | null;
+  field: string | null;
+  validation: string[];
+};
+
+const MAX_LEN = 300;
+
+/** A short, scrubbed scalar — or null. Anything non-scalar is dropped. */
+function safeString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return redactWhopSecrets(trimmed.slice(0, MAX_LEN));
+}
+
+function readAllowlisted(body: unknown): Omit<SafeProviderDetail, "status" | "requestId"> {
+  const root = (body ?? {}) as Record<string, unknown>;
+  // Whop has used both a top-level error object and a flat envelope.
+  const err = (root.error && typeof root.error === "object" ? root.error : root) as Record<string, unknown>;
+
+  // Per-field validation failures — the detail that actually names what Whop
+  // disliked. Only `field`/`param`/`code`/`message` are read off each entry.
+  const validation: string[] = [];
+  const list = Array.isArray(root.errors) ? root.errors : Array.isArray(err.errors) ? err.errors : [];
+  for (const entry of list.slice(0, 10)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const where = safeString(e.field) ?? safeString(e.param) ?? "?";
+    const what = safeString(e.code) ?? safeString(e.message) ?? "?";
+    validation.push(`${where}: ${what}`);
+  }
+
+  return {
+    code: safeString(err.code),
+    type: safeString(err.type),
+    message: safeString(err.message),
+    field: safeString(err.param) ?? safeString(err.field),
+    validation,
+  };
+}
+
+/**
+ * Extracts the allowlisted detail from a provider failure.
+ *
+ * Exported for tests: the leak assertions run against this, not against
+ * console output, so they cannot pass by accident when logging is off.
+ */
+export function describeProviderRejection(error: unknown): SafeProviderDetail {
+  const whopError = error instanceof WhopError ? error : null;
+  return {
+    status: typeof whopError?.statusCode === "number" ? whopError.statusCode : null,
+    // Read through the SDK getter, which pulls `x-request-id` off the RESPONSE
+    // headers. This is Whop's own correlation id — the one to quote in a
+    // support ticket — and never anything we sent.
+    requestId: safeString(whopError?.requestId),
+    ...readAllowlisted(whopError?.body),
+  };
+}
+
+/**
+ * Prints the detail in development only.
+ *
+ * Production stays silent: these lines are for a developer watching a terminal
+ * during sandbox bring-up, and a log aggregator is exactly the place a
+ * provider body should not accumulate.
+ */
+function logProviderRejection(useCase: AccountLinkUseCase, error: unknown): void {
+  if (process.env.NODE_ENV === "production") return;
+
+  const d = describeProviderRejection(error);
+  const parts = [
+    `use_case=${useCase}`,
+    `status=${d.status ?? "?"}`,
+    d.requestId ? `request_id=${d.requestId}` : null,
+    d.code ? `code=${d.code}` : null,
+    d.type ? `type=${d.type}` : null,
+    d.field ? `field=${d.field}` : null,
+    d.message ? `message=${d.message}` : null,
+    d.validation.length ? `validation=[${d.validation.join("; ")}]` : null,
+  ].filter(Boolean);
+
+  console.error(`[whop:account_links] rejected — ${parts.join(" ")}`);
+}
 
 /** @internal — URL construction, asserted directly by whop-kyc-test. */
 export const __testing = { resolveAppOrigin, redirectUrls };
