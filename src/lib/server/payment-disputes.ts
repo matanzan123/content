@@ -4,6 +4,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { disputeAlerts, paymentDisputes, resolutionCenterCases } from "@/lib/db/schema";
 import type { CaseStatus, DisputeAlertStatus, DisputeStatus } from "./dispute-lifecycle";
+import { getWhopEnvironment } from "./whop-payments";
 
 /* ==========================================================================
    INTERNAL DISPUTE-FAMILY RECORDS — server only.
@@ -152,7 +153,7 @@ export async function recordDispute(
         resolvedAt: resolved ? sql`now()` : null,
       })
       .onConflictDoUpdate({
-        target: [paymentDisputes.provider, paymentDisputes.whopDisputeId],
+        target: [paymentDisputes.provider, paymentDisputes.whopDisputeId, paymentDisputes.environment],
         set: {
           providerStatus: input.providerStatus,
           status: input.status,
@@ -205,11 +206,25 @@ export async function recordDispute(
   }
 }
 
+/**
+ * ENVIRONMENT-SCOPED, and it must match `uniq_disputes_provider_dispute` exactly.
+ *
+ * This is the read-back for the upsert above. Its predicate is the index's key,
+ * environment included, because the ON CONFLICT fires on that key: read it back
+ * with a NARROWER predicate and a conflicting row in the other environment
+ * would come back null, turning a correct conflict report into a bogus storage
+ * error. That mismatch is why this lookup could not be scoped before migration
+ * 0011 widened the index.
+ */
 export async function getDisputeByProviderId(
   whopDisputeId: string,
 ): Promise<PaymentDispute | null> {
   const db = getDb();
   if (!db) return null;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(paymentDisputes)
@@ -217,6 +232,7 @@ export async function getDisputeByProviderId(
       and(
         eq(paymentDisputes.provider, PROVIDER),
         eq(paymentDisputes.whopDisputeId, whopDisputeId),
+        eq(paymentDisputes.environment, environment),
       ),
     );
   return (row as PaymentDispute | undefined) ?? null;
@@ -227,10 +243,23 @@ export async function listDisputesForPaymentLocal(
 ): Promise<PaymentDispute[]> {
   const db = getDb();
   if (!db) return [];
+
+  // Environment-scoped. `uniq_disputes_provider_dispute` is on
+  // (provider, whop_dispute_id), NOT on the payment id — so two different
+  // disputes naming the same payment can legitimately sit in two environments,
+  // and an unscoped list would mix them into one reconciliation comparison.
+  const environment = getWhopEnvironment();
+  if (!environment) return [];
+
   const rows = await db
     .select()
     .from(paymentDisputes)
-    .where(eq(paymentDisputes.whopPaymentId, whopPaymentId))
+    .where(
+      and(
+        eq(paymentDisputes.whopPaymentId, whopPaymentId),
+        eq(paymentDisputes.environment, environment),
+      ),
+    )
     .orderBy(asc(paymentDisputes.createdAt));
   return rows as PaymentDispute[];
 }
@@ -299,7 +328,7 @@ export async function recordAlert(
       .insert(disputeAlerts)
       .values({ provider: PROVIDER, ...input })
       .onConflictDoUpdate({
-        target: [disputeAlerts.provider, disputeAlerts.whopAlertId],
+        target: [disputeAlerts.provider, disputeAlerts.whopAlertId, disputeAlerts.environment],
         set: {
           status: input.status,
           notActionableReason: input.notActionableReason,
@@ -320,14 +349,32 @@ export async function recordAlert(
   }
 }
 
+/**
+ * ENVIRONMENT-SCOPED, and it must match `uniq_alerts_provider_alert` exactly.
+ *
+ * This is the read-back for the upsert above. Its predicate is the index's key,
+ * environment included, because the ON CONFLICT fires on that key: read it back
+ * with a NARROWER predicate and a conflicting row in the other environment
+ * would come back null, turning a correct conflict report into a bogus storage
+ * error. That mismatch is why this lookup could not be scoped before migration
+ * 0011 widened the index.
+ */
 export async function getAlertByProviderId(whopAlertId: string): Promise<StoredAlert | null> {
   const db = getDb();
   if (!db) return null;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(disputeAlerts)
     .where(
-      and(eq(disputeAlerts.provider, PROVIDER), eq(disputeAlerts.whopAlertId, whopAlertId)),
+      and(
+        eq(disputeAlerts.provider, PROVIDER),
+        eq(disputeAlerts.whopAlertId, whopAlertId),
+        eq(disputeAlerts.environment, environment),
+      ),
     );
   return (row as StoredAlert | undefined) ?? null;
 }
@@ -395,7 +442,7 @@ export async function recordCase(
       .insert(resolutionCenterCases)
       .values({ provider: PROVIDER, ...input, closedAt: closed ? sql`now()` : null })
       .onConflictDoUpdate({
-        target: [resolutionCenterCases.provider, resolutionCenterCases.whopCaseId],
+        target: [resolutionCenterCases.provider, resolutionCenterCases.whopCaseId, resolutionCenterCases.environment],
         set: {
           providerStatus: input.providerStatus,
           status: input.status,
@@ -428,9 +475,23 @@ export async function recordCase(
   }
 }
 
+/**
+ * ENVIRONMENT-SCOPED, and it must match `uniq_cases_provider_case` exactly.
+ *
+ * This is the read-back for the upsert above. Its predicate is the index's key,
+ * environment included, because the ON CONFLICT fires on that key: read it back
+ * with a NARROWER predicate and a conflicting row in the other environment
+ * would come back null, turning a correct conflict report into a bogus storage
+ * error. That mismatch is why this lookup could not be scoped before migration
+ * 0011 widened the index.
+ */
 export async function getCaseByProviderId(whopCaseId: string): Promise<StoredCase | null> {
   const db = getDb();
   if (!db) return null;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(resolutionCenterCases)
@@ -438,6 +499,7 @@ export async function getCaseByProviderId(whopCaseId: string): Promise<StoredCas
       and(
         eq(resolutionCenterCases.provider, PROVIDER),
         eq(resolutionCenterCases.whopCaseId, whopCaseId),
+        eq(resolutionCenterCases.environment, environment),
       ),
     );
   return (row as StoredCase | undefined) ?? null;

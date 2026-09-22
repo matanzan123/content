@@ -109,8 +109,22 @@ check("the enum in the schema matches the chart exactly", (() => {
     .filter((v) => v !== "ledger_account");
   return listed.join(",") === accounts.LEDGER_ACCOUNTS.join(",");
 })());
-check("platform revenue is NOT postable", accounts.ACCOUNTS.platform_revenue.postable === false);
-check("creator payable is NOT postable", accounts.ACCOUNTS.creator_payable.postable === false);
+// CREATOR EARNINGS NOW EXIST, so both accounts had to be opened for posting —
+// the revenue_split event books them. These previously asserted they were
+// blocked; replaced rather than deleted, because what the block was protecting
+// is that they are reached only by that ONE event, with a normal balance that
+// cannot be flipped, and that is what is asserted now.
+check("platform revenue IS postable — the revenue split books it", accounts.ACCOUNTS.platform_revenue.postable === true);
+check("creator payable IS postable — the revenue split books it", accounts.ACCOUNTS.creator_payable.postable === true);
+check("platform revenue is still revenue with a credit normal balance",
+  accounts.ACCOUNTS.platform_revenue.kind === "revenue" &&
+  accounts.ACCOUNTS.platform_revenue.normalBalance === "credit");
+check("creator payable is still a liability with a credit normal balance",
+  accounts.ACCOUNTS.creator_payable.kind === "liability" &&
+  accounts.ACCOUNTS.creator_payable.normalBalance === "credit");
+check("both are booked by the revenue_split event and reversed by its own event",
+  accounts.ECONOMIC_EVENTS.includes("revenue_split") &&
+  accounts.ECONOMIC_EVENTS.includes("revenue_split_reversed"));
 check("campaign funds are NOT postable", accounts.ACCOUNTS.campaign_funds.postable === false);
 check("the suspense account IS postable", accounts.ACCOUNTS.unallocated_customer_funds.postable === true);
 check("suspense is a liability, not revenue", accounts.ACCOUNTS.unallocated_customer_funds.kind === "liability");
@@ -166,10 +180,21 @@ check("a float amount is refused",
   v({ legs: [{ account: "provider_balance", amountMinor: 10.5 }, { account: "unallocated_customer_funds", amountMinor: -10.5 }] }).reason === "invalid_amount");
 check("an unknown account is refused",
   v({ legs: legs(["petty_cash", 1000n], ["unallocated_customer_funds", -1000n]) }).reason === "invalid_account");
-check("a NON-POSTABLE account is refused — platform revenue cannot be booked yet",
-  v({ legs: legs(["provider_balance", 1000n], ["platform_revenue", -1000n]) }).reason === "account_not_postable");
-check("creator payable cannot be booked yet either",
-  v({ legs: legs(["provider_balance", 1000n], ["creator_payable", -1000n]) }).reason === "account_not_postable");
+// platform_revenue and creator_payable were the examples of a blocked account
+// until the revenue split opened them. Replaced rather than deleted: the
+// validator rule under test is "a non-postable account is refused", so it is
+// now asserted against accounts that are STILL blocked — and the two that were
+// opened are asserted to be genuinely accepted, which the old pair no longer
+// proved either way.
+check("a NON-POSTABLE account is refused — dispute reserve cannot be booked",
+  v({ legs: legs(["provider_balance", 1000n], ["dispute_reserve", -1000n]) }).reason === "account_not_postable");
+check("refunds payable cannot be booked either",
+  v({ legs: legs(["provider_balance", 1000n], ["refunds_payable", -1000n]) }).reason === "account_not_postable");
+check("campaign funds cannot be booked either",
+  v({ legs: legs(["provider_balance", 1000n], ["campaign_funds", -1000n]) }).reason === "account_not_postable");
+check("but the now-open revenue-split accounts ARE accepted by the validator",
+  v({ legs: legs(["platform_revenue", 1000n], ["unallocated_customer_funds", -1000n]) }).ok === true &&
+  v({ legs: legs(["creator_payable", 1000n], ["unallocated_customer_funds", -1000n]) }).ok === true);
 
 console.log("\n--- A. currency ---");
 
@@ -368,10 +393,28 @@ check("an already-settled order still posts — a crash between the two leaves a
   succeeded.includes("orderId: outcome.orderId") && /if \(outcome\.alreadyPaid\)/.test(succeeded) === false);
 check("the delivery id is passed as evidence only",
   succeeded.includes("sourceWebhookId: webhookId"));
+// THE DISPATCH SIGNATURE CHANGED, and both of these matched it as a literal.
+// The gate became a MAP (a `refund.*` event needs a different verifier than a
+// `payment.*` one, so membership is no longer the question), and handlers now
+// also receive the raw body (the payout handler reads its status from it).
+// Replaced rather than deleted: the properties — the dispatcher supplies the
+// webhook id, and ownership is proved BEFORE any handler runs — are unchanged
+// and are re-anchored to the current call shape.
 check("handlers receive the webhook id from the dispatcher",
-  webhookSource.includes("HANDLERS[eventType](resourceId, webhookId)"));
+  webhookSource.includes("HANDLERS[eventType](resourceId, webhookId, body)"));
 check("the ownership gate still runs before any handler",
-  webhookSource.indexOf("OWNERSHIP_GATED.has(eventType)") < webhookSource.indexOf("HANDLERS[eventType](resourceId, webhookId)"));
+  webhookSource.indexOf("const verifyOwnership = OWNERSHIP_GATED[eventType];") !== -1 &&
+  webhookSource.indexOf("const verifyOwnership = OWNERSHIP_GATED[eventType];") <
+    webhookSource.indexOf("HANDLERS[eventType](resourceId, webhookId, body)"));
+check("and a gated event that is not `verified` never reaches its handler",
+  (() => {
+    const gate = webhookSource.slice(
+      webhookSource.indexOf("const verifyOwnership = OWNERSHIP_GATED[eventType];"),
+      webhookSource.indexOf("HANDLERS[eventType](resourceId, webhookId, body)"),
+    );
+    return gate.includes("await verifyOwnership(resourceId)") &&
+      gate.includes('ownership.kind !== "verified"');
+  })());
 check("nothing anywhere writes financial_ledger", (() => {
   const { execSync } = require("node:child_process");
   const out = execSync("git grep -l \"insert(financialLedger)\" -- src || true", { encoding: "utf8" }).trim();

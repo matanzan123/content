@@ -348,10 +348,21 @@ export async function reconcilePaymentAgainstProvider(
     ];
   }
 
+  // Environment-scoped: reconciling a payment that belongs to the other
+  // environment must report nothing here rather than compare our books against
+  // an order we do not own in this environment.
+  const reconcileEnvironment = getWhopEnvironment();
+  if (!reconcileEnvironment) return [];
+
   const [order] = await db
     .select()
     .from(paymentOrders)
-    .where(eq(paymentOrders.whopPaymentId, paymentId));
+    .where(
+      and(
+        eq(paymentOrders.whopPaymentId, paymentId),
+        eq(paymentOrders.environment, reconcileEnvironment),
+      ),
+    );
 
   const [transaction] = await db
     .select()
@@ -519,10 +530,20 @@ export async function reconcileLifecycleAgainstProvider(limit = 50): Promise<Dis
   const db = getDb();
   if (!db) return [];
 
+  // The sweep is environment-scoped: a sandbox lifecycle reconciliation must
+  // never pick up production orders to check against the provider.
+  const environment = getWhopEnvironment();
+  if (!environment) return [];
+
   const orders = await db
     .select({ orderId: paymentOrders.orderId })
     .from(paymentOrders)
-    .where(sql`${paymentOrders.whopPaymentId} is not null`)
+    .where(
+      and(
+        sql`${paymentOrders.whopPaymentId} is not null`,
+        eq(paymentOrders.environment, environment),
+      ),
+    )
     .limit(limit);
 
   const findings: Discrepancy[] = [];
@@ -1139,10 +1160,19 @@ export async function reconcileDisputesInternal(
 
   const findings: DisputeDiscrepancy[] = [];
   const environment = getWhopEnvironment();
+  // Fail closed. Reconciling with an unresolvable environment would sweep BOTH
+  // environments into one report and compare them against one provider.
+  if (!environment) return EMPTY_DISPUTE_REPORT;
 
-  const disputes = await db.select().from(paymentDisputes).limit(limit);
-  const alerts = await db.select().from(disputeAlerts).limit(limit);
-  const cases = await db.select().from(resolutionCenterCases).limit(limit);
+  const disputes = await db
+    .select().from(paymentDisputes)
+    .where(eq(paymentDisputes.environment, environment)).limit(limit);
+  const alerts = await db
+    .select().from(disputeAlerts)
+    .where(eq(disputeAlerts.environment, environment)).limit(limit);
+  const cases = await db
+    .select().from(resolutionCenterCases)
+    .where(eq(resolutionCenterCases.environment, environment)).limit(limit);
 
   const transactions = await db
     .select({
@@ -1283,12 +1313,16 @@ export async function reconcileDisputesInternal(
     if (rc.status !== "closed" || !rc.whopPaymentId) continue;
 
     // Does anything in OUR books show money leaving for this payment?
+    // Both counts are environment-scoped: a production refund must never
+    // satisfy a sandbox case cross-check, or the finding would be a false
+    // negative — "we booked something" when this environment booked nothing.
     const [localRefunds] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(paymentRefunds)
       .where(
         and(
           eq(paymentRefunds.whopPaymentId, rc.whopPaymentId),
+          eq(paymentRefunds.environment, environment),
           eq(paymentRefunds.status, "completed"),
         ),
       );
@@ -1296,7 +1330,11 @@ export async function reconcileDisputesInternal(
       .select({ n: sql<number>`count(*)::int` })
       .from(paymentDisputes)
       .where(
-        and(eq(paymentDisputes.whopPaymentId, rc.whopPaymentId), eq(paymentDisputes.status, "lost")),
+        and(
+          eq(paymentDisputes.whopPaymentId, rc.whopPaymentId),
+          eq(paymentDisputes.environment, environment),
+          eq(paymentDisputes.status, "lost"),
+        ),
       );
     const weBookedSomething = (localRefunds?.n ?? 0) > 0 || (localDisputeLoss?.n ?? 0) > 0;
 

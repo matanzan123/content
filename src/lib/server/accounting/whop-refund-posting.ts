@@ -4,7 +4,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { WhopError } from "@whop/sdk";
 import { getDb } from "@/lib/db";
 import { accountingEntries, accountingTransactions } from "@/lib/db/schema";
-import { describeWhopError, getWhopPaymentsClient } from "../whop-payments";
+import { describeWhopError, getWhopPaymentsClient, getWhopEnvironment } from "../whop-payments";
 import { currencyDecimals, decimalToMinor, normaliseCurrency } from "../money";
 import { classifyRefundStatus, postsAccounting } from "../refund-lifecycle";
 import { retrieveRefund } from "../whop-refunds";
@@ -197,6 +197,11 @@ export async function postedTotalsForPayment(paymentId: string): Promise<PostedT
   const db = getDb();
   if (!db) return null;
 
+  // Environment-scoped: these totals are compared against the provider for THIS
+  // environment, so summing the other one's entries would be a wrong figure.
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const rows = await db
     .select({
       account: accountingEntries.account,
@@ -210,6 +215,7 @@ export async function postedTotalsForPayment(paymentId: string): Promise<PostedT
     .where(
       and(
         eq(accountingTransactions.provider, "whop"),
+        eq(accountingTransactions.environment, environment),
         // The settlement names the payment directly; a refund names the
         // payment in its metadata. Both are matched.
         sql`(

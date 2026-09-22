@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { eq, and, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { resolvePlatformConfig } from "./whop-accounts";
+import { getWhopEnvironment, type WhopEnvironmentName } from "./whop-payments";
 import { fetchPayoutStatus } from "./whop-payout-status";
 import { callWhopTransfer } from "./whop-transfers";
 
@@ -313,7 +314,7 @@ type JournalInput = {
   whopAccountId: string;
   amountMinor: bigint;
   currency: string;
-  environment: string;
+  environment: WhopEnvironmentName;
   idempotencyKey: string;
   purpose: string;
 };
@@ -331,7 +332,7 @@ async function writePayoutJournal(
           economicEvent: "payout_sent",
           provider: "whop",
           providerResourceId: input.whopAccountId,
-          environment: input.environment as "sandbox" | "production",
+          environment: input.environment,
           currency: input.currency,
           idempotencyKey,
           description: `Payout to creator Whop account ${input.whopAccountId}: ${input.purpose}`,
@@ -380,6 +381,30 @@ async function writePayoutJournal(
    ------------------------------------------------------------------------- */
 
 /**
+ * ENVIRONMENT SCOPING FOR THE WEBHOOK-DRIVEN STATE CHANGES.
+ *
+ * `provider_transfer_id` is Whop's identifier, not ours, and nothing about it
+ * guarantees it is unique ACROSS environments — sandbox and production are
+ * separate id spaces that may legitimately reuse a value. Matching on it alone
+ * would let a sandbox `payout.*` delivery settle or reverse a production
+ * transfer, which is exactly the isolation rule the rest of this codebase
+ * holds to (`whop_accounts`, `whop_connections`, `creator_withdrawals` and
+ * `payment_orders` all scope every read by environment).
+ *
+ * The environment comes from `getWhopEnvironment()` — the same server-side
+ * helper those paths use, reading only from `process.env`. It is NEVER taken
+ * from the webhook payload, a query parameter, a request body or any other
+ * caller-supplied value: an attacker who could name the environment could pick
+ * which ledger to move.
+ *
+ * With the environment unresolvable we cannot prove which row is meant, so
+ * both functions fail closed rather than updating an unscoped match.
+ */
+function resolveTransferEnvironment(): "sandbox" | "production" | null {
+  return getWhopEnvironment();
+}
+
+/**
  * Marks a transfer `completed` when Whop confirms it settled.
  * Called by the `payout.sent` webhook handler.
  */
@@ -388,11 +413,20 @@ export async function markTransferCompleted(
 ): Promise<{ ok: boolean }> {
   const db = getDb();
   if (!db) return { ok: false };
+
+  const environment = resolveTransferEnvironment();
+  if (!environment) return { ok: false };
+
   try {
     await db
       .update(schema.creatorTransfers)
       .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(schema.creatorTransfers.providerTransferId, providerTransferId));
+      .where(
+        and(
+          eq(schema.creatorTransfers.providerTransferId, providerTransferId),
+          eq(schema.creatorTransfers.environment, environment),
+        ),
+      );
     return { ok: true };
   } catch {
     return { ok: false };
@@ -410,11 +444,21 @@ export async function markTransferReversed(
   const db = getDb();
   if (!db) return { ok: false };
 
+  // See resolveTransferEnvironment above: the row is identified by the
+  // provider's id AND our own environment, never by the id alone.
+  const environment = resolveTransferEnvironment();
+  if (!environment) return { ok: false };
+
   try {
     const [row] = await db
       .select()
       .from(schema.creatorTransfers)
-      .where(eq(schema.creatorTransfers.providerTransferId, providerTransferId))
+      .where(
+        and(
+          eq(schema.creatorTransfers.providerTransferId, providerTransferId),
+          eq(schema.creatorTransfers.environment, environment),
+        ),
+      )
       .limit(1);
 
     if (!row) return { ok: false };
@@ -485,11 +529,28 @@ export async function getTransfer(transferId: string): Promise<TransferStatusRes
   return { ok: true, transfer: row };
 }
 
+/**
+ * Pending transfers older than `minutes`, for a reconciliation sweep.
+ *
+ * SCOPED TO THE RUNNING ENVIRONMENT. Without the scope a sandbox sweep would
+ * see production transfers and vice versa, which is the same isolation rule
+ * `markTransferCompleted` and `markTransferReversed` hold to — and this one is
+ * the more dangerous shape, because a sweep's whole job is to act on what it
+ * finds. The environment comes from `resolveTransferEnvironment()`, never from
+ * a parameter: a caller that could name the environment could aim the sweep.
+ *
+ * Fails closed to an empty list when the environment cannot be resolved. An
+ * unscoped sweep is worse than no sweep.
+ */
 export async function getPendingTransfersOlderThanMinutes(
   minutes: number,
 ): Promise<typeof schema.creatorTransfers.$inferSelect[]> {
   const db = getDb();
   if (!db) return [];
+
+  const environment = resolveTransferEnvironment();
+  if (!environment) return [];
+
   const cutoff = new Date(Date.now() - minutes * 60 * 1000);
   return db
     .select()
@@ -497,6 +558,7 @@ export async function getPendingTransfersOlderThanMinutes(
     .where(
       and(
         eq(schema.creatorTransfers.status, "pending"),
+        eq(schema.creatorTransfers.environment, environment),
         sql`${schema.creatorTransfers.createdAt} < ${cutoff}`,
       ),
     );

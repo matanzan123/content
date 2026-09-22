@@ -1,6 +1,6 @@
 import { KpiCard } from "./KpiCard";
 import { Panel, EmptyState } from "./Panel";
-import { getStats, getUsers, getCampaigns, type Outcome, type UserRecord, type CampaignRecord, type DashboardStats } from "@/lib/admin/firebase-queries";
+import { getStats, getUsers, getCampaigns, type Outcome, type UserRecord } from "@/lib/admin/firebase-queries";
 import type { Dictionary } from "@/i18n/dictionaries/en";
 
 type Copy = Dictionary["admin"];

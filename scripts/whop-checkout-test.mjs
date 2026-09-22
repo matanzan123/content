@@ -71,8 +71,20 @@ for (const bad of ["10.001", "1e3", "ten", "", "10,00", "0x10", null, undefined,
 check("D. more precision than the currency has is refused", money.decimalToMinor("10.005", 2) === null);
 check("D. zero is not a chargeable amount", money.isChargeableAmount(BigInt(0)) === false);
 check("D. a negative amount is not chargeable", money.isChargeableAmount(BigInt(-100)) === false);
-check("D. an unsupported currency has no decimals", money.currencyDecimals("btc") === null && money.currencyDecimals("eur") === null);
+// THE SUPPORTED-CURRENCY TABLE IS NOW A FULL ISO-4217 SET, so "eur" stopped
+// being an example of an unsupported code. Replaced rather than deleted: the
+// property is "a code outside the table has no decimals and cannot be scaled",
+// and the wider table makes the per-currency exponent testable as well.
+check("D. an unsupported currency has no decimals",
+  money.currencyDecimals("btc") === null &&
+  money.currencyDecimals("zzz") === null &&
+  money.currencyDecimals("") === null &&
+  money.currencyDecimals(null) === null);
 check("D. usd is supported at 2 decimals", money.currencyDecimals("USD") === 2);
+check("D. each currency carries its OWN exponent, never a flat 2",
+  money.currencyDecimals("eur") === 2 &&
+  money.currencyDecimals("jpy") === 0 &&
+  money.currencyDecimals("kwd") === 3);
 
 /* --------------- A / B. sandbox isolation, end to end -------------------- */
 
@@ -663,7 +675,26 @@ const NGROK = "https://example-tunnel-host.ngrok-free.dev";
   const cfg = readFileSync("next.config.ts", "utf8");
   check("20. allowedDevOrigins is derived from APP_PUBLIC_URL", cfg.includes("process.env.APP_PUBLIC_URL"));
   check("20. no wildcard origin", cfg.includes('"*"') === false && cfg.includes("'*'") === false);
-  check("20. no origin reflection from a request header", cfg.includes("headers") === false);
+  // A SECURITY-HEADERS BLOCK WAS ADDED to next.config.ts, so the bare word
+  // "headers" stopped being evidence of origin reflection — it now matches the
+  // static `async headers()` response block. Replaced rather than deleted: the
+  // property is "the dev allow-list is derived from configuration, never from
+  // an incoming request", so it is anchored to devOrigins() itself.
+  // Asserted over CODE, not prose: the surrounding doc comment explains the
+  // cross-origin REQUEST problem this function solves, so a bare word search
+  // reports the explanation as the offence.
+  const cfgCodeOnly = (text) =>
+    text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  check("20. no origin reflection from a request header", (() => {
+    const fn = cfgCodeOnly(
+      cfg.slice(cfg.indexOf("function devOrigins()"), cfg.indexOf("const nextConfig")),
+    );
+    return fn.length > 0 &&
+      !/req|request|headers|host\b/i.test(fn.replace(/hostname/g, "")) &&
+      fn.includes("process.env.APP_PUBLIC_URL");
+  })());
+  check("20. the response headers block never echoes a request value",
+    !/req|request/i.test(cfgCodeOnly(cfg.slice(cfg.indexOf("async headers()")))));
   check("20. an unset APP_PUBLIC_URL allows nothing extra", cfg.includes("if (!raw) return [];"));
   check("20. only the hostname is allowed, not an arbitrary string", cfg.includes("new URL(raw)") && cfg.includes("hostname"));
 }

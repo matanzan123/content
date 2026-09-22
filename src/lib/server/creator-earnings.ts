@@ -10,6 +10,7 @@ import {
   type EarningStatus,
 } from "./creator-earnings-policy";
 import { postRevenueSplit, postRevenueSplitReversal } from "./accounting/revenue-split-posting";
+import { getWhopEnvironment } from "./whop-payments";
 import { computeRefundSplitReversal } from "./creator-earnings-policy";
 
 /* ==========================================================================
@@ -92,7 +93,19 @@ export async function recordCreatorEarning(
   );
   const holdUntil = computeHoldUntil(input.paymentSettledAt);
 
-  // Idempotency check: return early if already recorded
+  // IDEMPOTENCY CHECK, SCOPED TO THE ENVIRONMENT THIS ROW WILL BE WRITTEN IN.
+  //
+  // The predicate matches `uniq_creator_earnings_payment_creator` exactly —
+  // (whop_payment_id, firebase_uid, environment) after migration 0011. Before
+  // that migration the index omitted environment, so scoping this read would
+  // have made it miss a cross-environment row, the INSERT would then hit the
+  // unique violation, and the catch below would report `db_error` instead of
+  // `alreadyRecorded`. Index and read-back have to agree.
+  //
+  // `input.environment` and NOT getWhopEnvironment(): it must be the same value
+  // the INSERT writes, or the check and the write would disagree about which
+  // row they mean. It is typed to the enum and its only caller supplies
+  // `resolvePlatformConfig().config.environment`, never a request body.
   const [existing] = await db
     .select({ earningId: schema.creatorEarnings.earningId })
     .from(schema.creatorEarnings)
@@ -100,6 +113,7 @@ export async function recordCreatorEarning(
       and(
         eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
         eq(schema.creatorEarnings.firebaseUid, input.firebaseUid),
+        eq(schema.creatorEarnings.environment, input.environment),
       ),
     )
     .limit(1);
@@ -140,6 +154,7 @@ export async function recordCreatorEarning(
           and(
             eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
             eq(schema.creatorEarnings.firebaseUid, input.firebaseUid),
+            eq(schema.creatorEarnings.environment, input.environment),
           ),
         )
         .limit(1);
@@ -188,6 +203,16 @@ export async function getCreatorBalance(firebaseUid: string): Promise<GetBalance
   const db = getDb();
   if (!db) return { ok: false, reason: "db_unavailable" };
 
+  // ENVIRONMENT-SCOPED. The key here is OUR firebase uid rather than a
+  // provider id, so this is not the provider-id defect — but it is the same
+  // isolation objective, and the consequence was arguably worse: one creator
+  // has rows in both environments under the same uid, so an unscoped sum
+  // reported a balance that mixed sandbox test money with real earnings. The
+  // number a creator sees, and the number a withdrawal is checked against,
+  // must describe one environment.
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false, reason: "db_unavailable" };
+
   const rows = await db
     .select({
       status: schema.creatorEarnings.status,
@@ -197,7 +222,12 @@ export async function getCreatorBalance(firebaseUid: string): Promise<GetBalance
       currency: schema.creatorEarnings.currency,
     })
     .from(schema.creatorEarnings)
-    .where(eq(schema.creatorEarnings.firebaseUid, firebaseUid));
+    .where(
+      and(
+        eq(schema.creatorEarnings.firebaseUid, firebaseUid),
+        eq(schema.creatorEarnings.environment, environment),
+      ),
+    );
 
   const balance = computeBalance(
     rows.map((r) => ({
@@ -223,6 +253,12 @@ export async function freezeForDispute(
 ): Promise<{ ok: boolean }> {
   const db = getDb();
   if (!db) return { ok: false };
+
+  // Environment-scoped: a `whop_payment_id` can legitimately exist in both
+  // environments (the unique index is per payment+creator, not per environment),
+  // so an unscoped match could freeze or reverse ANOTHER environment's earning.
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false };
   try {
     await db
       .update(schema.creatorEarnings)
@@ -234,6 +270,7 @@ export async function freezeForDispute(
       .where(
         and(
           eq(schema.creatorEarnings.whopPaymentId, whopPaymentId),
+          eq(schema.creatorEarnings.environment, environment),
           // Only freeze non-reversed rows
           sql`${schema.creatorEarnings.status} != 'reversed'`,
         ),
@@ -250,6 +287,12 @@ export async function unfreezeFromDispute(
 ): Promise<{ ok: boolean }> {
   const db = getDb();
   if (!db) return { ok: false };
+
+  // Environment-scoped: a `whop_payment_id` can legitimately exist in both
+  // environments (the unique index is per payment+creator, not per environment),
+  // so an unscoped match could freeze or reverse ANOTHER environment's earning.
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false };
   try {
     await db
       .update(schema.creatorEarnings)
@@ -258,7 +301,12 @@ export async function unfreezeFromDispute(
         frozenByDisputeId: null,
         updatedAt: new Date(),
       })
-      .where(eq(schema.creatorEarnings.whopPaymentId, whopPaymentId));
+      .where(
+        and(
+          eq(schema.creatorEarnings.whopPaymentId, whopPaymentId),
+          eq(schema.creatorEarnings.environment, environment),
+        ),
+      );
     return { ok: true };
   } catch {
     return { ok: false };
@@ -279,6 +327,12 @@ export async function reverseForDispute(
   const db = getDb();
   if (!db) return { ok: false };
 
+  // Environment-scoped: a `whop_payment_id` can legitimately exist in both
+  // environments (the unique index is per payment+creator, not per environment),
+  // so an unscoped match could freeze or reverse ANOTHER environment's earning.
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false };
+
   const rows = await db
     .select({
       firebaseUid: schema.creatorEarnings.firebaseUid,
@@ -292,6 +346,7 @@ export async function reverseForDispute(
     .where(
       and(
         eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
+        eq(schema.creatorEarnings.environment, environment),
         or(
           eq(schema.creatorEarnings.status, "held"),
           eq(schema.creatorEarnings.status, "available"),
@@ -327,6 +382,7 @@ export async function reverseForDispute(
       .where(
         and(
           eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
+        eq(schema.creatorEarnings.environment, environment),
           // A transferred earning is NOT reversed here — the platform absorbs.
           or(
             eq(schema.creatorEarnings.status, "held"),
@@ -372,6 +428,12 @@ export async function reverseForRefund(
   const db = getDb();
   if (!db) return { ok: false };
 
+  // Environment-scoped: a `whop_payment_id` can legitimately exist in both
+  // environments (the unique index is per payment+creator, not per environment),
+  // so an unscoped match could freeze or reverse ANOTHER environment's earning.
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false };
+
   const rows = await db
     .select({
       firebaseUid: schema.creatorEarnings.firebaseUid,
@@ -385,6 +447,7 @@ export async function reverseForRefund(
     .where(
       and(
         eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
+        eq(schema.creatorEarnings.environment, environment),
         or(
           eq(schema.creatorEarnings.status, "held"),
           eq(schema.creatorEarnings.status, "available"),
@@ -421,6 +484,7 @@ export async function reverseForRefund(
       .where(
         and(
           eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
+        eq(schema.creatorEarnings.environment, environment),
           or(
             eq(schema.creatorEarnings.status, "held"),
             eq(schema.creatorEarnings.status, "available"),

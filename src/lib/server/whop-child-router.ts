@@ -1,6 +1,6 @@
 import "server-only";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { whopAccounts } from "@/lib/db/schema";
 import { getWhopEnvironment, type WhopEnvironmentName } from "./whop-payments";
@@ -47,13 +47,22 @@ export async function resolveChildAccount(companyId: string): Promise<ChildAccou
       environment: whopAccounts.environment,
     })
     .from(whopAccounts)
-    .where(eq(whopAccounts.whopAccountId, companyId))
+    // The environment belongs in the PREDICATE, not only in the check below.
+    // With `limit(1)` over an unscoped match, an account id present in both
+    // environments could return the other environment's row and be rejected —
+    // failing closed, but rejecting a delivery that was legitimately ours.
+    .where(
+      and(
+        eq(whopAccounts.whopAccountId, companyId),
+        eq(whopAccounts.environment, environment),
+      ),
+    )
     .limit(1);
 
   if (!row) return null;
 
-  // Reject cross-environment matches — a sandbox account must never process
-  // production events and vice versa.
+  // Belt and braces: the predicate above already guarantees this, and it stays
+  // so that a future change to the query cannot silently widen the scope.
   if (row.environment !== environment) return null;
 
   return { firebaseUid: row.firebaseUid, whopAccountId: row.whopAccountId, environment };

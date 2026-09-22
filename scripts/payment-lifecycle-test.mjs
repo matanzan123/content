@@ -224,8 +224,51 @@ check("and each is ownership-gated by a verifier for its own resource kind",
   gateBlock.includes('"dispute.created": verifyDisputeOwnership') &&
   gateBlock.includes('"dispute_alert.created": verifyAlertOwnership') &&
   gateBlock.includes('"resolution_center_case.decided": verifyCaseOwnership'));
-check("payouts are still recognised but NOT implemented",
-  /handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source));
+// PAYOUTS ARE NOW IMPLEMENTED. This previously recorded that the handler was
+// an untouched stub returning `business_mapping_not_implemented` outright; it
+// is replaced rather than deleted, because "payout events are routed to a real
+// handler that delegates to the transfer service and still cannot invent
+// money" is the property that now has to stay true.
+const payoutHandler = source.slice(
+  source.indexOf("export async function handleWhopPayoutUpdated"),
+  source.indexOf("export async function handleWhopAccountUpdated"),
+);
+const payoutEvents = ["payout.created", "payout.updated", "payout.reversed"];
+check("the three payout events are recognised AND routed to the implemented handler",
+  payoutHandler.length > 0 &&
+  payoutEvents.every((e) => webhooks.isSupportedEvent(e)) &&
+  payoutEvents.every((e) => source.includes(`"${e}": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body)`)));
+check("the payout outcome is read from the payload status, not from the event name alone",
+  /const payoutStatus = readString\(data, "status"\)/.test(payoutHandler) &&
+  /const isReversed =/.test(payoutHandler) &&
+  /const isCompleted =/.test(payoutHandler));
+check("a payout id is required before anything is mapped",
+  /if \(!payoutId\) return \{ kind: "business_mapping_not_implemented" \};/.test(payoutHandler));
+check("settlement and reversal both delegate to the transfer service, not to raw SQL",
+  /await markTransferCompleted\(payoutId\)/.test(payoutHandler) &&
+  /await markTransferReversed\(payoutId\)/.test(payoutHandler) &&
+  /\bdb\.|insert\(|\.update\(|\.delete\(/.test(payoutHandler) === false);
+check("an unrecognised payout id is acknowledged, never forced into a mapping",
+  (payoutHandler.match(/if \(!result\.ok\) return \{ kind: "business_mapping_not_implemented" \};/g) ?? []).length === 2);
+check("the payout handler never writes the ledger itself",
+  /financialLedger|postTransaction|accountingTransactions/.test(payoutHandler) === false);
+/*
+ * PINNED, NOT ENDORSED — see the audit note.
+ *
+ * The handler writes no ledger row directly, but `markTransferReversed` (in
+ * creator-transfers.ts) does: it posts `payout_reversed` against
+ * creator_payable / provider_balance. So a payout event DOES reach a
+ * money-moving posting, one delegation away.
+ *
+ * And payout events are NOT in OWNERSHIP_GATED, even though the gate's own
+ * comment says "for every event that will one day move money, the resource is
+ * fetched back from Whop". This check records that state so the gap is visible
+ * and any future change to it is deliberate — it asserts what IS true today,
+ * and must be INVERTED (not deleted) when payouts join the gate.
+ */
+check("PINNED GAP: payout events are not ownership-gated, though their path can post",
+  gateBlock.includes('"payout.') === false &&
+  /await markTransferReversed\(payoutId\)/.test(payoutHandler));
 check("no transfer or withdrawal event was enabled",
   supported.some((e) => /transfer|withdrawal/.test(e)) === false);
 
@@ -243,6 +286,717 @@ check("five of the six events share one resolver",
   source.includes('"payment.created": handleWhopPaymentPending') &&
   source.includes('"payment.authorized": handleWhopPaymentPending') &&
   source.includes('"payment.canceled": handleWhopPaymentFailed'));
+
+/* ==========================================================================
+   A. TRANSFER STATE CHANGES ARE ENVIRONMENT-SCOPED
+
+   `provider_transfer_id` is WHOP's identifier. Sandbox and production are
+   separate id spaces, so nothing guarantees a value is unique across them —
+   matching on it alone would let a sandbox `payout.*` delivery settle or
+   reverse a PRODUCTION transfer.
+
+   Proved FUNCTIONALLY rather than by reading the source: the module is
+   transpiled with a fake drizzle that records the predicate it is handed and a
+   two-row store holding the SAME provider id in both environments. If the
+   scope were dropped, the production row would move and these would fail.
+
+   Entirely in-process — no database, no network.
+   ========================================================================== */
+
+console.log("\n--- A. transfer state changes are environment-scoped ---");
+
+{
+  // Drizzle exposes rows with camelCase properties, so the fake column tags and
+  // the fake row keys use the same names the module actually reads.
+  const COL = {
+    transferId: "transferId",
+    providerTransferId: "providerTransferId",
+    environment: "environment",
+    status: "status",
+    createdAt: "createdAt",
+  };
+
+  const matches = (cond, row) => {
+    if (!cond) return true;
+    if (cond.op === "and") return cond.parts.every((p) => matches(p, row));
+    if (cond.op === "eq") return row[cond.col] === cond.val;
+    // The sweep's age filter arrives as a drizzle `sql` template —
+    // sql`${createdAt} < ${cutoff}` — so the tag captures both interpolations
+    // and the comparison is evaluated for real rather than waved through.
+    if (cond.op === "lt") return row[cond.col] < cond.val;
+    return false;
+  };
+
+  /** Builds the module over an in-memory store; returns it plus a call log. */
+  function loadTransfers({ rows, environment }) {
+    const log = { wheres: [], updated: [], inserted: [] };
+    const store = rows.map((r) => ({ ...r }));
+
+    const updateBuilder = () => ({
+      set(values) {
+        this._values = values;
+        return this;
+      },
+      where(cond) {
+        log.wheres.push(cond);
+        for (const row of store) {
+          if (matches(cond, row)) {
+            Object.assign(row, this._values);
+            log.updated.push(row.transferId);
+          }
+        }
+        return Promise.resolve();
+      },
+    });
+
+    const selectBuilder = () => ({
+      from() { return this; },
+      where(cond) { log.wheres.push(cond); this._cond = cond; return this; },
+      limit() { return Promise.resolve(store.filter((r) => matches(this._cond, r))); },
+      then(res, rej) { return Promise.resolve(store.filter((r) => matches(this._cond, r))).then(res, rej); },
+    });
+
+    const tx = {
+      insert() {
+        return {
+          values(v) {
+            log.inserted.push(v);
+            return { returning: () => Promise.resolve([{ transactionId: "txn_fake" }]) };
+          },
+        };
+      },
+      update: updateBuilder,
+    };
+
+    const DB = {
+      select: selectBuilder,
+      update: updateBuilder,
+      insert: tx.insert,
+      transaction: async (fn) => fn(tx),
+    };
+
+    const js = ts.transpileModule(readFileSync("src/lib/server/creator-transfers.ts", "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+
+    const req = (spec) => {
+      if (spec === "server-only") return {};
+      if (spec === "crypto") return require("node:crypto");
+      if (spec === "drizzle-orm") {
+        return {
+          eq: (col, val) => ({ op: "eq", col, val }),
+          and: (...parts) => ({ op: "and", parts: parts.filter(Boolean) }),
+          sql: (_strings, col, val) => ({ op: "lt", col, val }),
+        };
+      }
+      if (spec === "@/lib/db") return { getDb: () => DB, schema: { creatorTransfers: COL, accountingTransactions: {}, accountingEntries: {}, whopAccounts: {} } };
+      if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
+      if (spec.endsWith("whop-accounts")) return { resolvePlatformConfig: () => ({ ok: false, reason: "unconfigured" }) };
+      if (spec.endsWith("whop-payout-status")) return { fetchPayoutStatus: async () => null };
+      if (spec.endsWith("whop-transfers")) return { callWhopTransfer: async () => ({ ok: false }) };
+      return require(spec);
+    };
+
+    const mod = { exports: {} };
+    new Function("module", "exports", "require", js)(mod, mod.exports, req);
+    return { mod: mod.exports, log, store };
+  }
+
+  // The same provider id exists in BOTH environments — the collision the fix
+  // is for. Only the sandbox row may ever move.
+  const twoEnvRows = () => [
+    { transferId: "t_sandbox", providerTransferId: "tr_collide", environment: "sandbox", status: "pending", amountMinor: 1n, currency: "usd", whopAccountId: "biz_a" },
+    { transferId: "t_prod", providerTransferId: "tr_collide", environment: "production", status: "pending", amountMinor: 1n, currency: "usd", whopAccountId: "biz_b" },
+  ];
+
+  const carriesEnvironment = (cond, value) =>
+    cond?.op === "and" &&
+    cond.parts.some((p) => p.op === "eq" && p.col === COL.environment && p.val === value) &&
+    cond.parts.some((p) => p.op === "eq" && p.col === COL.providerTransferId);
+
+  /* --- markTransferCompleted --- */
+  {
+    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
+    const r = await mod.markTransferCompleted("tr_collide");
+    check("markTransferCompleted scopes its update by environment",
+      carriesEnvironment(log.wheres[0], "sandbox"));
+    check("it settles ONLY the row in the running environment",
+      r.ok === true && log.updated.join(",") === "t_sandbox");
+    check("a production transfer with the same provider id is NOT settled",
+      store.find((x) => x.transferId === "t_prod").status === "pending");
+    check("and the sandbox row did reach `completed` — the scope did not break the update",
+      store.find((x) => x.transferId === "t_sandbox").status === "completed");
+  }
+
+  /* --- markTransferReversed --- */
+  {
+    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
+    const r = await mod.markTransferReversed("tr_collide");
+    check("markTransferReversed scopes its lookup by environment",
+      carriesEnvironment(log.wheres[0], "sandbox"));
+    check("it reverses ONLY the row in the running environment",
+      r.ok === true && store.find((x) => x.transferId === "t_prod").status === "pending");
+    check("and it still writes the reversal journal for the matched row",
+      log.inserted.length >= 2);
+  }
+
+  /* --- the cross-environment case, stated directly --- */
+  {
+    // Running as PRODUCTION, with only a sandbox row present: nothing matches.
+    const rows = [{ transferId: "t_sandbox", providerTransferId: "tr_collide", environment: "sandbox", status: "pending", amountMinor: 1n, currency: "usd", whopAccountId: "biz_a" }];
+    const completed = loadTransfers({ rows, environment: "production" });
+    await completed.mod.markTransferCompleted("tr_collide");
+    check("an id match in ANOTHER environment cannot be settled",
+      completed.log.updated.length === 0 &&
+      completed.store[0].status === "pending");
+
+    const reversed = loadTransfers({ rows, environment: "production" });
+    const rr = await reversed.mod.markTransferReversed("tr_collide");
+    check("an id match in ANOTHER environment cannot be reversed",
+      rr.ok === false && reversed.log.inserted.length === 0 && reversed.store[0].status === "pending");
+  }
+
+  /* --- the environment source is server-side and not caller-selectable --- */
+  {
+    const { mod, log } = loadTransfers({ rows: twoEnvRows(), environment: null });
+    const c = await mod.markTransferCompleted("tr_collide");
+    const v = await mod.markTransferReversed("tr_collide");
+    check("an unresolvable environment fails CLOSED, with no query issued",
+      c.ok === false && v.ok === false && log.wheres.length === 0);
+
+    // Both take exactly one argument, so there is no seam for a webhook
+    // payload, query parameter or request body to name the environment.
+    check("no caller can select the environment — both take only the provider id",
+      mod.markTransferCompleted.length === 1 && mod.markTransferReversed.length === 1);
+    const transferSource = readFileSync("src/lib/server/creator-transfers.ts", "utf8");
+    const markBlock = transferSource.slice(transferSource.indexOf("function resolveTransferEnvironment"));
+    check("the environment is read from getWhopEnvironment(), never from a payload",
+      markBlock.includes("return getWhopEnvironment();") &&
+      !/body|payload|searchParams|req\.|request\./i.test(
+        markBlock.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
+      ));
+  }
+
+  /* --- the protections that were already there must still be there --- */
+  {
+    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
+    await mod.markTransferReversed("tr_collide");
+    const key = log.inserted.flat().find((v) => v && v.idempotencyKey)?.idempotencyKey;
+    check("the reversal keeps its per-transfer idempotency key",
+      key === "whop:payout_reversed:transfer:t_sandbox", key);
+    check("the reversal still links back to the transaction it reverses",
+      log.inserted.flat().some((v) => v && "reversesTransactionId" in v));
+    check("and the matched row still lands in `reversed`",
+      store.find((x) => x.transferId === "t_sandbox").status === "reversed");
+  }
+
+  /* --- the reconciliation sweep is scoped too --- */
+  {
+    const sweepRows = () => [
+      { transferId: "t_sandbox_old", providerTransferId: "tr_a", environment: "sandbox", status: "pending", createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+      { transferId: "t_prod_old", providerTransferId: "tr_b", environment: "production", status: "pending", createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+      { transferId: "t_sandbox_done", providerTransferId: "tr_c", environment: "sandbox", status: "completed", createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+      { transferId: "t_sandbox_fresh", providerTransferId: "tr_d", environment: "sandbox", status: "pending", createdAt: new Date() },
+    ];
+
+    const sandbox = loadTransfers({ rows: sweepRows(), environment: "sandbox" });
+    const found = await sandbox.mod.getPendingTransfersOlderThanMinutes(30);
+    check("the sweep returns only PENDING rows from the active environment",
+      found.map((r) => r.transferId).join(",") === "t_sandbox_old", found.map((r) => r.transferId).join(","));
+    check("a production row is invisible in sandbox mode",
+      found.some((r) => r.transferId === "t_prod_old") === false);
+    check("the sweep still filters by status — a completed row is excluded",
+      found.some((r) => r.transferId === "t_sandbox_done") === false);
+    check("the sweep still filters by age — a fresh row is excluded",
+      found.some((r) => r.transferId === "t_sandbox_fresh") === false);
+
+    const prod = loadTransfers({ rows: sweepRows(), environment: "production" });
+    const foundProd = await prod.mod.getPendingTransfersOlderThanMinutes(30);
+    check("a sandbox row is invisible in production mode",
+      foundProd.map((r) => r.transferId).join(",") === "t_prod_old", foundProd.map((r) => r.transferId).join(","));
+
+    const unset = loadTransfers({ rows: sweepRows(), environment: null });
+    const none = await unset.mod.getPendingTransfersOlderThanMinutes(30);
+    check("an unresolvable environment performs NO broad query and returns nothing",
+      none.length === 0 && unset.log.wheres.length === 0);
+
+    check("the sweep takes no environment argument a caller could aim",
+      unset.mod.getPendingTransfersOlderThanMinutes.length === 1);
+  }
+}
+
+/* ==========================================================================
+   A. THE NOTIFICATION TRIGGERS NEVER TAKE ENVIRONMENT FROM THE PAYLOAD
+
+   `account.updated` used to read the environment out of the webhook body
+   (`data.environment ?? root.environment`) and hand it to the account lookup.
+   Externally-supplied JSON could therefore choose which environment's
+   `whop_accounts` row to resolve, so a sandbox delivery claiming
+   `"environment": "production"` would have resolved — and notified — a
+   PRODUCTION creator.
+
+   Proved functionally against an in-memory store, with the payload actively
+   lying about the environment. No database, no network.
+   ========================================================================== */
+
+console.log("\n--- A. notification triggers ignore payload environment ---");
+
+{
+  const COL = {
+    whopAccountId: "whopAccountId",
+    whopPaymentId: "whopPaymentId",
+    providerTransferId: "providerTransferId",
+    environment: "environment",
+    firebaseUid: "firebaseUid",
+  };
+
+  const matches = (cond, row) => {
+    if (!cond) return true;
+    if (cond.op === "and") return cond.parts.every((p) => matches(p, row));
+    if (cond.op === "eq") return row[cond.col] === cond.val;
+    return false;
+  };
+
+  function loadTriggers({ accounts = [], earnings = [], transfers = [], environment }) {
+    const log = { wheres: [], notifications: [] };
+
+    const selectBuilder = () => ({
+      from(table) { this._rows = table; return this; },
+      where(cond) { log.wheres.push(cond); this._cond = cond; return this; },
+      limit() { return Promise.resolve(this._rows.filter((r) => matches(this._cond, r))); },
+    });
+
+    const DB = { select: selectBuilder };
+
+    const js = ts.transpileModule(readFileSync("src/lib/server/notification-triggers.ts", "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+
+    const req = (spec) => {
+      if (spec === "server-only") return {};
+      if (spec === "drizzle-orm") {
+        return {
+          eq: (col, val) => ({ op: "eq", col, val }),
+          and: (...parts) => ({ op: "and", parts: parts.filter(Boolean) }),
+        };
+      }
+      if (spec === "@/lib/db") return { getDb: () => DB };
+      if (spec === "@/lib/db/schema") {
+        return { creatorEarnings: earnings, creatorTransfers: transfers, whopAccounts: accounts };
+      }
+      if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
+      if (spec.endsWith("notifications")) {
+        return { writeNotification: async (n) => { log.notifications.push(n); } };
+      }
+      return require(spec);
+    };
+
+    const mod = { exports: {} };
+    new Function("module", "exports", "require", js)(mod, mod.exports, req);
+    return { triggers: mod.exports, log };
+  }
+
+  /** A row array that also carries the column tags, so it doubles as a table. */
+  const table = (rows) => Object.assign(rows, COL);
+
+  // The SAME whop account id in both environments, owned by different creators.
+  const collidingAccounts = () => table([
+    { whopAccountId: "biz_collide", environment: "sandbox", firebaseUid: "uid_sandbox" },
+    { whopAccountId: "biz_collide", environment: "production", firebaseUid: "uid_production" },
+  ]);
+
+  /* --- the trusted environment decides, not the caller --- */
+  {
+    const { triggers, log } = loadTriggers({ accounts: collidingAccounts(), environment: "sandbox" });
+    await triggers.notifyAccountUpdated("biz_collide", "active");
+    check("the account lookup is scoped to the TRUSTED environment",
+      log.wheres[0]?.op === "and" &&
+      log.wheres[0].parts.some((p) => p.col === COL.environment && p.val === "sandbox"));
+    check("the notification goes to the sandbox creator, not the production one",
+      log.notifications.length === 1 && log.notifications[0].firebaseUid === "uid_sandbox",
+      log.notifications[0]?.firebaseUid);
+  }
+
+  /* --- a lying payload reaches the dispatcher and is still ignored --- */
+  {
+    const { triggers, log } = loadTriggers({ accounts: collidingAccounts(), environment: "sandbox" });
+    // The dispatcher is the seam the payload actually arrives through. Running
+    // as SANDBOX, with the body insisting it is production, twice over.
+    await triggers.fireWebhookNotifications("account.updated", "biz_collide", {
+      data: { id: "biz_collide", status: "active", environment: "production" },
+      environment: "production",
+    });
+    check("a payload claiming the OTHER environment cannot select it",
+      log.wheres.length > 0 &&
+      log.wheres.every((w) =>
+        w.op === "and" && w.parts.some((p) => p.col === COL.environment && p.val === "sandbox")));
+    check("and the creator notified is still the one in the running environment",
+      log.notifications.length > 0 &&
+      log.notifications.every((n) => n.firebaseUid === "uid_sandbox"),
+      log.notifications.map((n) => n.firebaseUid).join(","));
+  }
+
+  /* --- the existing behaviour still works for the active environment --- */
+  {
+    const { triggers, log } = loadTriggers({ accounts: collidingAccounts(), environment: "production" });
+    await triggers.fireWebhookNotifications("account.updated", "biz_collide", {
+      data: { id: "biz_collide", status: "active" },
+    });
+    check("with no environment in the payload at all, the notification still fires",
+      log.notifications.length === 1 && log.notifications[0].type === "kyc_approved");
+    check("and it reaches the creator in the running environment",
+      log.notifications[0].firebaseUid === "uid_production");
+  }
+
+  /* --- fail closed --- */
+  {
+    const { triggers, log } = loadTriggers({ accounts: collidingAccounts(), environment: null });
+    await triggers.notifyAccountUpdated("biz_collide", "active");
+    check("an unresolvable environment performs NO lookup and sends nothing",
+      log.wheres.length === 0 && log.notifications.length === 0);
+  }
+
+  /* --- the signature itself leaves no seam --- */
+  {
+    const source = readFileSync("src/lib/server/notification-triggers.ts", "utf8");
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    check("notifyAccountUpdated takes no environment parameter",
+      /export async function notifyAccountUpdated\(\s*whopAccountId: string,\s*newStatus: string,\s*\)/.test(code));
+    check("the dispatcher never reads an environment field from the payload",
+      !/data\.environment|root\.environment/.test(code));
+    check("every trigger resolves the environment from the trusted helper",
+      (code.match(/const environment = getWhopEnvironment\(\);/g) ?? []).length === 5);
+    check("and no trigger queries an env-scoped table without the predicate",
+      !/\.where\(eq\((creatorEarnings|creatorTransfers|whopAccounts)\./.test(code));
+  }
+}
+
+/* ==========================================================================
+   A. THE FINANCIAL LOOKUPS CANNOT CROSS ENVIRONMENTS
+
+   Driven against an in-memory store holding the SAME Whop payment id in BOTH
+   environments, owned by different creators. `creator_earnings` makes this
+   concrete: its unique index is (whop_payment_id, firebase_uid), so a payment
+   id genuinely CAN appear in sandbox and production at once — the collision is
+   not hypothetical, and before the fix a sandbox dispute could freeze and
+   reverse a production creator's earning.
+
+   In-process only. No database, no network, no provider.
+   ========================================================================== */
+
+console.log("\n--- A. financial lookups cannot cross environments ---");
+
+{
+  const COL = {
+    earningId: "earningId", whopPaymentId: "whopPaymentId", firebaseUid: "firebaseUid",
+    environment: "environment", status: "status", grossAmountMinor: "grossAmountMinor",
+    platformFeeMinor: "platformFeeMinor", netAmountMinor: "netAmountMinor",
+    platformFeeBps: "platformFeeBps", currency: "currency", frozenByDispute: "frozenByDispute",
+    frozenByDisputeId: "frozenByDisputeId", holdUntil: "holdUntil", reversedAt: "reversedAt",
+    updatedAt: "updatedAt", amountMinor: "amountMinor", whopRefundId: "whopRefundId",
+    whopDisputeId: "whopDisputeId", createdAt: "createdAt", provider: "provider",
+  };
+
+  const matches = (cond, row) => {
+    if (!cond) return true;
+    if (cond.op === "and") return cond.parts.every((p) => matches(p, row));
+    if (cond.op === "eq") return row[cond.col] === cond.val;
+    if (cond.op === "sqlNe") return row[cond.col] !== cond.val;
+    return true; // an opaque sql fragment must not silently exclude rows
+  };
+
+  /** Builds a module over an in-memory store, recording every predicate. */
+  function loadWithStore(file, { rows, environment, extra = {} }) {
+    const log = { wheres: [], updated: [], selects: 0 };
+    const store = rows.map((r) => ({ ...r }));
+
+    let inserted = 0;
+    const builder = () => ({
+      from() { return this; },
+      set(v) { this._values = v; return this; },
+      // `insert(t).values(v).returning(...)` — the row is appended to the store
+      // so a follow-up read sees it, and an id is handed back like Postgres
+      // would. Marked with `_insert` so `where` is not mistaken for an update.
+      values(v) {
+        this._insert = { earningId: `e_new_${++inserted}`, ...v };
+        store.push(this._insert);
+        return this;
+      },
+      returning() {
+        if (this._insert) return Promise.resolve([this._insert]);
+        return Promise.resolve(store.filter((r) => matches(this._cond, r)));
+      },
+      where(cond) {
+        log.wheres.push(cond);
+        this._cond = cond;
+        if (this._values) {
+          for (const row of store) {
+            if (matches(cond, row)) { Object.assign(row, this._values); log.updated.push(row.earningId ?? row.whopRefundId); }
+          }
+          return Promise.resolve();
+        }
+        return this;
+      },
+      orderBy() { return this; },
+      groupBy() { return this; },
+      innerJoin() { return this; },
+      limit() { return Promise.resolve(store.filter((r) => matches(this._cond, r))); },
+      then(res, rej) {
+        log.selects++;
+        return Promise.resolve(store.filter((r) => matches(this._cond, r))).then(res, rej);
+      },
+    });
+
+    const DB = { select: builder, update: builder, insert: builder, transaction: async (fn) => fn(DB) };
+
+    const js = ts.transpileModule(readFileSync(file, "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+
+    const req = (spec) => {
+      if (spec === "server-only") return {};
+      if (spec === "drizzle-orm") {
+        return {
+          eq: (col, val) => ({ op: "eq", col, val }),
+          and: (...p) => ({ op: "and", parts: p.filter(Boolean) }),
+          or: (...p) => ({ op: "or", parts: p.filter(Boolean) }),
+          asc: () => ({}), lte: () => ({}), inArray: () => ({}),
+          sql: (strings, col, val) => {
+            const t = strings.join("?");
+            if (/!=/.test(t)) return { op: "sqlNe", col, val };
+            return { op: "sql" };
+          },
+        };
+      }
+      if (spec === "@/lib/db") {
+        return { getDb: () => DB, schema: { creatorEarnings: COL, paymentRefunds: COL, paymentDisputes: COL, accountingTransactions: COL, accountingEntries: COL } };
+      }
+      if (spec === "@/lib/db/schema") {
+        return { creatorEarnings: COL, paymentRefunds: COL, paymentDisputes: COL, accountingTransactions: COL, accountingEntries: COL, disputeAlerts: COL, resolutionCenterCases: COL, whopAccounts: COL, paymentOrders: COL };
+      }
+      if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
+      if (extra[spec]) return extra[spec];
+      // The earnings POLICY is pure arithmetic — hold windows, the fee split,
+      // the balance reduction. Stubbing it would make the balance assertions
+      // meaningless, so it is loaded for real.
+      if (spec.endsWith("creator-earnings-policy")) {
+        const pjs = ts.transpileModule(readFileSync("src/lib/server/creator-earnings-policy.ts", "utf8"), {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+        }).outputText;
+        const pm = { exports: {} };
+        new Function("module", "exports", "require", pjs)(pm, pm.exports, req);
+        return pm.exports;
+      }
+      return new Proxy({}, { get: () => () => undefined });
+    };
+
+    const mod = { exports: {} };
+    new Function("module", "exports", "require", js)(mod, mod.exports, req);
+    return { mod: mod.exports, log, store };
+  }
+
+  /* --- creator earnings: the same payment id in both environments --- */
+  const collidingEarnings = () => [
+    { earningId: "e_sandbox", whopPaymentId: "pay_collide", firebaseUid: "uid_sandbox", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, currency: "usd" },
+    { earningId: "e_prod", whopPaymentId: "pay_collide", firebaseUid: "uid_production", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 9999n, platformFeeMinor: 1999n, netAmountMinor: 8000n, platformFeeBps: 2000, currency: "usd" },
+  ];
+
+  const EARNINGS = "src/lib/server/creator-earnings.ts";
+  const posts = [];
+  const postingStub = {
+    "./accounting/revenue-split-posting": {
+      postRevenueSplit: async () => ({ ok: true }),
+      postRevenueSplitReversal: async (i) => { posts.push(i); return { ok: true }; },
+    },
+  };
+
+  {
+    const { mod, store } = loadWithStore(EARNINGS, { rows: collidingEarnings(), environment: "sandbox", extra: postingStub });
+    const r = await mod.freezeForDispute("pay_collide", "dp_1");
+    check("freezeForDispute freezes ONLY the sandbox earning",
+      r.ok === true &&
+      store.find((x) => x.earningId === "e_sandbox").frozenByDispute === true &&
+      store.find((x) => x.earningId === "e_prod").frozenByDispute === false);
+  }
+  {
+    const rows = collidingEarnings().map((r) => ({ ...r, frozenByDispute: true, frozenByDisputeId: "dp_1" }));
+    const { mod, store } = loadWithStore(EARNINGS, { rows, environment: "sandbox", extra: postingStub });
+    await mod.unfreezeFromDispute("pay_collide");
+    check("unfreezeFromDispute unfreezes ONLY the sandbox earning",
+      store.find((x) => x.earningId === "e_sandbox").frozenByDispute === false &&
+      store.find((x) => x.earningId === "e_prod").frozenByDispute === true);
+  }
+  {
+    posts.length = 0;
+    const { mod, store } = loadWithStore(EARNINGS, { rows: collidingEarnings(), environment: "sandbox", extra: postingStub });
+    const r = await mod.reverseForDispute({ whopPaymentId: "pay_collide", whopDisputeId: "dp_1", environment: "sandbox" });
+    check("reverseForDispute reverses ONLY the sandbox earning",
+      r.ok === true &&
+      store.find((x) => x.earningId === "e_sandbox").status === "reversed" &&
+      store.find((x) => x.earningId === "e_prod").status === "available");
+    check("and it posts a reversal for the sandbox creator only",
+      posts.length === 1 && posts[0].creatorFirebaseUid === "uid_sandbox",
+      posts.map((p) => p.creatorFirebaseUid).join(","));
+    check("the reversal keeps the dispute id as its idempotency anchor",
+      posts[0].refundOrDisputeId === "dp_1");
+  }
+  {
+    posts.length = 0;
+    const { mod, store } = loadWithStore(EARNINGS, { rows: collidingEarnings(), environment: "production", extra: postingStub });
+    const r = await mod.reverseForRefund({ whopPaymentId: "pay_collide", refundId: "rf_1", refundAmountMinor: 9999n, currency: "usd", environment: "production" });
+    check("reverseForRefund in PRODUCTION cannot touch the sandbox earning",
+      r.ok === true &&
+      store.find((x) => x.earningId === "e_prod").status === "reversed" &&
+      store.find((x) => x.earningId === "e_sandbox").status === "available");
+    check("and the refund id remains the reversal's idempotency anchor",
+      posts.length === 1 && posts[0].refundOrDisputeId === "rf_1");
+  }
+  {
+    const { mod, log, store } = loadWithStore(EARNINGS, { rows: collidingEarnings(), environment: null, extra: postingStub });
+    const a = await mod.freezeForDispute("pay_collide", "dp_1");
+    const b = await mod.unfreezeFromDispute("pay_collide");
+    const c = await mod.reverseForDispute({ whopPaymentId: "pay_collide", whopDisputeId: "dp_1", environment: "sandbox" });
+    const d = await mod.reverseForRefund({ whopPaymentId: "pay_collide", refundId: "rf_1", refundAmountMinor: 1n, currency: "usd", environment: "sandbox" });
+    check("an unresolvable environment fails CLOSED on every earnings path",
+      [a, b, c, d].every((x) => x.ok === false));
+    check("and issues NO query and mutates NOTHING",
+      log.wheres.length === 0 && log.updated.length === 0 &&
+      store.every((x) => x.status === "available" && x.frozenByDispute === false));
+  }
+
+  /* --- refunds: the same payment id in both environments --- */
+  {
+    const rows = [
+      { whopRefundId: "rf_sandbox", whopPaymentId: "pay_collide", environment: "sandbox", status: "completed", amountMinor: 500n, provider: "whop", createdAt: new Date(1) },
+      { whopRefundId: "rf_prod", whopPaymentId: "pay_collide", environment: "production", status: "completed", amountMinor: 7777n, provider: "whop", createdAt: new Date(2) },
+    ];
+    const sandbox = loadWithStore("src/lib/server/payment-refunds.ts", { rows, environment: "sandbox" });
+    const listed = await sandbox.mod.listRefundsForPaymentLocal("pay_collide");
+    check("listRefundsForPaymentLocal returns only this environment's refunds",
+      listed.length === 1 && listed[0].whopRefundId === "rf_sandbox",
+      listed.map((r) => r.whopRefundId).join(","));
+
+    const prod = loadWithStore("src/lib/server/payment-refunds.ts", { rows, environment: "production" });
+    const listedProd = await prod.mod.listRefundsForPaymentLocal("pay_collide");
+    check("and in production mode the sandbox refund is invisible",
+      listedProd.length === 1 && listedProd[0].whopRefundId === "rf_prod");
+
+    const unset = loadWithStore("src/lib/server/payment-refunds.ts", { rows, environment: null });
+    const none = await unset.mod.listRefundsForPaymentLocal("pay_collide");
+    const zero = await unset.mod.localCompletedRefundTotal("pay_collide");
+    check("an unresolvable environment returns nothing and issues no refund query",
+      none.length === 0 && zero === BigInt(0) && unset.log.wheres.length === 0);
+  }
+
+  /* --- disputes: the same payment id in both environments --- */
+  {
+    const rows = [
+      { whopDisputeId: "dp_sandbox", whopPaymentId: "pay_collide", environment: "sandbox", status: "lost", provider: "whop", createdAt: new Date(1) },
+      { whopDisputeId: "dp_prod", whopPaymentId: "pay_collide", environment: "production", status: "lost", provider: "whop", createdAt: new Date(2) },
+    ];
+    const sandbox = loadWithStore("src/lib/server/payment-disputes.ts", { rows, environment: "sandbox" });
+    const listed = await sandbox.mod.listDisputesForPaymentLocal("pay_collide");
+    check("listDisputesForPaymentLocal returns only this environment's disputes",
+      listed.length === 1 && listed[0].whopDisputeId === "dp_sandbox",
+      listed.map((r) => r.whopDisputeId).join(","));
+
+    const unset = loadWithStore("src/lib/server/payment-disputes.ts", { rows, environment: null });
+    const none = await unset.mod.listDisputesForPaymentLocal("pay_collide");
+    check("an unresolvable environment returns nothing and issues no dispute query",
+      none.length === 0 && unset.log.wheres.length === 0);
+  }
+
+  /* --- the same provider id may now exist ONCE PER ENVIRONMENT --------
+   *
+   * This is what migration 0011 bought. Before it, the unique index was
+   * global, so these two rows could not coexist — and the read-back serving
+   * that index could not be scoped without disagreeing with its own ON
+   * CONFLICT target. Now both rows exist and each environment sees only its
+   * own, while idempotency WITHIN an environment is unchanged.
+   */
+  {
+    const bothEnv = () => [
+      { earningId: "e_sandbox", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, currency: "usd" },
+      { earningId: "e_prod", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 5000n, platformFeeMinor: 1000n, netAmountMinor: 4000n, platformFeeBps: 2000, currency: "usd" },
+    ];
+
+    // IDEMPOTENCY WITHIN THE ENVIRONMENT: the sandbox row is found, so the
+    // call reports alreadyRecorded and writes nothing.
+    const sandbox = loadWithStore(EARNINGS, { rows: bothEnv(), environment: "sandbox", extra: postingStub });
+    const same = await sandbox.mod.recordCreatorEarning({
+      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 1000n,
+      currency: "usd", environment: "sandbox", paymentSettledAt: new Date(),
+    });
+    check("recordCreatorEarning is still idempotent WITHIN one environment",
+      same.ok === true && same.alreadyRecorded === true && same.earningId === "e_sandbox",
+      same.ok ? same.earningId : same.reason);
+
+    // CROSS-ENVIRONMENT: running as production must NOT report the sandbox row
+    // as already-recorded. That was the exact wrong-row answer the global index
+    // used to force.
+    const prod = loadWithStore(EARNINGS, { rows: bothEnv(), environment: "production", extra: postingStub });
+    const cross = await prod.mod.recordCreatorEarning({
+      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 5000n,
+      currency: "usd", environment: "production", paymentSettledAt: new Date(),
+    });
+    check("and in production it resolves the PRODUCTION row, never the sandbox one",
+      cross.ok === true && cross.earningId === "e_prod",
+      cross.ok ? cross.earningId : cross.reason);
+
+    // A genuinely new payment in an environment that has no row for it must
+    // not be short-circuited by the other environment's row.
+    const fresh = loadWithStore(EARNINGS, {
+      rows: [bothEnv()[1]], environment: "sandbox", extra: postingStub,
+    });
+    const created = await fresh.mod.recordCreatorEarning({
+      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 1000n,
+      currency: "usd", environment: "sandbox", paymentSettledAt: new Date(),
+    });
+    check("a production row does NOT make a sandbox earning look already-recorded",
+      created.ok === true && created.alreadyRecorded !== true,
+      created.ok ? `alreadyRecorded=${created.alreadyRecorded}` : created.reason);
+    check("the idempotency read-back predicate carries the environment",
+      fresh.log.wheres[0]?.op === "and" &&
+      fresh.log.wheres[0].parts.some((p) => p.col === "environment" && p.val === "sandbox"));
+  }
+
+  /* --- creator balance and withdrawal eligibility are environment-scoped --- */
+  {
+    const mixed = () => [
+      { earningId: "e_s", whopPaymentId: "pay_s", firebaseUid: "uid_a", environment: "sandbox", status: "available", frozenByDispute: false, netAmountMinor: 800n, currency: "usd", holdUntil: new Date(0), createdAt: new Date(1) },
+      { earningId: "e_p", whopPaymentId: "pay_p", firebaseUid: "uid_a", environment: "production", status: "available", frozenByDispute: false, netAmountMinor: 4000n, currency: "usd", holdUntil: new Date(0), createdAt: new Date(2) },
+    ];
+
+    const sb = loadWithStore(EARNINGS, { rows: mixed(), environment: "sandbox", extra: postingStub });
+    const sbBal = await sb.mod.getCreatorBalance("uid_a");
+    check("the sandbox balance EXCLUDES the production earning",
+      sbBal.ok === true && sbBal.balance.availableMinor === 800n,
+      sbBal.ok ? String(sbBal.balance.availableMinor) : sbBal.reason);
+
+    const pr = loadWithStore(EARNINGS, { rows: mixed(), environment: "production", extra: postingStub });
+    const prBal = await pr.mod.getCreatorBalance("uid_a");
+    check("the production balance EXCLUDES the sandbox earning",
+      prBal.ok === true && prBal.balance.availableMinor === 4000n,
+      prBal.ok ? String(prBal.balance.availableMinor) : prBal.reason);
+    check("so no cross-environment total is ever offered as withdrawable",
+      sbBal.balance.availableMinor + prBal.balance.availableMinor === 4800n &&
+      sbBal.balance.availableMinor !== 4800n && prBal.balance.availableMinor !== 4800n);
+
+    const unset = loadWithStore(EARNINGS, { rows: mixed(), environment: null, extra: postingStub });
+    const none = await unset.mod.getCreatorBalance("uid_a");
+    check("an unresolvable environment fails CLOSED on the balance, with no query",
+      none.ok === false && unset.log.wheres.length === 0);
+  }
+
+  /* --- every scoped predicate actually names the environment --- */
+  {
+    const { mod, log } = loadWithStore(EARNINGS, { rows: collidingEarnings(), environment: "sandbox", extra: postingStub });
+    await mod.freezeForDispute("pay_collide", "dp_1");
+    const carries = (c) => c?.op === "and" && c.parts.some((p) => p.op === "eq" && p.col === "environment" && p.val === "sandbox");
+    check("the predicate handed to the driver names the trusted environment",
+      log.wheres.length > 0 && log.wheres.every(carries));
+  }
+}
 
 /* ==========================================================================
    PART B — sequences, against real Postgres and a fake Whop

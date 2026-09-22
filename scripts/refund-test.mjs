@@ -311,9 +311,36 @@ check(
   "a negative refund is refused",
   readRefund({ ...legacyShape, amount: -5 }).ok === false,
 );
+// THE SUPPORTED-CURRENCY TABLE IS NOW A FULL ISO-4217 SET, so "eur" stopped
+// being an example of an unsupported code. Replaced rather than deleted: the
+// property that must stay true is "an unknown code is refused, never silently
+// defaulted to usd" — and the wider table makes a STRONGER property testable,
+// namely that each currency is scaled by its own exponent rather than by 100.
 check(
-  "an unsupported currency is refused, not defaulted to usd",
-  readRefund({ ...legacyShape, currency: "eur" }).reason === "unsupported_currency",
+  "an unknown currency code is refused, not defaulted to usd",
+  readRefund({ ...legacyShape, currency: "zzz" }).reason === "unsupported_currency",
+);
+check(
+  "a malformed currency is refused",
+  readRefund({ ...legacyShape, currency: "" }).reason === "unsupported_currency" &&
+    readRefund({ ...legacyShape, currency: null }).reason === "unsupported_currency" &&
+    readRefund({ ...legacyShape, currency: 978 }).reason === "unsupported_currency",
+);
+check(
+  "a now-supported currency is accepted at its own exponent — eur is 2dp",
+  readRefund({ ...legacyShape, amount: 2, currency: "eur" }).refund?.amountMinor === 200n,
+);
+check(
+  "a zero-decimal currency is NOT scaled by 100 — jpy",
+  readRefund({ ...legacyShape, amount: 500, currency: "jpy" }).refund?.amountMinor === 500n,
+);
+check(
+  "a three-decimal currency is scaled by 1000 — kwd",
+  readRefund({ ...legacyShape, amount: 2, currency: "kwd" }).refund?.amountMinor === 2000n,
+);
+check(
+  "the currency is carried through, never rewritten to usd",
+  readRefund({ ...legacyShape, amount: 2, currency: "eur" }).refund?.currency === "eur",
 );
 check(
   "a status-less refund is refused",
@@ -1897,14 +1924,58 @@ function sourceInvariants() {
     "no payout, transfer or withdrawal logic was added",
     !/payout_sent|payout_reversed|payout_clearing|withdrawal|\btransfers?\b/i.test(refundSource),
   );
+  // PAYOUTS ARE NOW IMPLEMENTED TOO. This previously recorded that the handler
+  // was an untouched stub, standing in for "no second path can move a refunded
+  // amount". Replaced rather than deleted: the property still holds, but has to
+  // be asserted against a payout path that exists rather than against absence.
+  {
+    const payoutBody = files.webhooks.slice(
+      files.webhooks.indexOf("export async function handleWhopPayoutUpdated"),
+      files.webhooks.indexOf("export async function handleWhopAccountUpdated"),
+    );
+    check(
+      "the payout webhook handler is implemented but references no refund logic",
+      payoutBody.length > 0 &&
+        !/refund|reverseForRefund|payment_refunds/i.test(payoutBody),
+    );
+  }
+  // THE REAL INVARIANT: the newer withdrawal/payout path cannot become a way
+  // around refund reversal. A refund reverses non-transferred earnings through
+  // an explicit compensating entry, and an already-transferred earning is NOT
+  // silently rewritten — the platform absorbs it.
+  const earningsSource = readFileSync("src/lib/server/creator-earnings.ts", "utf8");
   check(
-    // DISPUTES ARE NOW IMPLEMENTED (task 4), so only the payout stub remains.
-    // What this suite still needs to assert is that the REFUND work did not
-    // reach into either subject — proved below by the absence of dispute and
-    // payout vocabulary in the refund modules themselves.
-    "the payout webhook handler is still the untouched stub",
-    /export async function handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(
-      files.webhooks,
+    "a refund reverses earnings through an explicit revenue-split reversal",
+    /export async function reverseForRefund\(/.test(earningsSource) &&
+      /postRevenueSplitReversal\(/.test(earningsSource),
+  );
+  check(
+    "the reversal is idempotent per refund id, so a replay cannot double it",
+    /economicKey\(\s*"whop",\s*"revenue_split_reversed",\s*`\$\{refundOrDisputeId\}:\$\{creatorFirebaseUid\}`,?\s*\)/s.test(
+      readFileSync("src/lib/server/accounting/revenue-split-posting.ts", "utf8"),
+    ),
+  );
+  check(
+    // Asserted over CODE, not the comment that explains it: the reversal's
+    // WHERE clause is scoped to held/available, so a `transferred` earning —
+    // one a payout already moved — is outside every reversal statement. The
+    // platform absorbs it instead of clawing back a completed payout.
+    "a transferred earning is never reversed out from under a completed payout",
+    (() => {
+      const body = earningsSource.slice(
+        earningsSource.indexOf("export async function reverseForRefund"),
+      );
+      const scoped = body.match(
+        /or\(\s*eq\(schema\.creatorEarnings\.status, "held"\),\s*eq\(schema\.creatorEarnings\.status, "available"\),?\s*\)/gs,
+      );
+      // Both the read and the status update must carry the same scope.
+      return (scoped?.length ?? 0) >= 2 && !/status, "transferred"/.test(body);
+    })(),
+  );
+  check(
+    "and the withdrawal path reserves only earnings a reversal has not claimed",
+    /eq\(schema\.creatorEarnings\.frozenByDispute, false\)/.test(
+      readFileSync("src/lib/server/creator-withdrawals.ts", "utf8"),
     ),
   );
 
@@ -1939,7 +2010,64 @@ function sourceInvariants() {
   };
   const appFiles = walk("src/app");
   const refundRoutes = appFiles.filter((f) => /refund/i.test(f));
-  check("there is NO refund route under src/app", refundRoutes.length === 0, refundRoutes.join(","));
+  // A REFUND ROUTE NOW EXISTS. This previously recorded that none did, as a
+  // proxy for "no public surface can issue a refund". Replaced rather than
+  // deleted: the routes that landed are ADMIN reconciliation routes, so the
+  // property is asserted directly against them instead of against absence.
+  check(
+    "every refund route under src/app is an admin reconciliation route",
+    refundRoutes.length > 0 &&
+      refundRoutes.every((f) => f.startsWith("src/app/api/admin/reconciliation/")),
+    refundRoutes.join(","),
+  );
+  check(
+    "each one is admin-guarded AND origin-checked before it does anything",
+    refundRoutes.every((f) => {
+      const s = readFileSync(f, "utf8");
+      return s.includes("withAdminApi") && s.includes("checkRequestOrigin");
+    }),
+  );
+  check(
+    "the read route exposes GET only — no browser-reachable refund mutation",
+    refundRoutes
+      .filter((f) => f.includes("/reconciliation/refunds/"))
+      .every((f) => {
+        const s = readFileSync(f, "utf8");
+        return /export async function GET\(/.test(s) &&
+          !/export async function (POST|PUT|PATCH|DELETE)\(/.test(s);
+      }),
+  );
+  check(
+    "the path parameter is validated before it reaches the service layer",
+    refundRoutes
+      .filter((f) => f.includes("/reconciliation/refunds/"))
+      .every((f) => /invalid_payment_id/.test(readFileSync(f, "utf8"))),
+  );
+  check(
+    "the repair route defaults to a dry run and delegates to the recovery module",
+    refundRoutes
+      .filter((f) => f.includes("/repair/"))
+      .every((f) => {
+        const s = readFileSync(f, "utf8");
+        return /dry_run !== false/.test(s) && /recoverMissingRefundPostings/.test(s);
+      }),
+  );
+  check(
+    "a non-dry-run repair is written to the admin audit trail",
+    refundRoutes
+      .filter((f) => f.includes("/repair/"))
+      .every((f) => /writeAudit\(/.test(readFileSync(f, "utf8"))),
+  );
+  check(
+    "NO route issues a refund — nothing under src/app calls the create module",
+    refundRoutes.every((f) => !/whop-refund-create|createRefund\s*\(/.test(readFileSync(f, "utf8"))),
+  );
+  check(
+    "no refund route trusts a browser-supplied creator or account id",
+    refundRoutes.every(
+      (f) => !/body\.(firebase_uid|creator_uid|account_id|whop_account_id)/.test(readFileSync(f, "utf8")),
+    ),
+  );
 
   const importsCreate = appFiles.filter((f) =>
     /whop-refund-create/.test(readFileSync(f, "utf8")),
@@ -1998,10 +2126,35 @@ function sourceInvariants() {
     "refunds_payable is still NOT postable",
     /refunds_payable: \{[^}]*postable: false/s.test(accountsSource),
   );
+  // CREATOR EARNINGS NOW EXIST, so these two accounts had to become postable —
+  // the revenue_split event posts them. This previously asserted they were
+  // blocked; replaced rather than deleted, because the property it stood in for
+  // is "a refund POSTING cannot reach them itself", which is stronger and is
+  // now asserted directly against the refund modules.
   check(
-    "platform_revenue and creator_payable are still NOT postable",
-    /platform_revenue: \{[^}]*postable: false/s.test(accountsSource) &&
-      /creator_payable: \{[^}]*postable: false/s.test(accountsSource),
+    "platform_revenue and creator_payable are postable — the revenue split posts them",
+    /platform_revenue: \{[^}]*postable: true/s.test(accountsSource) &&
+      /creator_payable: \{[^}]*postable: true/s.test(accountsSource),
+  );
+  // Asserted over CODE, not prose — the same reason the dispute suite strips
+  // first. `whop-refund-posting.ts` names both accounts in its header precisely
+  // to explain that it refuses them ("No `platform_revenue`. No
+  // `creator_payable`."), so a bare word search reports the explanation as the
+  // offence. Comments and string literals go first; what is left is what runs.
+  const codeOnly = (text) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/"[^"\n]*"|'[^'\n]*'/g, '""');
+  check(
+    "but NO refund module posts either of them in CODE",
+    !/creator_payable|platform_revenue/.test(codeOnly(refundSource)),
+  );
+  check(
+    "a refund reaches them only through the separate revenue-split reversal event",
+    /economicEvent: "revenue_split_reversed"/.test(
+      readFileSync("src/lib/server/accounting/revenue-split-posting.ts", "utf8"),
+    ) && !/revenue_split_reversed/.test(refundSource),
   );
 
   // THE OPEN BUSINESS RULE IS STATED, NOT GUESSED.

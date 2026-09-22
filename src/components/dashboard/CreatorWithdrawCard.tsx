@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useT } from "@/i18n/provider";
 
 /* ==========================================================================
@@ -39,22 +39,6 @@ type Phase =
 
 const CANCELLABLE = new Set(["requested", "eligible"]);
 
-const STATUS_LABEL_KEYS: Record<string, keyof ReturnType<typeof useStatusLabels>> = {
-  requested: "statusRequested",
-  eligible: "statusEligible",
-  processing: "statusProcessing",
-  provider_pending: "statusProviderPending",
-  paid: "statusPaid",
-  failed: "statusFailed",
-  canceled: "statusCanceled",
-  reversed: "statusReversed",
-};
-
-function useStatusLabels() {
-  const t = useT();
-  return t.dashboard.withdraw;
-}
-
 function minorToDisplay(minor: bigint): string {
   return (Number(minor) / 100).toFixed(2);
 }
@@ -75,7 +59,12 @@ export function CreatorWithdrawCard() {
   const [fieldError, setFieldError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const load = async () => {
+  /**
+   * Reads balance + active withdrawal and returns the phase they imply. It
+   * touches no state of its own, so callers stay free to drop a result that
+   * arrived after the component went away or after a newer request started.
+   */
+  const fetchPhase = useCallback(async (): Promise<Phase> => {
     try {
       const [earningsRes, withdrawRes] = await Promise.all([
         fetch("/api/creator/earnings", { credentials: "include" }),
@@ -83,8 +72,7 @@ export function CreatorWithdrawCard() {
       ]);
 
       if (!earningsRes.ok || !withdrawRes.ok) {
-        setState({ phase: "error", message: d.errors.load });
-        return;
+        return { phase: "error", message: d.errors.load };
       }
 
       const earnings = await earningsRes.json() as { available_minor: string };
@@ -93,19 +81,34 @@ export function CreatorWithdrawCard() {
       const availableMinor = BigInt(earnings.available_minor);
 
       if (withdrawData.active) {
-        setState({ phase: "active", withdrawal: withdrawData.active, availableMinor });
-      } else if (availableMinor === BigInt(0)) {
-        setState({ phase: "no_balance" });
-      } else {
-        setState({ phase: "idle", availableMinor });
-        setAmountInput(minorToDisplay(availableMinor));
+        return { phase: "active", withdrawal: withdrawData.active, availableMinor };
       }
+      if (availableMinor === BigInt(0)) {
+        return { phase: "no_balance" };
+      }
+      return { phase: "idle", availableMinor };
     } catch {
-      setState({ phase: "error", message: d.errors.load });
+      return { phase: "error", message: d.errors.load };
     }
-  };
+  }, [d.errors.load]);
 
-  useEffect(() => { void load(); }, []);
+  /** Commits a fetched phase, pre-filling the amount field on a fresh balance. */
+  const applyPhase = useCallback((next: Phase) => {
+    setState(next);
+    if (next.phase === "idle") setAmountInput(minorToDisplay(next.availableMinor));
+  }, []);
+
+  const load = useCallback(async () => {
+    applyPhase(await fetchPhase());
+  }, [fetchPhase, applyPhase]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPhase().then((next) => {
+      if (!cancelled) applyPhase(next);
+    });
+    return () => { cancelled = true; };
+  }, [fetchPhase, applyPhase]);
 
   const handleSubmit = async () => {
     if (state.phase !== "idle") return;

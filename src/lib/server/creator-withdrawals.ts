@@ -133,7 +133,22 @@ export async function requestWithdrawal(
 
   if (amountMinor <= BigInt(0)) return { ok: false, reason: "amount_zero" };
 
-  // Check for an existing active withdrawal (best-effort; the UNIQUE index is the real guard)
+  // RESOLVED UP FRONT, because the earnings scan below needs it and because a
+  // withdrawal must not do any work at all if we cannot say which environment
+  // it belongs to. (It used to be resolved just before the insert; moving it
+  // here changes nothing about the row that gets written.)
+  const environment = getWhopEnvironment();
+  if (!environment) return { ok: false, reason: "db_unavailable" };
+
+  // Check for an existing active withdrawal (best-effort; the UNIQUE index is the real guard).
+  //
+  // NOT environment-scoped, deliberately: `uniq_withdrawal_active_creator` is
+  // on (firebase_uid) WHERE status is non-terminal, with no environment column,
+  // so one active withdrawal per creator is enforced GLOBALLY. Scoping this
+  // read would make it miss an active withdrawal in the other environment and
+  // disagree with the index that actually decides. That index is in the same
+  // family as the seven widened by migration 0011 but was not in scope for it —
+  // see the audit note.
   const [active] = await db
     .select({ withdrawalId: schema.creatorWithdrawals.withdrawalId })
     .from(schema.creatorWithdrawals)
@@ -147,7 +162,10 @@ export async function requestWithdrawal(
 
   if (active) return { ok: false, reason: "withdrawal_already_pending" };
 
-  // Fetch all available earnings (including held ones that have expired their hold)
+  // Fetch all available earnings (including held ones that have expired their
+  // hold), SCOPED TO THIS ENVIRONMENT. Without the scope a creator's sandbox
+  // test earnings counted towards a production withdrawal and vice versa —
+  // money reserved in one environment against a balance earned in the other.
   const earningRows = await db
     .select({
       earningId: schema.creatorEarnings.earningId,
@@ -161,6 +179,7 @@ export async function requestWithdrawal(
     .where(
       and(
         eq(schema.creatorEarnings.firebaseUid, firebaseUid),
+        eq(schema.creatorEarnings.environment, environment),
         eq(schema.creatorEarnings.currency, currency),
         or(
           eq(schema.creatorEarnings.status, "available"),
@@ -200,11 +219,10 @@ export async function requestWithdrawal(
 
   const reservedAmountMinor = runningTotal;
 
-  // Resolve the environment before inserting. A row written with the wrong
-  // environment would be permanently miscategorised if the subsequent platform
-  // check never ran (e.g. process crash, unconfigured WHOP_ENV).
-  const environment = getWhopEnvironment();
-  if (!environment) return { ok: false, reason: "db_unavailable" };
+  // The environment was resolved at the top of this function — before the
+  // earnings scan, which needs it too. A row written with the wrong
+  // environment would be permanently miscategorised, so it is still proved
+  // before the insert; it is simply proved earlier now.
 
   // Create the withdrawal row
   let withdrawalId: string;

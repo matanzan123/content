@@ -531,6 +531,71 @@ console.log("\n--- C. properties true by absence ---");
     store.includes("onConflictDoNothing"));
 }
 
+/* ======= the environment-scoping invariant, extended to transfers ========
+ *
+ * The rule asserted just above for `whop_accounts` is project-wide, and
+ * `creator_transfers` is the table where breaking it moves money: its
+ * `provider_transfer_id` is WHOP's id, not ours, and nothing makes it unique
+ * across environments. A lookup on that id alone would let a sandbox
+ * `payout.*` delivery settle or reverse a PRODUCTION transfer.
+ *
+ * Asserted over code with comments stripped, because the module now explains
+ * this rule in prose that would otherwise satisfy a bare word search.
+ * ====================================================================== */
+{
+  const transfers = codeOnly("src/lib/server/creator-transfers.ts");
+  const triggers = codeOnly("src/lib/server/notification-triggers.ts");
+
+  const scopedBy = (source, fnName, endMarker) => {
+    const body = source.slice(source.indexOf(fnName), source.indexOf(endMarker, source.indexOf(fnName)));
+    return (
+      body.includes("eq(schema.creatorTransfers.providerTransferId, providerTransferId)") &&
+      body.includes("eq(schema.creatorTransfers.environment, environment)") &&
+      body.includes("and(")
+    );
+  };
+
+  check("markTransferCompleted scopes its update by environment",
+    scopedBy(transfers, "export async function markTransferCompleted", "export async function markTransferReversed"));
+  check("markTransferReversed scopes its lookup by environment",
+    scopedBy(transfers, "export async function markTransferReversed", "export async function getTransfer"));
+
+  check("NO transfer lookup matches provider_transfer_id without environment",
+    (() => {
+      // Every occurrence of the provider-id predicate must sit inside an
+      // `and(...)` that also carries the environment predicate.
+      const occurrences = [...transfers.matchAll(/eq\(schema\.creatorTransfers\.providerTransferId, providerTransferId\)/g)];
+      return occurrences.length > 0 && occurrences.every((m) => {
+        const window = transfers.slice(Math.max(0, m.index - 120), m.index + 220);
+        return window.includes("eq(schema.creatorTransfers.environment, environment)");
+      });
+    })());
+
+  check("the environment comes from the trusted server helper, not a parameter",
+    transfers.includes("function resolveTransferEnvironment()") &&
+    transfers.includes("return getWhopEnvironment();"));
+  check("and neither function accepts an environment argument from its caller",
+    /export async function markTransferCompleted\(\s*providerTransferId: string,\s*\)/.test(transfers) &&
+    /export async function markTransferReversed\(\s*providerTransferId: string,\s*\)/.test(transfers));
+  check("an unresolvable environment fails CLOSED — no unscoped update happens",
+    (transfers.match(/const environment = resolveTransferEnvironment\(\);\s*if \(!environment\) return \{ ok: false \};/g) ?? []).length === 2);
+
+  // The notification lookups resolve a firebaseUid from the same table and had
+  // the same defect: an id collision would have notified the wrong creator.
+  check("the payout notification lookups are environment-scoped too",
+    (triggers.match(/eq\(creatorTransfers\.environment, environment\)/g) ?? []).length === 2 &&
+    !/\.where\(eq\(creatorTransfers\.providerTransferId, providerTransferId\)\)/.test(triggers));
+  check("and they take their environment from the same server helper",
+    triggers.includes("const environment = getWhopEnvironment();"));
+
+  // NOT a scoping defect: `transferId` is our own UUID primary key, globally
+  // unique, so it cannot collide across environments. Pinned so that a future
+  // change from the UUID to a provider id would be caught here.
+  check("getTransfer keys on our own UUID, which needs no environment scope",
+    /export async function getTransfer\(transferId: string\)/.test(transfers) &&
+    transfers.includes("eq(schema.creatorTransfers.transferId, transferId)"));
+}
+
 /* ============================== summary ============================== */
 
 const passed = results.filter((r) => r.pass).length;

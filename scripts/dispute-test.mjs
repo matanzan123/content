@@ -301,7 +301,24 @@ check(
 check("zero is allowed on a dispute", wu(0, "usd").ok && wu(0, "usd").minor === 0n);
 check("negative is refused", wu(-1, "usd").ok === false);
 check("a non-number is refused", wu("2.00", "usd").ok === false);
-check("an unsupported currency is refused, not defaulted", wu(2, "eur").reason === "unsupported_currency");
+// THE SUPPORTED-CURRENCY TABLE IS NOW A FULL ISO-4217 SET, so "eur" stopped
+// being an example of an unsupported code. Replaced rather than deleted: the
+// property that must stay true is "an unknown code is refused, never silently
+// defaulted to usd" — and the wider table makes a STRONGER property testable,
+// namely that each currency is scaled by its own exponent rather than by 100.
+check("an unknown currency code is refused, not defaulted", wu(2, "zzz").reason === "unsupported_currency");
+check("a malformed currency is refused",
+  wu(2, "").reason === "unsupported_currency" &&
+  wu(2, null).reason === "unsupported_currency" &&
+  wu(2, 978).reason === "unsupported_currency");
+check("a now-supported currency is accepted at its own exponent — eur is 2dp",
+  wu(2, "eur").ok && wu(2, "eur").minor === 200n);
+check("a zero-decimal currency is NOT scaled by 100 — jpy",
+  wu(500, "jpy").ok && wu(500, "jpy").minor === 500n);
+check("a three-decimal currency is scaled by 1000 — kwd",
+  wu(2, "kwd").ok && wu(2, "kwd").minor === 2000n);
+check("the currency is carried through, never rewritten to usd",
+  wu(2, "eur").currency === "eur" && wu(500, "jpy").currency === "jpy");
 
 // The 1e8 ledger precision — the single place a dispute could be mis-scaled by
 // a factor of a million.
@@ -1582,9 +1599,41 @@ function sourceInvariants() {
       allCode,
     ),
   );
+  // PAYOUTS ARE NOW IMPLEMENTED. This previously recorded that the handler was
+  // an untouched stub, which was this suite's proxy for "no second path can
+  // move a disputed amount". Replaced rather than deleted, because that
+  // underlying property still has to hold — it just has to be asserted against
+  // a payout path that exists, instead of against its absence.
+  {
+    const webhookCode = codeOnly(webhookSource);
+    const payoutBody = webhookCode.slice(
+      webhookCode.indexOf("export async function handleWhopPayoutUpdated"),
+      webhookCode.indexOf("export async function handleWhopAccountUpdated"),
+    );
+    check(
+      "the payout webhook handler is implemented but references no dispute logic",
+      /export async function handleWhopPayoutUpdated\(/.test(webhookSource) &&
+        payoutBody.length > 0 &&
+        !/dispute|resolution_center|freezeForDispute|reverseForDispute/i.test(payoutBody),
+    );
+  }
+  // THE REAL INVARIANT: the newer withdrawal/payout path cannot become a way
+  // around dispute reversal. A frozen earning is excluded at reservation time
+  // and refused again by the release rule.
+  const withdrawalsSource = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8");
   check(
-    "the payout webhook handler is still the untouched stub",
-    /export async function handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(webhookSource),
+    "a dispute-frozen earning cannot be reserved by a withdrawal",
+    /eq\(schema\.creatorEarnings\.frozenByDispute, false\)/.test(withdrawalsSource),
+  );
+  check(
+    "and the release rule refuses a frozen earning outright",
+    /return !frozenByDispute && now >= holdUntil;/.test(
+      readFileSync("src/lib/server/creator-earnings-policy.ts", "utf8"),
+    ),
+  );
+  check(
+    "freezing a dispute never touches an already-reversed earning",
+    /!= 'reversed'/.test(readFileSync("src/lib/server/creator-earnings.ts", "utf8")),
   );
   check(
     "no creator-earnings or platform-revenue account is referenced in CODE",
@@ -1635,9 +1684,55 @@ function sourceInvariants() {
     return out;
   };
   const appFiles = walk("src/app");
+  // A DISPUTE ROUTE NOW EXISTS. This previously recorded that none did, as a
+  // proxy for "no browser-reachable surface can move a disputed amount".
+  // Replaced rather than deleted: the routes that landed are ADMIN and
+  // READ-ONLY, so the property is now asserted directly against them.
+  const disputeRoutes = appFiles.filter((f) => /dispute|resolution/i.test(f));
   check(
-    "there is NO dispute route under src/app",
-    appFiles.filter((f) => /dispute|resolution/i.test(f)).length === 0,
+    "every dispute route under src/app is an admin reconciliation route",
+    disputeRoutes.length > 0 &&
+      disputeRoutes.every((f) => f.startsWith("src/app/api/admin/reconciliation/")),
+    disputeRoutes.join(","),
+  );
+  check(
+    "each one is admin-guarded AND origin-checked before it does anything",
+    disputeRoutes.every((f) => {
+      const s = readFileSync(f, "utf8");
+      return s.includes("withAdminApi") && s.includes("checkRequestOrigin");
+    }),
+  );
+  check(
+    "the read route exposes GET only — no browser-reachable mutation",
+    disputeRoutes
+      .filter((f) => f.includes("/reconciliation/disputes/"))
+      .every((f) => {
+        const s = readFileSync(f, "utf8");
+        return /export async function GET\(/.test(s) &&
+          !/export async function (POST|PUT|PATCH|DELETE)\(/.test(s);
+      }),
+  );
+  check(
+    "the repair route defaults to a dry run and delegates to the recovery module",
+    disputeRoutes
+      .filter((f) => f.includes("/repair/"))
+      .every((f) => {
+        const s = readFileSync(f, "utf8");
+        return /dry_run !== false/.test(s) && /recoverMissingDisputePostings/.test(s);
+      }),
+  );
+  check(
+    "a non-dry-run repair is written to the admin audit trail",
+    disputeRoutes
+      .filter((f) => f.includes("/repair/"))
+      .every((f) => /writeAudit\(/.test(readFileSync(f, "utf8"))),
+  );
+  check(
+    "no dispute route trusts a browser-supplied creator or account id",
+    disputeRoutes.every((f) => {
+      const s = readFileSync(f, "utf8");
+      return !/body\.(firebase_uid|creator_uid|account_id|whop_account_id)/.test(s);
+    }),
   );
   const componentFiles = walk("src/components");
   check(
@@ -1664,10 +1759,34 @@ function sourceInvariants() {
     "dispute_reserve is still NOT postable — holds are not provable",
     /dispute_reserve: \{[^}]*postable: false/s.test(accountsSource),
   );
+  // CREATOR EARNINGS NOW EXIST, so these two accounts had to become postable —
+  // the revenue_split event posts them. This previously asserted they were
+  // blocked; replaced rather than deleted, because the property it was standing
+  // in for is "a dispute cannot post them ITSELF", which is stronger and is now
+  // asserted directly against the dispute rule table and the reversal path.
   check(
-    "platform_revenue and creator_payable are still NOT postable",
-    /platform_revenue: \{[^}]*postable: false/s.test(accountsSource) &&
-      /creator_payable: \{[^}]*postable: false/s.test(accountsSource),
+    "platform_revenue and creator_payable are postable — the revenue split posts them",
+    /platform_revenue: \{[^}]*postable: true/s.test(accountsSource) &&
+      /creator_payable: \{[^}]*postable: true/s.test(accountsSource),
+  );
+  check(
+    "but NO dispute line rule may face either of them",
+    Object.values(posting.DISPUTE_LINE_RULES).every(
+      (r) => r.contraAccount !== "platform_revenue" && r.contraAccount !== "creator_payable",
+    ),
+  );
+  check(
+    "a dispute only reaches them through an explicit revenue-split REVERSAL",
+    /postRevenueSplitReversal\(/.test(readFileSync("src/lib/server/creator-earnings.ts", "utf8")) &&
+      /economicEvent: "revenue_split_reversed"/.test(
+        readFileSync("src/lib/server/accounting/revenue-split-posting.ts", "utf8"),
+      ),
+  );
+  check(
+    "and that reversal is idempotent per dispute id, so a replay cannot double it",
+    /economicKey\(\s*"whop",\s*"revenue_split_reversed",\s*`\$\{refundOrDisputeId\}:\$\{creatorFirebaseUid\}`,?\s*\)/s.test(
+      readFileSync("src/lib/server/accounting/revenue-split-posting.ts", "utf8"),
+    ),
   );
 
   // MIGRATIONS.

@@ -4,6 +4,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { paymentRefunds } from "@/lib/db/schema";
 import type { RefundStatus } from "./refund-lifecycle";
+import { getWhopEnvironment } from "./whop-payments";
 
 /* ==========================================================================
    INTERNAL REFUND RECORDS — server only.
@@ -144,7 +145,7 @@ export async function recordRefund(input: RecordRefundInput): Promise<RecordRefu
         failedAt: input.status === "failed" ? sql`now()` : null,
       })
       .onConflictDoUpdate({
-        target: [paymentRefunds.provider, paymentRefunds.whopRefundId],
+        target: [paymentRefunds.provider, paymentRefunds.whopRefundId, paymentRefunds.environment],
         set: {
           providerStatus: input.providerStatus,
           status: input.status,
@@ -205,14 +206,32 @@ export async function recordRefund(input: RecordRefundInput): Promise<RecordRefu
    READING
    ------------------------------------------------------------------------- */
 
+/**
+ * ENVIRONMENT-SCOPED, and it must match `uniq_refunds_provider_refund` exactly.
+ *
+ * This is the read-back for the upsert above. Its predicate is the index's key
+ * — (provider, whop_refund_id, environment) — because the ON CONFLICT fires on
+ * that key: read it back with a NARROWER predicate and a conflicting row in
+ * the other environment would come back null, turning a correct
+ * `payment_conflict` into a bogus `storage_error`. That mismatch is precisely
+ * why this lookup could not be scoped before migration 0011 widened the index.
+ */
 export async function getRefundByProviderId(whopRefundId: string): Promise<PaymentRefund | null> {
   const db = getDb();
   if (!db) return null;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(paymentRefunds)
     .where(
-      and(eq(paymentRefunds.provider, PROVIDER), eq(paymentRefunds.whopRefundId, whopRefundId)),
+      and(
+        eq(paymentRefunds.provider, PROVIDER),
+        eq(paymentRefunds.whopRefundId, whopRefundId),
+        eq(paymentRefunds.environment, environment),
+      ),
     );
   return (row as PaymentRefund | undefined) ?? null;
 }
@@ -223,10 +242,23 @@ export async function listRefundsForPaymentLocal(
 ): Promise<PaymentRefund[]> {
   const db = getDb();
   if (!db) return [];
+
+  // Environment-scoped. `uniq_refunds_provider_refund` is on
+  // (provider, whop_refund_id), NOT on the payment id — so two different
+  // refunds naming the same payment can legitimately sit in two environments,
+  // and an unscoped list would mix them into one reconciliation comparison.
+  const environment = getWhopEnvironment();
+  if (!environment) return [];
+
   const rows = await db
     .select()
     .from(paymentRefunds)
-    .where(eq(paymentRefunds.whopPaymentId, whopPaymentId))
+    .where(
+      and(
+        eq(paymentRefunds.whopPaymentId, whopPaymentId),
+        eq(paymentRefunds.environment, environment),
+      ),
+    )
     .orderBy(asc(paymentRefunds.createdAt));
   return rows as PaymentRefund[];
 }
@@ -244,12 +276,19 @@ export async function listRefundsForPaymentLocal(
 export async function localCompletedRefundTotal(whopPaymentId: string): Promise<bigint> {
   const db = getDb();
   if (!db) return BigInt(0);
+
+  // Environment-scoped for the same reason as listRefundsForPaymentLocal: a sum
+  // that crossed environments would be a wrong figure, not a partial one.
+  const environment = getWhopEnvironment();
+  if (!environment) return BigInt(0);
+
   const [row] = await db
     .select({ total: sql<string>`coalesce(sum(${paymentRefunds.amountMinor}), 0)::text` })
     .from(paymentRefunds)
     .where(
       and(
         eq(paymentRefunds.whopPaymentId, whopPaymentId),
+        eq(paymentRefunds.environment, environment),
         eq(paymentRefunds.status, "completed"),
       ),
     );

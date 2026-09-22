@@ -3,6 +3,7 @@ import "server-only";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { creatorEarnings, creatorTransfers, whopAccounts } from "@/lib/db/schema";
+import { getWhopEnvironment } from "./whop-payments";
 import { writeNotification } from "./notifications";
 
 /* ==========================================================================
@@ -41,21 +42,39 @@ function classifyAccountStatus(status: string): "verified" | "action_required" |
  * Fires after a successful `account.updated` webhook.
  * Resolves the `firebaseUid` from `whop_accounts`, then emits the
  * appropriate KYC/payout notification.
+ *
+ * THE ENVIRONMENT IS NOT A PARAMETER, DELIBERATELY.
+ *
+ * This used to take the environment from the caller, and the caller read it
+ * out of the webhook body (`data.environment ?? root.environment`). That let
+ * externally-supplied JSON choose which environment's `whop_accounts` row to
+ * resolve — so a sandbox delivery carrying `"environment": "production"` would
+ * look up a PRODUCTION creator and notify them about a sandbox status change.
+ *
+ * It now comes from `getWhopEnvironment()`, the same server-side helper the
+ * real `handleWhopAccountUpdated` storage path uses, reading only
+ * `process.env`. Removing the parameter is the point: with no seam, no payload,
+ * query parameter or request body can reach this decision.
+ *
+ * Fails closed when the environment cannot be resolved — an unscoped lookup
+ * would be a cross-environment read.
  */
 export async function notifyAccountUpdated(
   whopAccountId: string,
-  environment: string,
   newStatus: string,
 ): Promise<void> {
   const db = getDb();
   if (!db) return;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return;
 
   let firebaseUid: string | undefined;
   try {
     const [row] = await db
       .select({ firebaseUid: whopAccounts.firebaseUid })
       .from(whopAccounts)
-      .where(and(eq(whopAccounts.whopAccountId, whopAccountId), eq(whopAccounts.environment as never, environment as never)))
+      .where(and(eq(whopAccounts.whopAccountId, whopAccountId), eq(whopAccounts.environment, environment)))
       .limit(1);
     firebaseUid = row?.firebaseUid;
   } catch {
@@ -109,12 +128,23 @@ export async function notifyPaymentSettled(whopPaymentId: string): Promise<void>
   const db = getDb();
   if (!db) return;
 
+  // Same rule as the payout lookups below: `whop_payment_id` is Whop's id and
+  // is not unique across environments, so an unscoped match could resolve a
+  // DIFFERENT creator's earning and notify the wrong person.
+  const environment = getWhopEnvironment();
+  if (!environment) return;
+
   let firebaseUid: string | undefined;
   try {
     const [row] = await db
       .select({ firebaseUid: creatorEarnings.firebaseUid })
       .from(creatorEarnings)
-      .where(eq(creatorEarnings.whopPaymentId, whopPaymentId))
+      .where(
+        and(
+          eq(creatorEarnings.whopPaymentId, whopPaymentId),
+          eq(creatorEarnings.environment, environment),
+        ),
+      )
       .limit(1);
     firebaseUid = row?.firebaseUid;
   } catch {
@@ -147,12 +177,25 @@ export async function notifyPayoutCompleted(
   const db = getDb();
   if (!db) return;
 
+  // Scoped by environment for the same reason the transfer state changes are:
+  // `provider_transfer_id` is Whop's id and is not unique across environments,
+  // so an id alone could resolve a transfer belonging to a DIFFERENT creator in
+  // the other environment and notify the wrong person. Environment comes from
+  // the server-side helper, never from the webhook payload.
+  const environment = getWhopEnvironment();
+  if (!environment) return;
+
   let firebaseUid: string | undefined;
   try {
     const [row] = await db
       .select({ firebaseUid: creatorTransfers.firebaseUid })
       .from(creatorTransfers)
-      .where(eq(creatorTransfers.providerTransferId, providerTransferId))
+      .where(
+        and(
+          eq(creatorTransfers.providerTransferId, providerTransferId),
+          eq(creatorTransfers.environment, environment),
+        ),
+      )
       .limit(1);
     firebaseUid = row?.firebaseUid;
   } catch {
@@ -189,12 +232,21 @@ export async function notifyPayoutReversed(providerTransferId: string): Promise<
   const db = getDb();
   if (!db) return;
 
+  // Environment-scoped for the same reason as notifyPayoutCompleted above.
+  const environment = getWhopEnvironment();
+  if (!environment) return;
+
   let firebaseUid: string | undefined;
   try {
     const [row] = await db
       .select({ firebaseUid: creatorTransfers.firebaseUid })
       .from(creatorTransfers)
-      .where(eq(creatorTransfers.providerTransferId, providerTransferId))
+      .where(
+        and(
+          eq(creatorTransfers.providerTransferId, providerTransferId),
+          eq(creatorTransfers.environment, environment),
+        ),
+      )
       .limit(1);
     firebaseUid = row?.firebaseUid;
   } catch {
@@ -224,12 +276,21 @@ export async function notifyDisputeOpened(whopPaymentId: string, whopDisputeId: 
   const db = getDb();
   if (!db) return;
 
+  // Environment-scoped for the same reason as notifyPaymentSettled above.
+  const environment = getWhopEnvironment();
+  if (!environment) return;
+
   let firebaseUid: string | undefined;
   try {
     const [row] = await db
       .select({ firebaseUid: creatorEarnings.firebaseUid })
       .from(creatorEarnings)
-      .where(eq(creatorEarnings.whopPaymentId, whopPaymentId))
+      .where(
+        and(
+          eq(creatorEarnings.whopPaymentId, whopPaymentId),
+          eq(creatorEarnings.environment, environment),
+        ),
+      )
       .limit(1);
     firebaseUid = row?.firebaseUid;
   } catch {
@@ -330,12 +391,11 @@ export async function fireWebhookNotifications(
     if (eventType === "account.updated") {
       const accountId = typeof data.id === "string" ? data.id : null;
       const status = typeof data.status === "string" ? data.status : null;
-      const environment =
-        typeof data.environment === "string" ? data.environment :
-        typeof root.environment === "string" ? root.environment :
-        null;
-      if (accountId && status && environment) {
-        await notifyAccountUpdated(accountId, environment, status);
+      // The payload's own `environment` field is NOT read. The account id and
+      // the status are facts about the resource; the environment is a fact
+      // about US, and notifyAccountUpdated resolves it from server config.
+      if (accountId && status) {
+        await notifyAccountUpdated(accountId, status);
       }
       return;
     }

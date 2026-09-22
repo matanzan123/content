@@ -367,8 +367,24 @@ if (process.env.DATABASE_URL) {
   try {
     const [{ n: ledger }] = await sqlc`select count(*)::int as n from financial_ledger`;
     check("J. financial_ledger is still empty", ledger === 0, `${ledger} rows`);
+    // THE ADMIN SURFACE NOW WRITES AUDIT ROWS, so an empty table stopped being
+    // the expected state — "still empty" would fail for a correct system the
+    // moment an admin did anything. Replaced rather than deleted: what this
+    // check was protecting is that NO WEBHOOK can write the audit trail, and
+    // that is asserted directly, at the source and against the stored rows.
     const [{ n: audit }] = await sqlc`select count(*)::int as n from admin_audit_log`;
-    check("K. admin_audit_log is still empty", audit === 0, `${audit} rows`);
+    check(
+      "K. the webhook path never writes the admin audit trail",
+      !/writeAudit|adminAuditLog/.test(readFileSync("src/lib/server/whop-webhooks.ts", "utf8")) &&
+        !/writeAudit|adminAuditLog/.test(readFileSync("src/app/api/webhooks/whop/route.ts", "utf8")),
+      `${audit} audit row(s) present, none from a webhook`,
+    );
+    const actions = await sqlc`select distinct action from admin_audit_log`;
+    check(
+      "K. every stored audit row names an admin action, not a webhook one",
+      actions.every((r) => !/webhook|payment\.|refund\.|dispute\.|payout\./i.test(r.action)),
+      actions.map((r) => r.action).join(",") || "none",
+    );
     const tables = await sqlc`select table_name from information_schema.tables where table_schema='public'`;
     check(
       "the receipts table exists (migration 0001 applied)",

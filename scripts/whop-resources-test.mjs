@@ -163,14 +163,31 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
   const source = readFileSync("src/lib/server/whop-webhooks.ts", "utf8");
   const handlers = source.slice(source.indexOf("export async function handleWhopPaymentSucceeded"), source.indexOf("const OWNERSHIP_GATED"));
   check("F. no handler writes to a database", handlers.includes("db.") === false && handlers.includes("insert(") === false);
-  // Payments, refunds and the dispute family now all resolve real resources.
-  // PAYOUTS are the only subject left with no mapping, and the count is now
-  // exact rather than a floor: a rising number here would mean a resolver had
-  // been replaced by a stub, which is the regression worth catching.
+  // EVERY SUBJECT NOW RESOLVES. This previously recorded that payouts were the
+  // last handler with no mapping at all — a whole-body stub. That stopped being
+  // true once the transfer service landed, so the assertion is replaced rather
+  // than deleted: the regression worth catching is no longer "how many stubs
+  // are left" but "has any resolver been REPLACED by a stub", which is what the
+  // whole-body-stub check below proves for every handler at once.
+  const declaredHandlers = source
+    .slice(source.indexOf("const HANDLERS"), source.indexOf("/* ------------------------------ processing"))
+    .match(/handleWhop[A-Za-z]+/g) ?? [];
   check(
-    "F. only the payout handler still reports no mapping",
-    /handleWhopPayoutUpdated\(\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};/.test(source) &&
-      !/handleWhopDisputeCreated|handleWhopRefundCreated/.test(source),
+    "F. no handler is a whole-body stub — every one resolves something",
+    declaredHandlers.length > 0 &&
+      !/export async function handleWhop[A-Za-z]+\([^)]*\): Promise<HandlerResult> \{\s*return \{ kind: "business_mapping_not_implemented" \};\s*\}/.test(source),
+  );
+  check(
+    "F. every event in HANDLERS names a resolver that actually exists",
+    [...new Set(declaredHandlers)].every((name) =>
+      new RegExp(`export async function ${name}\\(`).test(source)),
+  );
+  // `business_mapping_not_implemented` survives as an OUTCOME — a recognised
+  // event we choose not to map — and must stay a non-money, acknowledged one.
+  check(
+    "F. an unmapped outcome is still acknowledged without touching money",
+    source.includes('result.kind === "handled" ? "processed" : "awaiting_mapping"') &&
+      /"awaiting_mapping",/.test(source.slice(source.indexOf("export const TERMINAL_STATUSES"))),
   );
   check("F. payment handlers delegate to the order mapping", handlers.includes("mapPaymentToOrder(resourceId"));
   const mapping = readFileSync("src/lib/server/whop-payment-mapping.ts", "utf8");
@@ -212,7 +229,25 @@ for (const bad of ["", "pay_", "nope", "PAY_abc", "pay abc", "pay_../../x", "pay
 
 /* ------------------- LIVE: the real sandbox, read-only -------------------- */
 
-{
+/**
+ * OFF BY DEFAULT. Everything above this line is pure: stubbed clients and
+ * source reads, zero sockets. The block below opens a Postgres connection AND
+ * performs a real (read-only) Whop lookup, so a plain `node
+ * scripts/whop-resources-test.mjs` must not reach it — a local audit that
+ * silently talks to a provider is not a local audit.
+ *
+ * Opt in with WHOP_LIVE_READS=1. It still creates no payment, refund, capture
+ * or void; `financial_ledger` is asserted untouched.
+ */
+const LIVE_READS = process.env.WHOP_LIVE_READS === "1";
+
+if (!LIVE_READS) {
+  console.log(
+    "\n· LIVE provider-read checks SKIPPED (local-safe default). " +
+      "No Whop request and no database connection was made. " +
+      "Set WHOP_LIVE_READS=1 to run them.",
+  );
+} else {
   const payments = load("src/lib/server/whop-payments.ts", { WhopClient: sdk.WhopClient });
   const live = load("src/lib/server/whop-resources.ts", {
     WhopError: sdk.WhopError,

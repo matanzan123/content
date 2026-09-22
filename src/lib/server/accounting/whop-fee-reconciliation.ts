@@ -88,6 +88,11 @@ async function postedFeeTotal(paymentId: string): Promise<bigint | null> {
   const db = getDb();
   if (!db) return null;
 
+  // Environment-scoped: a fee total that summed the other environment's entries
+  // would be a wrong figure compared against this environment's provider.
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
   const rows = await db
     .select({
       total: sql<string>`coalesce(sum(${accountingEntries.amountMinor}), 0)::text`,
@@ -101,6 +106,7 @@ async function postedFeeTotal(paymentId: string): Promise<bigint | null> {
       and(
         eq(accountingEntries.account, "provider_fee_expense"),
         eq(accountingTransactions.provider, "whop"),
+        eq(accountingTransactions.environment, environment),
         sql`(
           ${accountingTransactions.providerResourceId} = ${paymentId}
           or ${accountingTransactions.metadata}->>'payment_id' = ${paymentId}

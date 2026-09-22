@@ -39,7 +39,6 @@ export function WhopVerificationCard({ kycReturn }: { kycReturn?: boolean }) {
   const [phase, setPhase] = useState<Phase>({ phase: "loading" });
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
 
   const errors: Record<string, string> = t.errors;
 
@@ -78,14 +77,10 @@ export function WhopVerificationCard({ kycReturn }: { kycReturn?: boolean }) {
     })();
 
     return () => { cancelled = true; };
-  // Re-fetch after the creator returns from Whop
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user, reloadKey]);
-
-  // When the creator lands back from Whop's flow, refresh once automatically.
-  useEffect(() => {
-    if (kycReturn) setReloadKey((n) => n + 1);
-  }, [kycReturn]);
+    // `kycReturn` is part of the trigger, not just a render flag: when the
+    // creator lands back from Whop's flow the status is read again from the
+    // server. It is never treated as proof of verification.
+  }, [authLoading, user, kycReturn, errors, t.errors.status, t.errors.network]);
 
   async function startVerification() {
     if (!user || busy) return;
@@ -113,7 +108,7 @@ export function WhopVerificationCard({ kycReturn }: { kycReturn?: boolean }) {
     }
   }
 
-  const pillClass = pillFor(phase);
+  const pillClass = pillFor(phase, t);
 
   return (
     <section className="overflow-hidden rounded-[var(--radius-token-lg)] border border-line bg-surface shadow-[var(--shadow-card)]">
@@ -244,13 +239,12 @@ function VerificationBody({
   );
 }
 
-function pillFor(phase: Phase): { className: string; label: string } {
+// The labels are passed in rather than read from a hook here: this is a plain
+// helper, not a component, so calling useT() inside it only happened to work
+// because every call site sits in a render. Taking `t` as an argument makes
+// that dependency explicit and keeps the helper callable from anywhere.
+function pillFor(phase: Phase, t: Copy): { className: string; label: string } {
   const base = "shrink-0 rounded-[var(--radius-token-pill)] px-3 py-1 text-[11.5px] font-bold uppercase tracking-[0.06em]";
-
-  // We need to read from the dictionary lazily so this runs inside a render.
-  // The hook is called at the top of WhopVerificationCard; this is just a helper.
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const t = useT().dashboard.verification;
 
   if (phase.phase === "loading" || phase.phase === "error") {
     return { className: `${base} bg-surface-sunken text-ink-soft`, label: t.statusUnknown };

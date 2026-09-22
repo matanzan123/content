@@ -438,8 +438,12 @@ export const paymentOrders = pgTable(
     index("idx_orders_created").on(t.createdAt),
     index("idx_orders_checkout").on(t.whopCheckoutId),
     // Partial: most orders have no payment yet, and many nulls must not collide.
+    // ENVIRONMENT-AWARE. A Whop payment id is unique within an environment,
+    // not across them: sandbox and production are separate id spaces. The
+    // partial predicate is preserved — an order with no payment yet is not
+    // constrained at all.
     uniqueIndex("uniq_orders_whop_payment")
-      .on(t.whopPaymentId)
+      .on(t.whopPaymentId, t.environment)
       .where(sql`whop_payment_id is not null`),
   ],
 );
@@ -851,7 +855,8 @@ export const paymentRefunds = pgTable(
   },
   (t) => [
     // THE refund identity constraint. Everything about idempotency rests here.
-    uniqueIndex("uniq_refunds_provider_refund").on(t.provider, t.whopRefundId),
+    // ENVIRONMENT-AWARE: one refund per provider id PER ENVIRONMENT.
+    uniqueIndex("uniq_refunds_provider_refund").on(t.provider, t.whopRefundId, t.environment),
     index("idx_refunds_payment").on(t.whopPaymentId),
     index("idx_refunds_order").on(t.orderId),
     index("idx_refunds_status").on(t.status),
@@ -953,7 +958,8 @@ export const paymentDisputes = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("uniq_disputes_provider_dispute").on(t.provider, t.whopDisputeId),
+    // ENVIRONMENT-AWARE: one dispute per provider id PER ENVIRONMENT.
+    uniqueIndex("uniq_disputes_provider_dispute").on(t.provider, t.whopDisputeId, t.environment),
     index("idx_disputes_payment").on(t.whopPaymentId),
     index("idx_disputes_order").on(t.orderId),
     index("idx_disputes_status").on(t.status),
@@ -1012,7 +1018,8 @@ export const disputeAlerts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("uniq_alerts_provider_alert").on(t.provider, t.whopAlertId),
+    // ENVIRONMENT-AWARE: one alert per provider id PER ENVIRONMENT.
+    uniqueIndex("uniq_alerts_provider_alert").on(t.provider, t.whopAlertId, t.environment),
     index("idx_alerts_payment").on(t.whopPaymentId),
     index("idx_alerts_order").on(t.orderId),
     index("idx_alerts_status").on(t.status),
@@ -1068,7 +1075,8 @@ export const resolutionCenterCases = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("uniq_cases_provider_case").on(t.provider, t.whopCaseId),
+    // ENVIRONMENT-AWARE: one case per provider id PER ENVIRONMENT.
+    uniqueIndex("uniq_cases_provider_case").on(t.provider, t.whopCaseId, t.environment),
     index("idx_cases_payment").on(t.whopPaymentId),
     index("idx_cases_order").on(t.orderId),
     index("idx_cases_status").on(t.status),
@@ -1521,8 +1529,12 @@ export const creatorEarnings = pgTable(
   },
   (t) => [
     // ONE earning per creator per payment. A payment may appear once per creator.
+    // ENVIRONMENT-AWARE: ONE earning per creator per payment PER ENVIRONMENT.
+    // Without the environment column this index made a sandbox payment id
+    // collide with a production one, and the unscoped read-back it backed
+    // resolved across environments.
     uniqueIndex("uniq_creator_earnings_payment_creator")
-      .on(t.whopPaymentId, t.firebaseUid),
+      .on(t.whopPaymentId, t.firebaseUid, t.environment),
     index("idx_creator_earnings_uid").on(t.firebaseUid, t.status),
     index("idx_creator_earnings_payment").on(t.whopPaymentId),
     index("idx_creator_earnings_hold_until").on(t.holdUntil, t.status),
@@ -1649,8 +1661,10 @@ export const creatorTransfers = pgTable(
     // THE idempotency constraint — database-enforced, race-proof.
     uniqueIndex("uniq_creator_transfers_idempotency").on(t.idempotencyKey),
     // The provider id must be unique when it exists.
+    // ENVIRONMENT-AWARE. The partial predicate is preserved — a transfer that
+    // has not reached the provider yet has no id and is unconstrained.
     uniqueIndex("uniq_creator_transfers_provider_id")
-      .on(t.providerTransferId)
+      .on(t.providerTransferId, t.environment)
       .where(sql`provider_transfer_id is not null`),
     index("idx_creator_transfers_uid").on(t.firebaseUid),
     index("idx_creator_transfers_account").on(t.whopAccountId),
