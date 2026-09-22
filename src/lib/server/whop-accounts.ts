@@ -273,38 +273,6 @@ export async function createConnectedAccount(
   return { ok: true, account };
 }
 
-export type AccountLinkResult =
-  | { ok: true; url: string }
-  | { ok: false; reason: AccountFailure };
-
-/**
- * Creates a Whop-hosted onboarding/KYC link for a connected account.
- *
- * The creator is redirected to this URL to complete identity verification and
- * payout setup. Whop renders the entire flow; we never touch KYC data directly.
- *
- * `returnUrl` is where Whop sends the creator when they are done (or abandon).
- */
-export async function createAccountLink(
-  config: PlatformConfig,
-  accountId: string,
-  returnUrl: string,
-): Promise<AccountLinkResult> {
-  if (!isWhopAccountId(accountId)) return { ok: false, reason: "malformed_response" };
-
-  const result = await request(config, `/accounts/${accountId}/links`, {
-    method: "POST",
-    body: { type: "onboarding", return_url: returnUrl },
-  });
-  if (!result.ok) return { ok: false, reason: result.reason };
-
-  const body = result.body as Record<string, unknown> | null;
-  const url = typeof body?.url === "string" && body.url.startsWith("https://") ? body.url : null;
-  if (!url) return { ok: false, reason: "malformed_response" };
-
-  return { ok: true, url };
-}
-
 /**
  * Searches Whop for a connected account whose metadata contains the given
  * `firebase_uid` and `source: "cliprewards"`, and whose parent is the

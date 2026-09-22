@@ -1,7 +1,8 @@
 import { requireWhopEligible } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { getConnectedAccount } from "@/lib/server/connected-accounts";
-import { createPayoutPortalLink, resolvePlatformConfig } from "@/lib/server/whop-kyc";
+import { createAccountLink } from "@/lib/server/whop-account-links";
+import { resolvePlatformConfig } from "@/lib/server/whop-kyc";
 import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
@@ -26,8 +27,6 @@ import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "";
-
 const NO_STORE = { "cache-control": "no-store" };
 
 function json(body: Record<string, unknown>, status: number) {
@@ -50,12 +49,12 @@ export async function POST(request: Request) {
   const account = await getConnectedAccount(firebaseUid, platform.config.environment);
   if (!account) return json({ error: "account_not_provisioned" }, 400);
 
-  // Return URL built entirely server-side — never from user input.
-  const returnUrl = `${APP_PUBLIC_URL}/dashboard?step=payout_return`;
-
-  const result = await createPayoutPortalLink(account.whopAccountId, returnUrl);
+  // Both redirect URLs are built server-side inside whop-account-links.ts,
+  // from APP_PUBLIC_URL and the validated locale cookie — never from input.
+  const result = await createAccountLink(account.whopAccountId, "payouts_portal");
   if (!result.ok) {
     if (result.reason === "platforms_access_required") return json({ error: result.reason }, 403);
+    if (result.reason === "unconfigured") return json({ error: "unavailable" }, 503);
     if (result.reason === "provider_rejected") return json({ error: result.reason }, 422);
     return json({ error: result.reason }, 502);
   }

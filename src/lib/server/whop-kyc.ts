@@ -5,21 +5,19 @@ import { resolvePlatformConfig, type PlatformConfig } from "./whop-accounts";
 /* ==========================================================================
    WHOP KYC / ONBOARDING — server only.
 
-   Two responsibilities:
-     1. Fetching the KYC / verification state of a connected account from Whop.
-     2. Creating a short-lived, Whop-hosted onboarding link so the creator can
-        complete KYC without us ever handling identity documents.
+   ONE responsibility: reading the KYC / verification state of a connected
+   account from Whop. Nothing here is cached — the creator must see the real
+   state the moment they return from Whop's hosted flow.
 
-   THE LINK ENDPOINT: Whop's SDK examples and Platforms documentation use
-   `company_id` to identify the account being onboarded. The generic Account
-   Links reference also mentions `account_id`. This module tries `company_id`
-   first (the SDK-documented form), and retries with `account_id` only when
-   Whop's response explicitly names `company_id` as the rejected field. A
-   generic 400 is NOT retried — it would mean the request body has a different
-   problem, and a blind retry would not help.
+   MINTING THE HOSTED LINK LIVES IN `whop-account-links.ts`. It used to live
+   here too, hand-rolled, and it was wrong in five different ways against the
+   installed SDK contract. Both hosted flows — `account_onboarding` and
+   `payouts_portal` — are now one typed SDK call in that module, so the
+   compiler enforces the request shape. Do not reintroduce a request body for
+   account links here.
 
-   THE RETURN URL IS NEVER TREATED AS PROOF. The caller decides what happens
-   when the creator lands back on our page; this module only mints the URL.
+   THE RETURN URL IS NEVER TREATED AS PROOF that KYC succeeded. Whatever the
+   creator did at Whop, the authoritative answer comes from `fetchKycStatus`.
    ========================================================================== */
 
 const API_VERSION_DATE = "2026-09-02-1";
@@ -170,163 +168,6 @@ export async function fetchKycStatus(accountId: string): Promise<KycStatusResult
   }
 
   return { ok: true, kycStatus: parseKycStatus(accountId, result.body) };
-}
-
-/* -------------------------------------------------------------------------
-   Account link (KYC / onboarding URL)
-   ------------------------------------------------------------------------- */
-
-export type KycLinkResult =
-  | { ok: true; url: string }
-  | { ok: false; reason: "platforms_access_required" | "provider_error" | "provider_rejected" | "unconfigured" | "malformed_response" };
-
-/**
- * Creates a short-lived Whop-hosted onboarding link for the connected account.
- *
- * COMPANY_ID FIRST. Whop's TypeScript SDK and Platforms documentation use
- * `company_id` to identify the account. This function tries that form first.
- * Only if Whop explicitly rejects `company_id` as the wrong field does it
- * retry once with `account_id`. A generic 400 is not retried.
- */
-export async function createKycLink(
-  accountId: string,
-  returnUrl: string,
-): Promise<KycLinkResult> {
-  const platform = resolvePlatformConfig();
-  if (!platform.ok) return { ok: false, reason: "unconfigured" };
-
-  const url = await tryCreateLink(platform.config, { company_id: accountId }, returnUrl);
-  if (url.ok) return url;
-
-  // Retry with account_id ONLY when Whop explicitly names company_id as the
-  // rejected field. A generic 400 stays as-is.
-  if (
-    url.shouldRetryWithAccountId ||
-    (url.raw.status === 400 && url.raw.errorField === "company_id")
-  ) {
-    const retry = await tryCreateLink(platform.config, { account_id: accountId }, returnUrl);
-    if (retry.ok) return retry;
-    return mapLinkFailure(retry.raw);
-  }
-
-  return mapLinkFailure(url.raw);
-}
-
-type LinkAttempt =
-  | { ok: true; url: string }
-  | { ok: false; shouldRetryWithAccountId: boolean; raw: RawResult & { ok: false } };
-
-async function tryCreateLink(
-  config: PlatformConfig,
-  idField: { company_id: string } | { account_id: string },
-  returnUrl: string,
-): Promise<LinkAttempt> {
-  const result = await call(config, "/accounts/links", "POST", {
-    ...idField,
-    type: "account_onboarding",
-    return_url: returnUrl,
-  });
-
-  if (!result.ok) {
-    // Whop explicitly told us to use the other id field
-    const shouldRetry =
-      result.status === 400 &&
-      "company_id" in idField &&
-      (result.errorField === "account_id" || result.errorCode === "account_id_required");
-    return { ok: false, shouldRetryWithAccountId: shouldRetry, raw: result };
-  }
-
-  const body = result.body as Record<string, unknown> | null;
-  const url =
-    typeof body?.url === "string" && body.url.startsWith("https://") ? body.url : null;
-
-  if (!url) return { ok: false, shouldRetryWithAccountId: false, raw: { ...result, ok: false, status: 0, errorCode: "malformed_response", errorField: null } };
-  return { ok: true, url };
-}
-
-function mapLinkFailure(raw: RawResult & { ok: false }): KycLinkResult {
-  if (raw.status === 403) return { ok: false, reason: "platforms_access_required" };
-  if (raw.errorCode === "malformed_response") return { ok: false, reason: "malformed_response" };
-  if (raw.status === 400) return { ok: false, reason: "provider_rejected" };
-  return { ok: false, reason: "provider_error" };
-}
-
-/* -------------------------------------------------------------------------
-   Payout portal link (bank account / payout method management)
-   ------------------------------------------------------------------------- */
-
-export type PayoutPortalLinkResult =
-  | { ok: true; url: string }
-  | { ok: false; reason: "platforms_access_required" | "provider_error" | "provider_rejected" | "unconfigured" | "malformed_response" };
-
-/**
- * Creates a short-lived Whop-hosted link for managing payout settings
- * (adding or changing a bank account).
- *
- * THIS IS NOT KYC. Use createKycLink for identity verification.
- * This link opens Whop's payout/bank account management UI.
- *
- * Uses `type: "account_update"` — the Whop link type for updating an existing
- * account's settings (including payout methods). Falls back to `account_id`
- * only when Whop explicitly rejects the `company_id` field, same as KYC.
- *
- * The link is never stored. The caller returns it immediately to the client
- * which navigates there. Raw banking details never reach ClipRewards.
- */
-export async function createPayoutPortalLink(
-  accountId: string,
-  returnUrl: string,
-): Promise<PayoutPortalLinkResult> {
-  const platform = resolvePlatformConfig();
-  if (!platform.ok) return { ok: false, reason: "unconfigured" };
-
-  const url = await tryCreatePortalLink(platform.config, { company_id: accountId }, returnUrl);
-  if (url.ok) return url;
-
-  if (
-    url.shouldRetryWithAccountId ||
-    (url.raw.status === 400 && url.raw.errorField === "company_id")
-  ) {
-    const retry = await tryCreatePortalLink(platform.config, { account_id: accountId }, returnUrl);
-    if (retry.ok) return retry;
-    return mapPortalLinkFailure(retry.raw);
-  }
-
-  return mapPortalLinkFailure(url.raw);
-}
-
-async function tryCreatePortalLink(
-  config: PlatformConfig,
-  idField: { company_id: string } | { account_id: string },
-  returnUrl: string,
-): Promise<LinkAttempt> {
-  const result = await call(config, "/accounts/links", "POST", {
-    ...idField,
-    type: "account_update",
-    return_url: returnUrl,
-  });
-
-  if (!result.ok) {
-    const shouldRetry =
-      result.status === 400 &&
-      "company_id" in idField &&
-      (result.errorField === "account_id" || result.errorCode === "account_id_required");
-    return { ok: false, shouldRetryWithAccountId: shouldRetry, raw: result };
-  }
-
-  const body = result.body as Record<string, unknown> | null;
-  const url =
-    typeof body?.url === "string" && body.url.startsWith("https://") ? body.url : null;
-
-  if (!url) return { ok: false, shouldRetryWithAccountId: false, raw: { ...result, ok: false, status: 0, errorCode: "malformed_response", errorField: null } };
-  return { ok: true, url };
-}
-
-function mapPortalLinkFailure(raw: RawResult & { ok: false }): PayoutPortalLinkResult {
-  if (raw.status === 403) return { ok: false, reason: "platforms_access_required" };
-  if (raw.errorCode === "malformed_response") return { ok: false, reason: "malformed_response" };
-  if (raw.status === 400) return { ok: false, reason: "provider_rejected" };
-  return { ok: false, reason: "provider_error" };
 }
 
 /* -------------------------------------------------------------------------

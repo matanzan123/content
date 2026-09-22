@@ -907,6 +907,11 @@ export const he: Dictionary = {
         account_not_provisioned: "חשבון ה-Whop שלכם טרם הוגדר.",
         platforms_access_required: "האימות אינו זמין כרגע.",
         provider_error: "Whop החזירו שגיאה. נסו שוב בקרוב.",
+        provider_rejected:
+          "Whop לא הצליחו להתחיל את האימות עבור החשבון שלכם. הצוות שלנו קיבל התראה — נסו שוב מאוחר יותר או פנו לתמיכה.",
+        malformed_response: "Whop החזירו תשובה לא צפויה. נסו שוב בקרוב.",
+        unavailable: "האימות אינו זמין זמנית. נסו שוב בקרוב.",
+        invalid_account_id: "קיימת תקלה בחשבון ה-Whop המחובר שלכם. אנא פנו לתמיכה.",
       } as Record<string, string>,
     },
     payout: {

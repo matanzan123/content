@@ -921,6 +921,14 @@ export const en = {
         account_not_provisioned: "Your Whop account has not been set up yet.",
         platforms_access_required: "Verification is not available right now.",
         provider_error: "Whop returned an error. Please try again shortly.",
+        provider_rejected:
+          "Whop could not start verification for your account. Our team has been notified — please try again later or contact support.",
+        malformed_response:
+          "Whop sent back an unexpected response. Please try again shortly.",
+        unavailable:
+          "Verification is temporarily unavailable. Please try again shortly.",
+        invalid_account_id:
+          "There is a problem with your connected Whop account. Please contact support.",
       } as Record<string, string>,
     },
     payout: {

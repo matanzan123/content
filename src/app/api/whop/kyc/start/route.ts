@@ -1,7 +1,8 @@
 import { requireWhopEligible } from "@/lib/server/access";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { getConnectedAccount } from "@/lib/server/connected-accounts";
-import { createKycLink, resolvePlatformConfig } from "@/lib/server/whop-kyc";
+import { createAccountLink } from "@/lib/server/whop-account-links";
+import { resolvePlatformConfig } from "@/lib/server/whop-kyc";
 import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
@@ -15,7 +16,9 @@ import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
    link does NOT mean KYC is complete. The client must call
    GET /api/whop/kyc/status to get the authoritative state from Whop.
 
-   THE LINK USES company_id FIRST. See whop-kyc.ts for the full rationale.
+   THE ACCOUNT ID IS NEVER THE CALLER'S. It is read from the database with the
+   session uid AND the trusted environment; the request body is not consulted.
+   Both redirect URLs are built server-side in whop-account-links.ts.
    ========================================================================== */
 
 export const runtime = "nodejs";
@@ -43,17 +46,11 @@ export async function POST(request: Request) {
   const account = await getConnectedAccount(firebaseUid, platform.config.environment);
   if (!account) return json({ error: "account_not_provisioned" }, 409);
 
-  const appUrl = process.env.APP_PUBLIC_URL?.trim();
-  if (!appUrl) return json({ error: "unavailable", reason: "missing_app_url" }, 503);
-
-  // The creator returns here whether they finished or abandoned. The return
-  // page must fetch /api/whop/kyc/status to determine the real outcome.
-  const returnUrl = `${appUrl}/onboarding?step=kyc_return`;
-
-  const link = await createKycLink(account.whopAccountId, returnUrl);
+  const link = await createAccountLink(account.whopAccountId, "account_onboarding");
 
   if (!link.ok) {
     if (link.reason === "platforms_access_required") return json({ error: link.reason }, 403);
+    if (link.reason === "unconfigured") return json({ error: "unavailable" }, 503);
     if (link.reason === "provider_rejected") return json({ error: link.reason }, 502);
     return json({ error: link.reason }, 502);
   }
