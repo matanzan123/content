@@ -555,10 +555,25 @@ console.log("\n--- C. properties true by absence ---");
     );
   };
 
-  check("markTransferCompleted scopes its update by environment",
-    scopedBy(transfers, "export async function markTransferCompleted", "export async function markTransferReversed"));
-  check("markTransferReversed scopes its lookup by environment",
-    scopedBy(transfers, "export async function markTransferReversed", "export async function getTransfer"));
+  // RE-BASELINED. `markTransferCompleted` / `markTransferReversed` wrote money
+  // state from a webhook payload's status string, using values that are not
+  // Whop transfer statuses at all. They were replaced by
+  // `refreshTransferFromProvider`, which resolves the row locally and then
+  // asks the provider. The ENVIRONMENT-SCOPING property is unchanged.
+  check("refreshTransferFromProvider scopes its lookup by environment",
+    scopedBy(transfers, "export async function refreshTransferFromProvider", "export async function getTransfer"));
+  // retryTransfer and reconcileTransfer are keyed on OUR OWN uuid primary key,
+  // which cannot collide across environments — but they still scope, so a
+  // production process can never act on a sandbox row it was handed the id of.
+  for (const fn of ["retryTransfer", "reconcileTransfer"]) {
+    const body = transfers.slice(
+      transfers.indexOf(`export async function ${fn}`),
+      transfers.indexOf("export type", transfers.indexOf(`export async function ${fn}`) + 40),
+    );
+    check(`${fn} scopes its lookup by the trusted environment`,
+      body.includes("eq(schema.creatorTransfers.environment, platform.config.environment)"),
+      `${body.length} chars`);
+  }
 
   check("NO transfer lookup matches provider_transfer_id without environment",
     (() => {
@@ -574,11 +589,10 @@ console.log("\n--- C. properties true by absence ---");
   check("the environment comes from the trusted server helper, not a parameter",
     transfers.includes("function resolveTransferEnvironment()") &&
     transfers.includes("return getWhopEnvironment();"));
-  check("and neither function accepts an environment argument from its caller",
-    /export async function markTransferCompleted\(\s*providerTransferId: string,\s*\)/.test(transfers) &&
-    /export async function markTransferReversed\(\s*providerTransferId: string,\s*\)/.test(transfers));
+  check("the refresh accepts no environment argument from its caller",
+    /export async function refreshTransferFromProvider\(\s*providerTransferId: string,\s*\)/.test(transfers));
   check("an unresolvable environment fails CLOSED — no unscoped update happens",
-    (transfers.match(/const environment = resolveTransferEnvironment\(\);\s*if \(!environment\) return \{ ok: false \};/g) ?? []).length === 2);
+    /const environment = resolveTransferEnvironment\(\);\s*if \(!environment\) return \{ ok: false \};/.test(transfers));
 
   // The notification lookups resolve a firebaseUid from the same table and had
   // the same defect: an id collision would have notified the wrong creator.

@@ -238,37 +238,55 @@ check("the three payout events are recognised AND routed to the implemented hand
   payoutHandler.length > 0 &&
   payoutEvents.every((e) => webhooks.isSupportedEvent(e)) &&
   payoutEvents.every((e) => source.includes(`"${e}": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body)`)));
-check("the payout outcome is read from the payload status, not from the event name alone",
-  /const payoutStatus = readString\(data, "status"\)/.test(payoutHandler) &&
-  /const isReversed =/.test(payoutHandler) &&
-  /const isCompleted =/.test(payoutHandler));
+// THE HANDLER NO LONGER READS THE PAYLOAD'S STATUS, DELIBERATELY.
+//
+// This previously asserted that the outcome came from `payoutStatus` in the
+// event body rather than from the event name. Both were wrong sources: the
+// statuses it matched (`paid`, `completed`, `reversed`) are not Whop TRANSFER
+// statuses at all — that resource has exactly `processing`, `succeeded`,
+// `failed` — so the handler was writing money state from values the resource
+// never emits, and `failed` posted a reversal for money that had never moved.
+//
+// Replaced rather than deleted: the property that must hold is now stronger —
+// the payload decides NOTHING, and the provider is asked instead.
+check("the payout handler reads no status out of the payload",
+  !/payoutStatus/.test(payoutHandler) &&
+  !/"paid"/.test(payoutHandler) &&
+  !/isReversed|isCompleted/.test(payoutHandler));
 check("a payout id is required before anything is mapped",
   /if \(!payoutId\) return \{ kind: "business_mapping_not_implemented" \};/.test(payoutHandler));
-check("settlement and reversal both delegate to the transfer service, not to raw SQL",
-  /await markTransferCompleted\(payoutId\)/.test(payoutHandler) &&
-  /await markTransferReversed\(payoutId\)/.test(payoutHandler) &&
+check("the handler delegates to a provider-authoritative refresh, not to raw SQL",
+  /await refreshTransferFromProvider\(payoutId\)/.test(payoutHandler) &&
   /\bdb\.|insert\(|\.update\(|\.delete\(/.test(payoutHandler) === false);
 check("an unrecognised payout id is acknowledged, never forced into a mapping",
-  (payoutHandler.match(/if \(!result\.ok\) return \{ kind: "business_mapping_not_implemented" \};/g) ?? []).length === 2);
+  /if \(!refreshed\.ok\)/.test(payoutHandler) &&
+  /return \{ kind: "business_mapping_not_implemented" \};/.test(payoutHandler));
 check("the payout handler never writes the ledger itself",
   /financialLedger|postTransaction|accountingTransactions/.test(payoutHandler) === false);
+
 /*
- * PINNED, NOT ENDORSED — see the audit note.
+ * GAP A IS CLOSED, and this check is its inversion.
  *
- * The handler writes no ledger row directly, but `markTransferReversed` (in
- * creator-transfers.ts) does: it posts `payout_reversed` against
- * creator_payable / provider_balance. So a payout event DOES reach a
- * money-moving posting, one delegation away.
+ * It used to read: "payout events are not ownership-gated, though their path
+ * can post". That was true and dangerous — `payout.*` is not in
+ * OWNERSHIP_GATED, yet the handler reached a money-moving posting one
+ * delegation away, with only the webhook signature standing behind it.
  *
- * And payout events are NOT in OWNERSHIP_GATED, even though the gate's own
- * comment says "for every event that will one day move money, the resource is
- * fetched back from Whop". This check records that state so the gap is visible
- * and any future change to it is deliberate — it asserts what IS true today,
- * and must be INVERTED (not deleted) when payouts join the gate.
+ * The gap is now closed without adding a gate entry, because the handler no
+ * longer trusts the event at all. It resolves the transfer locally, scoped to
+ * our environment, and then asks `transfers.retrieve` — and retrieving the
+ * resource with our own platform key IS the ownership proof the gate wanted.
+ * An id we do not hold never reaches the provider; an id belonging to someone
+ * else is not readable with our key.
+ *
+ * Asserted as the property, not the absence: if a future change lets the
+ * handler write money state from the payload again, this fails.
  */
-check("PINNED GAP: payout events are not ownership-gated, though their path can post",
-  gateBlock.includes('"payout.') === false &&
-  /await markTransferReversed\(payoutId\)/.test(payoutHandler));
+check("GAP A CLOSED: the payout path proves ownership by retrieving the resource",
+  /await refreshTransferFromProvider\(payoutId\)/.test(payoutHandler) &&
+  !/markTransfer(Completed|Reversed)/.test(source) &&
+  /retrieveTransfer\(/.test(readFileSync("src/lib/server/creator-transfers.ts", "utf8")));
+
 check("no transfer or withdrawal event was enabled",
   supported.some((e) => /transfer|withdrawal/.test(e)) === false);
 
@@ -324,12 +342,16 @@ console.log("\n--- A. transfer state changes are environment-scoped ---");
     // sql`${createdAt} < ${cutoff}` — so the tag captures both interpolations
     // and the comparison is evaluated for real rather than waved through.
     if (cond.op === "lt") return row[cond.col] < cond.val;
+    // The status guard arrives as inArray(status, allowedFrom): the service
+    // puts its terminal-state protection in the WHERE clause, so the fake has
+    // to evaluate it or every guarded update would silently match nothing.
+    if (cond.op === "in") return cond.vals.includes(row[cond.col]);
     return false;
   };
 
   /** Builds the module over an in-memory store; returns it plus a call log. */
   function loadTransfers({ rows, environment }) {
-    const log = { wheres: [], updated: [], inserted: [] };
+    const log = { wheres: [], updated: [], inserted: [], retrieved: [] };
     const store = rows.map((r) => ({ ...r }));
 
     const updateBuilder = () => ({
@@ -339,14 +361,21 @@ console.log("\n--- A. transfer state changes are environment-scoped ---");
       },
       where(cond) {
         log.wheres.push(cond);
+        this._hit = [];
         for (const row of store) {
           if (matches(cond, row)) {
             Object.assign(row, this._values);
             log.updated.push(row.transferId);
+            this._hit.push(row);
           }
         }
-        return Promise.resolve();
+        // Stays chainable: the service calls .returning() after .where() to
+        // learn whether its GUARDED update matched. Returning a bare promise
+        // made that throw, which the service read as "transition refused".
+        return this;
       },
+      returning() { return Promise.resolve((this._hit ?? []).map((r) => ({ transferId: r.transferId }))); },
+      then(res, rej) { return Promise.resolve(this._hit ?? []).then(res, rej); },
     });
 
     const selectBuilder = () => ({
@@ -386,14 +415,34 @@ console.log("\n--- A. transfer state changes are environment-scoped ---");
         return {
           eq: (col, val) => ({ op: "eq", col, val }),
           and: (...parts) => ({ op: "and", parts: parts.filter(Boolean) }),
+          inArray: (col, vals) => ({ op: "in", col, vals }),
           sql: (_strings, col, val) => ({ op: "lt", col, val }),
         };
       }
       if (spec === "@/lib/db") return { getDb: () => DB, schema: { creatorTransfers: COL, accountingTransactions: {}, accountingEntries: {}, whopAccounts: {} } };
       if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
-      if (spec.endsWith("whop-accounts")) return { resolvePlatformConfig: () => ({ ok: false, reason: "unconfigured" }) };
+      // Configured, and matching the environment under test: reconcileTransfer
+      // resolves the platform config before it will touch a row, so a stubbed
+      // failure here would make every scoping assertion pass vacuously.
+      if (spec.endsWith("whop-accounts")) {
+        return {
+          resolvePlatformConfig: () =>
+            environment ? { ok: true, config: { environment } } : { ok: false, reason: "unconfigured" },
+        };
+      }
       if (spec.endsWith("whop-payout-status")) return { fetchPayoutStatus: async () => null };
-      if (spec.endsWith("whop-transfers")) return { callWhopTransfer: async () => ({ ok: false }) };
+      if (spec.endsWith("whop-transfers")) {
+        return {
+          createLedgerTransfer: async () => ({ ok: false, outcome: "ambiguous", reason: "network_error" }),
+          retrieveTransfer: async (id) => {
+            log.retrieved.push(id);
+            return { ok: true, transfer: { providerTransferId: id, status: "succeeded", confirmedAmountMinor: null, currency: "usd", failureCode: null } };
+          },
+        };
+      }
+      if (spec.endsWith("accounting/journal")) {
+        return { reverseTransaction: async () => ({ ok: true, transactionId: "rev", alreadyReversed: false }) };
+      }
       return require(spec);
     };
 
@@ -414,81 +463,54 @@ console.log("\n--- A. transfer state changes are environment-scoped ---");
     cond.parts.some((p) => p.op === "eq" && p.col === COL.environment && p.val === value) &&
     cond.parts.some((p) => p.op === "eq" && p.col === COL.providerTransferId);
 
-  /* --- markTransferCompleted --- */
+  /* --- the provider-authoritative refresh is environment-scoped --- */
+  //
+  // RE-BASELINED. This section previously drove `markTransferCompleted` and
+  // `markTransferReversed`, which wrote money state from a webhook payload's
+  // `status` string. Those statuses were not real — a Whop transfer has only
+  // `processing`, `succeeded`, `failed` — and `failed` posted a reversal for
+  // money that had never moved. They were replaced by
+  // `refreshTransferFromProvider`, which treats the event as a trigger and
+  // asks `transfers.retrieve` instead.
+  //
+  // The property under test has NOT changed and is still the point: a
+  // provider transfer id is Whop's namespace and is not unique across
+  // environments, so resolving one must be scoped to ours.
   {
     const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
-    const r = await mod.markTransferCompleted("tr_collide");
-    check("markTransferCompleted scopes its update by environment",
+    const r = await mod.refreshTransferFromProvider("tr_collide");
+    check("the refresh scopes its lookup by environment",
       carriesEnvironment(log.wheres[0], "sandbox"));
-    check("it settles ONLY the row in the running environment",
-      r.ok === true && log.updated.join(",") === "t_sandbox");
-    check("a production transfer with the same provider id is NOT settled",
-      store.find((x) => x.transferId === "t_prod").status === "pending");
-    check("and the sandbox row did reach `completed` — the scope did not break the update",
-      store.find((x) => x.transferId === "t_sandbox").status === "completed");
-  }
-
-  /* --- markTransferReversed --- */
-  {
-    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
-    const r = await mod.markTransferReversed("tr_collide");
-    check("markTransferReversed scopes its lookup by environment",
-      carriesEnvironment(log.wheres[0], "sandbox"));
-    check("it reverses ONLY the row in the running environment",
+    check("it resolves ONLY the row in the running environment",
       r.ok === true && store.find((x) => x.transferId === "t_prod").status === "pending");
-    check("and it still writes the reversal journal for the matched row",
-      log.inserted.length >= 2);
+    check("and the sandbox row followed the provider's answer",
+      store.find((x) => x.transferId === "t_sandbox").status === "completed");
   }
 
   /* --- the cross-environment case, stated directly --- */
   {
     // Running as PRODUCTION, with only a sandbox row present: nothing matches.
-    const rows = [{ transferId: "t_sandbox", providerTransferId: "tr_collide", environment: "sandbox", status: "pending", amountMinor: 1n, currency: "usd", whopAccountId: "biz_a" }];
-    const completed = loadTransfers({ rows, environment: "production" });
-    await completed.mod.markTransferCompleted("tr_collide");
-    check("an id match in ANOTHER environment cannot be settled",
-      completed.log.updated.length === 0 &&
-      completed.store[0].status === "pending");
-
-    const reversed = loadTransfers({ rows, environment: "production" });
-    const rr = await reversed.mod.markTransferReversed("tr_collide");
-    check("an id match in ANOTHER environment cannot be reversed",
-      rr.ok === false && reversed.log.inserted.length === 0 && reversed.store[0].status === "pending");
+    const rows = [{ transferId: "t_sandbox", providerTransferId: "tr_collide", environment: "sandbox", status: "submitted", amountMinor: 1n, currency: "usd", whopAccountId: "biz_a" }];
+    const prod = loadTransfers({ rows, environment: "production" });
+    const r = await prod.mod.refreshTransferFromProvider("tr_collide");
+    check("an id match in ANOTHER environment is not ours and is left alone",
+      r.ok === false && prod.store[0].status === "submitted");
+    check("and the provider is never asked about a row we do not hold",
+      prod.log.retrieved.length === 0, `${prod.log.retrieved.length}`);
   }
 
-  /* --- the environment source is server-side and not caller-selectable --- */
+  /* --- fail closed --- */
   {
-    const { mod, log } = loadTransfers({ rows: twoEnvRows(), environment: null });
-    const c = await mod.markTransferCompleted("tr_collide");
-    const v = await mod.markTransferReversed("tr_collide");
+    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: null });
+    const r = await mod.refreshTransferFromProvider("tr_collide");
     check("an unresolvable environment fails CLOSED, with no query issued",
-      c.ok === false && v.ok === false && log.wheres.length === 0);
-
-    // Both take exactly one argument, so there is no seam for a webhook
-    // payload, query parameter or request body to name the environment.
-    check("no caller can select the environment — both take only the provider id",
-      mod.markTransferCompleted.length === 1 && mod.markTransferReversed.length === 1);
-    const transferSource = readFileSync("src/lib/server/creator-transfers.ts", "utf8");
-    const markBlock = transferSource.slice(transferSource.indexOf("function resolveTransferEnvironment"));
-    check("the environment is read from getWhopEnvironment(), never from a payload",
-      markBlock.includes("return getWhopEnvironment();") &&
-      !/body|payload|searchParams|req\.|request\./i.test(
-        markBlock.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
-      ));
+      r.ok === false && log.wheres.length === 0);
+    check("and mutates nothing",
+      store.every((x) => x.status === "pending"));
+    check("the refresh takes only a provider id — no caller-chosen environment",
+      mod.refreshTransferFromProvider.length === 1);
   }
 
-  /* --- the protections that were already there must still be there --- */
-  {
-    const { mod, log, store } = loadTransfers({ rows: twoEnvRows(), environment: "sandbox" });
-    await mod.markTransferReversed("tr_collide");
-    const key = log.inserted.flat().find((v) => v && v.idempotencyKey)?.idempotencyKey;
-    check("the reversal keeps its per-transfer idempotency key",
-      key === "whop:payout_reversed:transfer:t_sandbox", key);
-    check("the reversal still links back to the transaction it reverses",
-      log.inserted.flat().some((v) => v && "reversesTransactionId" in v));
-    check("and the matched row still lands in `reversed`",
-      store.find((x) => x.transferId === "t_sandbox").status === "reversed");
-  }
 
   /* --- the reconciliation sweep is scoped too --- */
   {

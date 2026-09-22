@@ -325,8 +325,14 @@ const MUST_STAY_SCOPED = [
   ["payment-refunds.ts", "listRefundsForPaymentLocal"],
   ["payment-refunds.ts", "localCompletedRefundTotal"],
   ["payment-disputes.ts", "listDisputesForPaymentLocal"],
-  ["creator-transfers.ts", "markTransferCompleted"],
-  ["creator-transfers.ts", "markTransferReversed"],
+  // Re-baselined: the two guessed-status mutators were replaced by a
+  // provider-authoritative refresh and its reconcile/retry paths. The
+  // environment-scoping property is unchanged and still asserted.
+  // Only the refresh matches on a PROVIDER id. retryTransfer and
+  // reconcileTransfer key on our own uuid primary key (they scope by
+  // environment too, asserted in connected-account-test), so they make no
+  // provider-id query for this sweep to judge.
+  ["creator-transfers.ts", "refreshTransferFromProvider"],
   ["notification-triggers.ts", "notifyAccountUpdated"],
   ["notification-triggers.ts", "notifyPaymentSettled"],
   ["notification-triggers.ts", "notifyPayoutCompleted"],

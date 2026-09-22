@@ -31,7 +31,7 @@ import {
   verifyDisputeOwnership,
 } from "./whop-disputes";
 import { updateConnectedAccountStatus } from "./connected-accounts";
-import { markTransferCompleted, markTransferReversed } from "./creator-transfers";
+import { refreshTransferFromProvider } from "./creator-transfers";
 import { resolveChildAccount } from "./whop-child-router";
 import { reverseForRefund, reverseForDispute } from "./creator-earnings";
 import { fireWebhookNotifications } from "./notification-triggers";
@@ -562,37 +562,29 @@ export async function handleWhopPayoutUpdated(
 
   if (!payoutId) return { kind: "business_mapping_not_implemented" };
 
-  // Determine the event from the payload status or the event_type field
-  const eventType = readString(root, "event") ?? readString(root, "type") ?? "";
-  const payoutStatus = readString(data, "status") ?? "";
-
-  const isReversed =
-    eventType.includes("reversed") ||
-    payoutStatus === "reversed" ||
-    payoutStatus === "failed";
-
-  const isCompleted =
-    !isReversed && (
-      payoutStatus === "paid" ||
-      payoutStatus === "completed" ||
-      payoutStatus === "succeeded"
-    );
-
-  if (isReversed) {
-    const result = await markTransferReversed(payoutId);
-    // If we don't recognise the id, it's not our payout — acknowledge silently.
-    if (!result.ok) return { kind: "business_mapping_not_implemented" };
-    return { kind: "handled" };
+  // THE PAYLOAD'S STATUS IS NOT READ, DELIBERATELY.
+  //
+  // This handler used to map `paid`/`completed`/`reversed` out of the event
+  // body onto our money state. None of those is a Whop TRANSFER status — that
+  // resource has exactly `processing`, `succeeded` and `failed` — so it was
+  // writing the ledger from states the resource never emits, and `failed`
+  // posted a reversal for money that had never moved.
+  //
+  // It also wrote money state without ownership proof: `payout.*` is not in
+  // OWNERSHIP_GATED, so nothing had established the resource was ours.
+  //
+  // The event is now only a TRIGGER. The authority is `transfers.retrieve`,
+  // which the SDK documents as the way to follow a transfer to resolution —
+  // and retrieving it with our own platform key IS the ownership proof, so the
+  // gap closes without a separate gate. An id we do not hold locally, in this
+  // environment, never reaches the provider at all.
+  const refreshed = await refreshTransferFromProvider(payoutId);
+  if (!refreshed.ok) {
+    // Not a ledger transfer of ours: another environment, another system, or a
+    // payout resource that is not a transfer. Acknowledged and ignored.
+    return { kind: "business_mapping_not_implemented" };
   }
-
-  if (isCompleted) {
-    const result = await markTransferCompleted(payoutId);
-    if (!result.ok) return { kind: "business_mapping_not_implemented" };
-    return { kind: "handled" };
-  }
-
-  // payout.created / other statuses — no action needed
-  return { kind: "business_mapping_not_implemented" };
+  return { kind: "handled" };
 }
 
 /**

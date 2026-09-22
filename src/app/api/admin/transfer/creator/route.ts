@@ -103,6 +103,20 @@ export async function POST(request: Request) {
 
     const campaignId = typeof body.campaign_id === "string" ? body.campaign_id.trim() : undefined;
 
+    // STABLE IDENTITY FOR ONE INTENDED TRANSFER.
+    //
+    // Required for real execution. Without it an HTTP retry is
+    // indistinguishable from a second intended payment, and the service would
+    // have no way to resolve back to the original row and the original
+    // provider idempotence key.
+    //
+    // It is an opaque token and nothing more: it names WHICH transfer this is,
+    // never who is transferring, to whom, how much, or in which environment.
+    // Every one of those is resolved server-side and compared against the
+    // stored intent, so reusing a token with different details fails closed.
+    const requestId = typeof body.request_id === "string" ? body.request_id.trim() : "";
+    if (!dryRun && !requestId) return json({ error: "missing_request_id" }, 400);
+
     // Actor from verified admin session — never from the body
     const initiatedByUid = adminContext.uid;
 
@@ -129,18 +143,24 @@ export async function POST(request: Request) {
       purpose,
       campaignId,
       initiatedByUid,
+      requestId: requestId || undefined,
       dryRun,
     });
 
     if (!result.ok) {
       const statusCode =
         result.reason === "amount_below_minimum" || result.reason === "amount_above_maximum" ? 400 :
+        result.reason === "missing_request_id" ? 400 :
+        result.reason === "intent_conflict" ? 409 :
         result.reason === "creator_not_found" ? 404 :
-        result.reason === "payout_not_ready" ? 422 :
-        result.reason === "payout_check_failed" ? 502 :
+        result.reason === "transfer_cap_unconfigured" ? 503 :
+        // AMBIGUOUS, NOT FAILED. 202 says "accepted, outcome unknown" — the
+        // row is still live and recoverable through retryTransfer with the
+        // same key. A 5xx here would invite a retry that mints a new payment.
+        result.reason === "provider_ambiguous" ? 202 :
         result.reason === "unconfigured" ? 503 :
         result.reason === "db_unavailable" ? 503 :
-        500;
+        502;
       return json({ ok: false, error: result.reason }, statusCode);
     }
 
@@ -148,10 +168,12 @@ export async function POST(request: Request) {
       return json({
         ok: true,
         dry_run: true,
-        payout_ready: result.payoutReady,
         account_id: result.accountId,
         amount_minor: Number(result.amountMinor),
         max_allowed: Number(result.maxAllowed),
+        // Whether a real run could proceed with the current configuration.
+        // False in production until MAX_CREATOR_TRANSFER_MINOR is set.
+        executable: result.executable,
       }, 200);
     }
 
@@ -163,6 +185,9 @@ export async function POST(request: Request) {
       status: result.status,
       account_id: result.accountId,
       amount_minor: Number(result.amountMinor),
+      // True when this request resolved to an existing intent rather than
+      // creating one — the visible sign that idempotency did its job.
+      replayed: result.replayed,
     }, 200);
   });
 }
