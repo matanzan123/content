@@ -5,13 +5,11 @@ import { getDb, schema } from "@/lib/db";
 import {
   computeEarningsBreakdown,
   computeHoldUntil,
-  computeBalance,
-  type CreatorBalance,
-  type EarningStatus,
 } from "./creator-earnings-policy";
 import { postRevenueSplit, postRevenueSplitReversal } from "./accounting/revenue-split-posting";
 import { getWhopEnvironment } from "./whop-payments";
 import { computeRefundSplitReversal } from "./creator-earnings-policy";
+import { computeCreatorPosition, type CreatorPosition } from "./creator-position";
 
 /* ==========================================================================
    CREATOR EARNINGS — DB operations and the main recording flow.
@@ -65,7 +63,7 @@ export type RecordEarningResult =
   | { ok: false; reason: "db_unavailable" | "journal_refused" | "db_error" };
 
 export type GetBalanceResult =
-  | { ok: true; balance: CreatorBalance }
+  | { ok: true; balance: CreatorPosition }
   | { ok: false; reason: "db_unavailable" };
 
 /* -------------------------------------------------------------------------
@@ -194,52 +192,35 @@ export async function recordCreatorEarning(
    ------------------------------------------------------------------------- */
 
 /**
- * Returns the creator's current balance across all states.
+ * Returns the creator's current position across all states.
  *
- * Available is computed dynamically from hold_until — a sweep job does not
- * need to have run for this to be current.
+ * THIS NO LONGER COMPUTES ANYTHING. It delegates to `computeCreatorPosition`,
+ * and that delegation is the fix, not an indirection.
+ *
+ * It used to sum `creator_earnings` rows on its own while the ledger kept a
+ * `creator_payable` balance built from the same events. Two sources, one
+ * question, and nothing reconciling them — so a Task #13 admin transfer, which
+ * debits the ledger and touches no earning row, left this function still
+ * reporting the full balance. The creator saw money that had already been sent,
+ * and could withdraw it a second time through Task #15.
+ *
+ * The name and shape are kept so callers do not change, but there is now
+ * exactly one implementation of "what is this creator owed". See
+ * `creator-position.ts` for why the ledger is the authority.
  */
 export async function getCreatorBalance(firebaseUid: string): Promise<GetBalanceResult> {
   const db = getDb();
   if (!db) return { ok: false, reason: "db_unavailable" };
 
-  // ENVIRONMENT-SCOPED. The key here is OUR firebase uid rather than a
-  // provider id, so this is not the provider-id defect — but it is the same
-  // isolation objective, and the consequence was arguably worse: one creator
-  // has rows in both environments under the same uid, so an unscoped sum
-  // reported a balance that mixed sandbox test money with real earnings. The
-  // number a creator sees, and the number a withdrawal is checked against,
-  // must describe one environment.
+  // ENVIRONMENT-SCOPED. One creator has rows in both environments under the
+  // same uid, so an unscoped read would report sandbox test money alongside
+  // real earnings. The number a creator sees, and the number a withdrawal is
+  // checked against, must describe one environment.
   const environment = getWhopEnvironment();
   if (!environment) return { ok: false, reason: "db_unavailable" };
 
-  const rows = await db
-    .select({
-      status: schema.creatorEarnings.status,
-      netAmountMinor: schema.creatorEarnings.netAmountMinor,
-      holdUntil: schema.creatorEarnings.holdUntil,
-      frozenByDispute: schema.creatorEarnings.frozenByDispute,
-      currency: schema.creatorEarnings.currency,
-    })
-    .from(schema.creatorEarnings)
-    .where(
-      and(
-        eq(schema.creatorEarnings.firebaseUid, firebaseUid),
-        eq(schema.creatorEarnings.environment, environment),
-      ),
-    );
-
-  const balance = computeBalance(
-    rows.map((r) => ({
-      status: r.status as EarningStatus,
-      netAmountMinor: r.netAmountMinor,
-      holdUntil: r.holdUntil,
-      frozenByDispute: r.frozenByDispute,
-      currency: r.currency,
-    })),
-  );
-
-  return { ok: true, balance };
+  const position = await computeCreatorPosition(firebaseUid, environment, db);
+  return { ok: true, balance: position };
 }
 
 /* -------------------------------------------------------------------------

@@ -460,8 +460,36 @@ for (const [file, fn] of MUST_STAY_SCOPED) {
     earningsByUid.filter((q) => !q.scoped).map((q) => `${q.file}:${q.line} ${q.fn}()`).join(" | ") ||
       `${earningsByUid.length} query(ies), all scoped`);
 
+  // THE LEDGER IS NOW A BALANCE SOURCE, so it is now in scope for this rule.
+  //
+  // The obligation is read from `accounting_entries`, and an entry carries no
+  // environment of its own — it lives on the transaction. So the scoping here
+  // depends on a JOIN, which is a weaker thing to get right than a column on
+  // the row being filtered, and worth asserting explicitly: without it a
+  // sandbox balance would include production obligations.
+  {
+    const src = readFileSync("src/lib/server/creator-position.ts", "utf8");
+    const fn = src.slice(src.indexOf("async function ledgerPayableMinor"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+    check("the ledger payable read joins transactions and filters on environment",
+      /innerJoin\(\s*schema\.accountingTransactions/.test(body) &&
+      /eq\(schema\.accountingTransactions\.environment, environment\)/.test(body));
+    check("the ledger payable read is keyed by OUR uid, never a provider id",
+      /eq\(schema\.accountingEntries\.counterpartyId, firebaseUid\)/.test(body) &&
+      !/whopAccountId|biz_/.test(body));
+    check("the environment reaching it is a typed parameter, not read inside",
+      /environment: "sandbox" \| "production"/.test(fn.slice(0, 300)) &&
+      !/getWhopEnvironment\(\)/.test(body));
+  }
+
+  // RE-BASELINED: `getCreatorBalance` no longer runs an earnings scan of its
+  // own. It delegates to `computeCreatorPosition`, which is where the balance
+  // is now derived — from the ledger, with the earning rows supplying only
+  // eligibility. Naming the old function here would assert the absence of a
+  // query that moved, so the pair follows the query to its new home rather
+  // than being dropped.
   for (const [file, fn] of [
-    ["creator-earnings.ts", "getCreatorBalance"],
+    ["creator-position.ts", "eligibilityRows"],
     ["creator-withdrawals.ts", "requestWithdrawal"],
   ]) {
     const qs = earningsByUid.filter((q) => q.file.endsWith(file) && q.fn === fn);

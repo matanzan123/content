@@ -505,6 +505,17 @@ function loadOrchestrator({
     }
     if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
     if (spec.endsWith("whop-transfers")) return providerMod.exports;
+    // The transfer journal now caps against the creator's canonical position,
+    // so this module is on its import path. Stubbed to ALLOW the reservation:
+    // the cap itself is exercised in whop-creator-earnings-test.mjs, and a
+    // stub that refused would silently turn every transfer assertion below
+    // into a test of the refusal path instead.
+    if (spec.endsWith("creator-position")) {
+      return {
+        reserveFromPosition: async () => ({ ok: true, position: null }),
+        earningTransitionGuard: () => ({ op: "in" }),
+      };
+    }
     if (spec.endsWith("accounting/journal")) {
       return {
         reverseTransaction: async (id, opts) => {

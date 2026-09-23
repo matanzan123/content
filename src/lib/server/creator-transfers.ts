@@ -11,6 +11,7 @@ import {
   type TransferResult,
 } from "./whop-transfers";
 import { reverseTransaction } from "./accounting/journal";
+import { reserveFromPosition } from "./creator-position";
 
 /* ==========================================================================
    CREATOR TRANSFER ORCHESTRATOR — server only.
@@ -181,6 +182,8 @@ export type TransferFailureReason =
   | "intent_conflict"          // same request id, different transfer details
   | "transfer_cap_unconfigured" // production without an explicit ceiling
   | "accounting_write_failed"
+  | "insufficient_payable"   // creator is not owed this much; nothing moved
+  | "position_inconsistent"  // their books do not add up; refused, not guessed
   | "amount_unrepresentable"
   | "provider_ambiguous"       // outcome unknown; record left recoverable
   | string;                    // provider failure reason passed through
@@ -338,6 +341,7 @@ export async function initiateCreatorTransfer(
   if (!row.accountingTransactionId) {
     const written = await writePayoutJournal(db, {
       transferId: row.transferId,
+      firebaseUid: input.firebaseUid,
       whopAccountId,
       amountMinor: row.amountMinor,
       currency: row.currency,
@@ -345,11 +349,14 @@ export async function initiateCreatorTransfer(
       idempotencyKey,
       purpose: row.purpose,
     });
-    if (!written) {
+    if (!written.ok) {
+      // Every refusal fails the transfer closed. A refused posting means the
+      // provider is never called, which is the whole reason the journal goes
+      // first: the money cannot move ahead of the obligation it discharges.
       await setTransferStatus(db, row.transferId, "failed", {
-        failureReason: "accounting_write_failed",
+        failureReason: written.reason,
       });
-      return { ok: false, reason: "accounting_write_failed" };
+      return { ok: false, reason: written.reason };
     }
   }
 
@@ -795,6 +802,9 @@ export async function reconcileTransfer(transferId: string): Promise<ReconcileRe
 
 type JournalInput = {
   transferId: string;
+  /** WHO IS OWED. The ledger counterparty, and the lock subject. */
+  firebaseUid: string;
+  /** WHERE THE MONEY GOES. The provider destination, and nothing else. */
   whopAccountId: string;
   amountMinor: bigint;
   currency: string;
@@ -803,13 +813,70 @@ type JournalInput = {
   purpose: string;
 };
 
+export type JournalOutcome =
+  | { ok: true }
+  /** The creator is not owed this much. No money left, no journal written. */
+  | { ok: false; reason: "insufficient_payable" }
+  /** Their books do not add up. Refused rather than guessed at. */
+  | { ok: false; reason: "position_inconsistent" }
+  | { ok: false; reason: "creator_not_found" }
+  | { ok: false; reason: "accounting_write_failed" };
+
+/**
+ * Thrown to abort the posting transaction with a reason attached.
+ *
+ * A refusal has to roll the transaction back — the lock must not be held past
+ * the decision, and nothing half-written may survive — but it is not a fault,
+ * so it carries its reason out rather than collapsing into the catch-all.
+ */
+class PayoutRefusal extends Error {
+  constructor(readonly reason: Exclude<JournalOutcome, { ok: true }>["reason"]) {
+    super(reason);
+  }
+}
+
+/**
+ * Posts the payout journal, having first proved the creator is owed the money.
+ *
+ * THE CHECK AND THE DEBIT ARE ONE TRANSACTION, and that is the point.
+ *
+ * Two admins transferring $80 each against a $100 payable is not a rare race,
+ * it is what happens the first time someone double-clicks. Checking the
+ * balance and then posting as two statements lets both reads see $100 and both
+ * writes succeed, overdrawing the creator by $60 with a perfectly consistent
+ * ledger to show for it. The fix is `reserveFromPosition`, which takes a row
+ * lock on the creator BEFORE reading, inside this same transaction: the second
+ * caller blocks until the first commits, then reads $20 and is refused.
+ *
+ * The same lock serialises Task #15 creator withdrawals, so a creator cannot
+ * withdraw money an admin is concurrently transferring out.
+ */
 async function writePayoutJournal(
   db: NonNullable<ReturnType<typeof getDb>>,
   input: JournalInput,
-): Promise<boolean> {
+): Promise<JournalOutcome> {
   const idempotencyKey = `whop:payout_sent:transfer:${input.transferId}`;
   try {
     await db.transaction(async (tx) => {
+      // THE CAP. Under the lock, and inside this transaction, or it is not a
+      // cap at all — see the note above.
+      const reserved = await reserveFromPosition(
+        tx,
+        input.firebaseUid,
+        input.environment,
+        input.amountMinor,
+      );
+      if (!reserved.ok) {
+        // The position helper speaks of what is AVAILABLE; a transfer speaks
+        // of what is PAYABLE. Same refusal, mapped once here rather than
+        // leaking one module's vocabulary into the other's error surface.
+        throw new PayoutRefusal(
+          reserved.reason === "insufficient_available"
+            ? "insufficient_payable"
+            : reserved.reason,
+        );
+      }
+
       const [txn] = await tx
         .insert(schema.accountingTransactions)
         .values({
@@ -835,7 +902,16 @@ async function writePayoutJournal(
           amountMinor: input.amountMinor,          // positive = debit
           currency: input.currency,
           counterpartyType: "creator",
-          counterpartyId: input.whopAccountId,
+          // THE FIREBASE UID, NOT THE WHOP ACCOUNT ID.
+          //
+          // `postRevenueSplit` credits this same account keyed by firebaseUid.
+          // Debiting it by `biz_...` instead opened a second, unrelated
+          // counterparty: the credits piled up under one key and the debits
+          // under another, so the creator's payable never went down no matter
+          // how much was paid out, and no query could see the two halves at
+          // once. The Whop account id is the provider destination — it belongs
+          // on the transfer row and in the provider call, not on the books.
+          counterpartyId: input.firebaseUid,
         },
         {
           transactionId,
@@ -854,9 +930,10 @@ async function writePayoutJournal(
         .set({ accountingTransactionId: transactionId })
         .where(eq(schema.creatorTransfers.transferId, input.transferId));
     });
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof PayoutRefusal) return { ok: false, reason: error.reason };
+    return { ok: false, reason: "accounting_write_failed" };
   }
 }
 

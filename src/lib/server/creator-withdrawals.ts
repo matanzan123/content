@@ -9,6 +9,7 @@ import { getConnectedAccount } from "./connected-accounts";
 import { resolvePlatformConfig } from "./whop-accounts";
 import { getWhopEnvironment } from "./whop-payments";
 import { notifyWithdrawalProcessing } from "./notification-triggers";
+import { reserveFromPosition, earningTransitionGuard } from "./creator-position";
 
 /* ==========================================================================
    CREATOR WITHDRAWALS — lifecycle management for creator-requested payouts.
@@ -113,6 +114,20 @@ const ACTIVE_STATUSES: WithdrawalStatus[] = [
 ];
 const TERMINAL_STATUSES: WithdrawalStatus[] = ["paid", "failed", "canceled", "reversed"];
 
+/**
+ * Thrown to roll the reservation transaction back with a reason attached.
+ *
+ * A refusal must abort the transaction — the creator lock cannot be held past
+ * the decision, and no half-made reservation may survive — but it is not a
+ * fault, so it carries its reason out instead of collapsing into the
+ * catch-all that handles genuine database errors.
+ */
+class WithdrawalRefusal extends Error {
+  constructor(readonly reason: Extract<RequestWithdrawalResult, { ok: false }>["reason"]) {
+    super(reason);
+  }
+}
+
 /* -------------------------------------------------------------------------
    Request a withdrawal
    ------------------------------------------------------------------------- */
@@ -162,121 +177,161 @@ export async function requestWithdrawal(
 
   if (active) return { ok: false, reason: "withdrawal_already_pending" };
 
-  // Fetch all available earnings (including held ones that have expired their
-  // hold), SCOPED TO THIS ENVIRONMENT. Without the scope a creator's sandbox
-  // test earnings counted towards a production withdrawal and vice versa —
-  // money reserved in one environment against a balance earned in the other.
-  const earningRows = await db
-    .select({
-      earningId: schema.creatorEarnings.earningId,
-      netAmountMinor: schema.creatorEarnings.netAmountMinor,
-      holdUntil: schema.creatorEarnings.holdUntil,
-      frozenByDispute: schema.creatorEarnings.frozenByDispute,
-      status: schema.creatorEarnings.status,
-      createdAt: schema.creatorEarnings.createdAt,
-    })
-    .from(schema.creatorEarnings)
-    .where(
-      and(
-        eq(schema.creatorEarnings.firebaseUid, firebaseUid),
-        eq(schema.creatorEarnings.environment, environment),
-        eq(schema.creatorEarnings.currency, currency),
-        or(
-          eq(schema.creatorEarnings.status, "available"),
-          eq(schema.creatorEarnings.status, "held"),
-        ),
-        eq(schema.creatorEarnings.frozenByDispute, false),
-      ),
-    )
-    .orderBy(asc(schema.creatorEarnings.createdAt));
+  /* -----------------------------------------------------------------------
+     THE RESERVATION, UNDER ONE LOCK.
 
-  // Dynamically compute available (held rows past hold_until count)
+     Everything from here to the promotion used to run as loose statements: a
+     scan of the creator's earning rows, a sum, an insert. Two things were
+     wrong with that.
+
+     FIRST, IT ASKED THE WRONG SOURCE. The sum came from `creator_earnings`
+     alone, and an admin transfer (Task #13) debits the ledger without touching
+     a single earning row. So money that had already been sent to the creator
+     still read as `available` here, and they could withdraw it a second time.
+     The cap is now the canonical position — the ledger obligation minus what
+     is still held — which every payout path shares.
+
+     SECOND, IT WAS NOT ATOMIC. Check-then-insert lets a withdrawal and an
+     admin transfer both read the same balance and both spend it. The
+     junction's UNIQUE index caught two concurrent WITHDRAWALS grabbing the
+     same earning, but nothing at all stood between a withdrawal and a
+     transfer, because they do not share a row to collide on.
+     `reserveFromPosition` takes a lock on the creator before reading, and
+     that lock is the one both paths now contend for.
+
+     The provider call that follows stays OUTSIDE this transaction. A network
+     round-trip must never be made while holding a row lock.
+     --------------------------------------------------------------------- */
   const now = new Date();
-  const available = earningRows.filter(
-    (r) =>
-      r.status === "available" ||
-      (r.status === "held" && canRelease(r.holdUntil, r.frozenByDispute, now)),
-  );
 
-  const totalAvailable = available.reduce(
-    (sum, r) => sum + r.netAmountMinor,
-    BigInt(0),
-  );
-
-  if (totalAvailable === BigInt(0)) return { ok: false, reason: "insufficient_available" };
-  if (amountMinor > totalAvailable) return { ok: false, reason: "amount_exceeds_balance" };
-
-  // Pick earnings FIFO until total_reserved ≥ amountMinor
-  let runningTotal = BigInt(0);
-  const toReserve: typeof available = [];
-  for (const row of available) {
-    toReserve.push(row);
-    runningTotal += row.netAmountMinor;
-    if (runningTotal >= amountMinor) break;
-  }
-
-  if (toReserve.length === 0) return { ok: false, reason: "no_earnings_to_reserve" };
-
-  const reservedAmountMinor = runningTotal;
-
-  // The environment was resolved at the top of this function — before the
-  // earnings scan, which needs it too. A row written with the wrong
-  // environment would be permanently miscategorised, so it is still proved
-  // before the insert; it is simply proved earlier now.
-
-  // Create the withdrawal row
   let withdrawalId: string;
+
   try {
-    const [inserted] = await db
-      .insert(schema.creatorWithdrawals)
-      .values({
-        firebaseUid,
-        environment,
-        amountMinor,
-        reservedAmountMinor,
-        currency,
-        status: "requested",
-        requestedAt: now,
-      })
-      .returning({ withdrawalId: schema.creatorWithdrawals.withdrawalId });
-    withdrawalId = inserted.withdrawalId;
+    const result = await db.transaction(async (tx) => {
+      // THE CANONICAL CAP. Takes the creator lock, so a concurrent transfer
+      // either commits before this read or blocks until after this commits.
+      const reserved = await reserveFromPosition(tx, firebaseUid, environment, amountMinor);
+      if (!reserved.ok) {
+        if (reserved.reason === "creator_not_found") {
+          throw new WithdrawalRefusal("insufficient_available");
+        }
+        if (reserved.reason === "position_inconsistent") {
+          // Their books do not add up. Refused rather than paid out against a
+          // number we cannot vouch for.
+          throw new WithdrawalRefusal("db_unavailable");
+        }
+        // Nothing at all, versus more than they have. Two different answers.
+        throw new WithdrawalRefusal(
+          reserved.availableMinor === BigInt(0)
+            ? "insufficient_available"
+            : "amount_exceeds_balance",
+        );
+      }
+
+      // WHICH earnings back the withdrawal. The cap above already decided
+      // WHETHER it may happen; this only picks the rows to reserve, oldest
+      // first, so the audit trail names specific earnings.
+      //
+      // SCOPED TO THIS ENVIRONMENT: without it a creator's sandbox test
+      // earnings would back a production withdrawal.
+      const earningRows = await tx
+        .select({
+          earningId: schema.creatorEarnings.earningId,
+          netAmountMinor: schema.creatorEarnings.netAmountMinor,
+          holdUntil: schema.creatorEarnings.holdUntil,
+          frozenByDispute: schema.creatorEarnings.frozenByDispute,
+          status: schema.creatorEarnings.status,
+          createdAt: schema.creatorEarnings.createdAt,
+        })
+        .from(schema.creatorEarnings)
+        .where(
+          and(
+            eq(schema.creatorEarnings.firebaseUid, firebaseUid),
+            eq(schema.creatorEarnings.environment, environment),
+            eq(schema.creatorEarnings.currency, currency),
+            or(
+              eq(schema.creatorEarnings.status, "available"),
+              eq(schema.creatorEarnings.status, "held"),
+            ),
+            eq(schema.creatorEarnings.frozenByDispute, false),
+          ),
+        )
+        .orderBy(asc(schema.creatorEarnings.createdAt));
+
+      // A `held` row past its window counts, without waiting for a sweep job.
+      const selectable = earningRows.filter(
+        (r) =>
+          r.status === "available" ||
+          (r.status === "held" && canRelease(r.holdUntil, r.frozenByDispute, now)),
+      );
+
+      let runningTotal = BigInt(0);
+      const toReserve: typeof selectable = [];
+      for (const row of selectable) {
+        toReserve.push(row);
+        runningTotal += row.netAmountMinor;
+        if (runningTotal >= amountMinor) break;
+      }
+
+      // The ledger says the money is owed but no row is free to name it.
+      // Reported rather than reserved: a withdrawal with nothing behind it
+      // cannot be settled or audited.
+      if (toReserve.length === 0 || runningTotal < amountMinor) {
+        throw new WithdrawalRefusal("no_earnings_to_reserve");
+      }
+
+      const [inserted] = await tx
+        .insert(schema.creatorWithdrawals)
+        .values({
+          firebaseUid,
+          environment,
+          amountMinor,
+          reservedAmountMinor: runningTotal,
+          currency,
+          status: "requested",
+          requestedAt: now,
+        })
+        .returning({ withdrawalId: schema.creatorWithdrawals.withdrawalId });
+
+      await tx.insert(schema.creatorWithdrawalEarnings).values(
+        toReserve.map((r) => ({ withdrawalId: inserted.withdrawalId, earningId: r.earningId })),
+      );
+
+      // Promote the held-but-releasable rows now that they are reserved.
+      const heldButReleasable = toReserve
+        .filter((r) => r.status === "held")
+        .map((r) => r.earningId);
+      if (heldButReleasable.length > 0) {
+        await tx
+          .update(schema.creatorEarnings)
+          .set({ status: "available", availableAt: now, updatedAt: now })
+          .where(
+            and(
+              inArray(schema.creatorEarnings.earningId, heldButReleasable),
+              // TERMINAL STATES ARE PROTECTED IN SQL, not in a branch above.
+              // A row that reached `transferred` or `reversed` between the
+              // scan and this update must not be walked back to `available`.
+              earningTransitionGuard("available"),
+            ),
+          );
+      }
+
+      return { withdrawalId: inserted.withdrawalId };
+    });
+    withdrawalId = result.withdrawalId;
   } catch (err) {
+    if (err instanceof WithdrawalRefusal) return { ok: false, reason: err.reason };
+    // A UNIQUE violation rolls the whole transaction back on its own; there is
+    // no orphaned withdrawal row to clean up any more. Only the reason has to
+    // be recovered from the message.
     const msg = err instanceof Error ? err.message : "";
     if (msg.includes("uniq_withdrawal_active_creator")) {
       return { ok: false, reason: "withdrawal_already_pending" };
     }
-    return { ok: false, reason: "db_unavailable" };
-  }
-
-  // Reserve earnings in the junction table
-  try {
-    await db.insert(schema.creatorWithdrawalEarnings).values(
-      toReserve.map((r) => ({
-        withdrawalId,
-        earningId: r.earningId,
-      })),
-    );
-  } catch (err) {
-    // UNIQUE violation on earning_id means a concurrent request grabbed them
-    await db
-      .delete(schema.creatorWithdrawals)
-      .where(eq(schema.creatorWithdrawals.withdrawalId, withdrawalId));
-    const msg = err instanceof Error ? err.message : "";
     if (msg.includes("uniq_withdrawal_earning")) {
       return { ok: false, reason: "concurrent_reservation" };
     }
     return { ok: false, reason: "db_unavailable" };
-  }
-
-  // Promote held earnings that are dynamically available to `available` in DB
-  const heldButReleasable = toReserve
-    .filter((r) => r.status === "held")
-    .map((r) => r.earningId);
-  if (heldButReleasable.length > 0) {
-    await db
-      .update(schema.creatorEarnings)
-      .set({ status: "available", availableAt: now, updatedAt: now })
-      .where(inArray(schema.creatorEarnings.earningId, heldButReleasable));
   }
 
   // Try to mark eligible (requires payout account to be ready)
@@ -461,7 +516,17 @@ export async function markWithdrawalPaid(transferId: string): Promise<{ ok: bool
     await db
       .update(schema.creatorEarnings)
       .set({ status: "transferred", transferId: transferId, transferredAt: now, updatedAt: now })
-      .where(inArray(schema.creatorEarnings.earningId, reserved.map((r) => r.earningId)));
+      .where(
+        and(
+          inArray(schema.creatorEarnings.earningId, reserved.map((r) => r.earningId)),
+          // A REVERSED EARNING IS NOT MARKED PAID. A late `paid` delivery for
+          // a withdrawal already unwound would otherwise resurrect the row as
+          // `transferred`, and the reversal that put money back would be
+          // invisible. The guard is in SQL so it is evaluated against
+          // committed state, not against a row read moments earlier.
+          earningTransitionGuard("transferred"),
+        ),
+      );
   }
 
   // Return overage if reserved > requested
@@ -527,7 +592,8 @@ export async function reverseWithdrawal(transferId: string): Promise<{ ok: boole
     .set({ status: "reversed", reversedAt: now, updatedAt: now })
     .where(eq(schema.creatorWithdrawals.withdrawalId, withdrawal.withdrawalId));
 
-  // Mark earnings as reversed (they were transferred but now reversed)
+  // Reserved earnings are looked up, but see the guard below: a paid row is
+  // no longer eligible to be marked reversed by this path.
   const reserved = await db
     .select({ earningId: schema.creatorWithdrawalEarnings.earningId })
     .from(schema.creatorWithdrawalEarnings)
@@ -537,7 +603,26 @@ export async function reverseWithdrawal(transferId: string): Promise<{ ok: boole
     await db
       .update(schema.creatorEarnings)
       .set({ status: "reversed", reversedAt: now, updatedAt: now })
-      .where(inArray(schema.creatorEarnings.earningId, reserved.map((r) => r.earningId)));
+      .where(
+        and(
+          inArray(schema.creatorEarnings.earningId, reserved.map((r) => r.earningId)),
+          // THIS UPDATE IS NOW A NO-OP FOR PAID ROWS, DELIBERATELY.
+          //
+          // A payout reversal is not an earning reversal. `reversed` on an
+          // earning means the creator was never entitled to the money — a
+          // refund or a lost dispute — and the dashboard renders it to them
+          // as cancelled. Writing it here would cancel a VALID earning
+          // because we failed to deliver it, dropping it out of their
+          // lifetime total while the money sat back in our balance.
+          //
+          // `transferred` is terminal in the earning machine, so this guard
+          // matches no paid row and the wrong mutation cannot happen. The
+          // right treatment — restoring the entitlement AND crediting
+          // `creator_payable` back — is Task #15's, along with the caller
+          // this function still does not have.
+          earningTransitionGuard("reversed"),
+        ),
+      );
   }
 
   return { ok: true };

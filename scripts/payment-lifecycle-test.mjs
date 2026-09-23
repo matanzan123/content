@@ -440,6 +440,17 @@ console.log("\n--- A. transfer state changes are environment-scoped ---");
           },
         };
       }
+      // The transfer journal now caps against the creator's canonical position,
+      // so this module is on its import path. Stubbed to ALLOW the reservation:
+      // the cap itself is exercised in whop-creator-earnings-test.mjs, and a
+      // stub that refused would silently turn every transfer assertion below
+      // into a test of the refusal path instead.
+      if (spec.endsWith("creator-position")) {
+        return {
+          reserveFromPosition: async () => ({ ok: true, position: null }),
+          earningTransitionGuard: () => ({ op: "in" }),
+        };
+      }
       if (spec.endsWith("accounting/journal")) {
         return { reverseTransaction: async () => ({ ok: true, transactionId: "rev", alreadyReversed: false }) };
       }
@@ -982,32 +993,78 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
       fresh.log.wheres[0].parts.some((p) => p.col === "environment" && p.val === "sandbox"));
   }
 
-  /* --- creator balance and withdrawal eligibility are environment-scoped --- */
+  /* --- the balance delegates to the canonical position, environment intact ---
+
+     RE-BASELINED, NOT DELETED.
+
+     This block used to seed sandbox and production earning rows, call
+     `getCreatorBalance`, and assert the sandbox total excluded the production
+     one. That assertion was true and is still true — but it is no longer THIS
+     module's to make. `getCreatorBalance` summed earning rows itself back
+     then, and summing earning rows is exactly what a Task #13 admin transfer
+     does not change: it debits the ledger and marks no row, so the old number
+     kept reporting money that had already been sent, and Task #15 would let
+     the creator withdraw it twice.
+
+     The balance is now derived from the ledger by `computeCreatorPosition`,
+     and the arithmetic — including the environment scoping these cases
+     covered — is exercised directly against that helper in sections A-D of
+     `whop-creator-earnings-test.mjs`, with the ledger sign convention and the
+     already-transferred case that the row-summing version could not express.
+
+     What remains here is the property this module is still responsible for,
+     and it is a stronger one than before: that `getCreatorBalance` DELEGATES
+     rather than computing, and hands the canonical helper the TRUSTED
+     environment rather than one taken from anywhere else. If a future change
+     reintroduces a second way to compute the balance, these fail.            */
   {
-    const mixed = () => [
-      { earningId: "e_s", whopPaymentId: "pay_s", firebaseUid: "uid_a", environment: "sandbox", status: "available", frozenByDispute: false, netAmountMinor: 800n, currency: "usd", holdUntil: new Date(0), createdAt: new Date(1) },
-      { earningId: "e_p", whopPaymentId: "pay_p", firebaseUid: "uid_a", environment: "production", status: "available", frozenByDispute: false, netAmountMinor: 4000n, currency: "usd", holdUntil: new Date(0), createdAt: new Date(2) },
-    ];
+    const positionStub = (record) => ({
+      "./creator-position": {
+        computeCreatorPosition: async (uid, environment) => {
+          record.push({ uid, environment });
+          return { currency: "usd", earnedMinor: 0n, reversedMinor: 0n, pendingMinor: 0n,
+                   payableMinor: 0n, availableMinor: 0n, transferredMinor: 0n, inconsistency: null };
+        },
+      },
+    });
 
-    const sb = loadWithStore(EARNINGS, { rows: mixed(), environment: "sandbox", extra: postingStub });
+    const sbCalls = [];
+    const sb = loadWithStore(EARNINGS, {
+      rows: [], environment: "sandbox",
+      extra: { ...postingStub, ...positionStub(sbCalls) },
+    });
     const sbBal = await sb.mod.getCreatorBalance("uid_a");
-    check("the sandbox balance EXCLUDES the production earning",
-      sbBal.ok === true && sbBal.balance.availableMinor === 800n,
-      sbBal.ok ? String(sbBal.balance.availableMinor) : sbBal.reason);
+    check("the balance comes back from the canonical position helper",
+      sbBal.ok === true && sbCalls.length === 1);
+    check("and it is handed the SANDBOX environment, not a payload or a default",
+      sbCalls[0]?.environment === "sandbox" && sbCalls[0]?.uid === "uid_a",
+      JSON.stringify(sbCalls[0] ?? null));
 
-    const pr = loadWithStore(EARNINGS, { rows: mixed(), environment: "production", extra: postingStub });
-    const prBal = await pr.mod.getCreatorBalance("uid_a");
-    check("the production balance EXCLUDES the sandbox earning",
-      prBal.ok === true && prBal.balance.availableMinor === 4000n,
-      prBal.ok ? String(prBal.balance.availableMinor) : prBal.reason);
-    check("so no cross-environment total is ever offered as withdrawable",
-      sbBal.balance.availableMinor + prBal.balance.availableMinor === 4800n &&
-      sbBal.balance.availableMinor !== 4800n && prBal.balance.availableMinor !== 4800n);
+    const prCalls = [];
+    const pr = loadWithStore(EARNINGS, {
+      rows: [], environment: "production",
+      extra: { ...postingStub, ...positionStub(prCalls) },
+    });
+    await pr.mod.getCreatorBalance("uid_a");
+    check("in production it is handed the PRODUCTION environment",
+      prCalls[0]?.environment === "production");
 
-    const unset = loadWithStore(EARNINGS, { rows: mixed(), environment: null, extra: postingStub });
+    // The module must not have kept a second, row-summing implementation
+    // alongside the delegation. Two sources for one number is the defect.
+    const earningsSrc = readFileSync(EARNINGS, "utf8");
+    check("no second balance computation survives in the module",
+      !/computeBalance/.test(earningsSrc));
+
+    // FAIL CLOSED. An unresolvable environment must not fall back to an
+    // unscoped read, and must not reach the helper at all.
+    const noneCalls = [];
+    const unset = loadWithStore(EARNINGS, {
+      rows: [], environment: null,
+      extra: { ...postingStub, ...positionStub(noneCalls) },
+    });
     const none = await unset.mod.getCreatorBalance("uid_a");
     check("an unresolvable environment fails CLOSED on the balance, with no query",
-      none.ok === false && unset.log.wheres.length === 0);
+      none.ok === false && unset.log.wheres.length === 0 && noneCalls.length === 0);
   }
 
   /* --- every scoped predicate actually names the environment --- */
