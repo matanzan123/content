@@ -1754,10 +1754,81 @@ export const creatorWithdrawals = pgTable(
     status: creatorWithdrawalStatusEnum("status").notNull().default("requested"),
 
     /**
-     * The creator_transfers row that was created when admin processed this.
-     * Null until processing begins.
+     * LEGACY. The `creator_transfers` row a pre-Task-#15 withdrawal was
+     * executed through.
+     *
+     * A withdrawal used to be run as an INTERNAL Whop ledger transfer, which
+     * moves money from the platform balance to the creator's Whop balance —
+     * that is Task #13, and it is not a withdrawal, because the money never
+     * leaves Whop. A withdrawal is `payouts.create`: the creator's own balance
+     * to their own external destination.
+     *
+     * Kept so existing rows stay readable. NO NEW WITHDRAWAL SETS IT. A
+     * `wdrl_` payout is not a `creator_transfer` and must never be recorded as
+     * one — see `providerPayoutId`.
      */
     transferId: uuid("transfer_id").references(() => creatorTransfers.transferId),
+
+    /**
+     * THE LOGICAL IDENTITY OF ONE INTENDED WITHDRAWAL, supplied by the client.
+     *
+     * Persisted before any money is reserved, so a browser retrying a
+     * timed-out POST resolves to the SAME row instead of reserving the
+     * creator's balance twice. Unique per (creator, environment) — two
+     * creators may legitimately mint the same token, and one creator may reuse
+     * a token across environments.
+     *
+     * It is an opaque token ONLY. It cannot influence the amount, the
+     * destination, the environment or any privilege; every one of those is
+     * resolved server-side and compared against the stored intent.
+     *
+     * Nullable: rows predating Task #15 have no such identity, and inventing
+     * one would make them look idempotency-protected when they are not.
+     */
+    requestId: text("request_id"),
+
+    /**
+     * The payout destination the creator's intent named, as an opaque `potk_`
+     * token. Stored so an idempotent replay carrying a DIFFERENT destination is
+     * refused as a conflict rather than quietly paying somewhere else.
+     *
+     * The token and nothing more. No account reference, no institution, no
+     * destination detail — those stay at the provider.
+     */
+    payoutMethodId: text("payout_method_id"),
+
+    /** The provider's own payout id, prefixed `wdrl_`. The reconciliation anchor. */
+    providerPayoutId: text("provider_payout_id"),
+
+    /**
+     * The provider's status VERBATIM, in its own vocabulary: `requested`,
+     * `in_review`, `processing`, `completed`, `reversed`, `canceled`,
+     * `failed`, `denied`.
+     *
+     * Deliberately separate from our `status`, which is a product lifecycle.
+     * Keeping the raw value means a future mapping change can be re-derived
+     * from what the provider actually said, rather than from what an older
+     * mapping decided it meant.
+     */
+    providerStatus: text("provider_status"),
+
+    /**
+     * A classified failure code from the provider's catalog.
+     *
+     * THE CODE ONLY. The accompanying `message` may be personalised to the
+     * destination for callers holding `payout:destination:read`, which makes it
+     * a PII carrier — so it is never stored and never shown to a creator.
+     */
+    providerFailureCode: text("provider_failure_code"),
+
+    /* NO `accounting_transaction_id` HERE, DELIBERATELY.
+     *
+     * A draft of Task #15 posted an internal journal for each payout and used
+     * that column to mark the reservation consumed. Both were removed: Task
+     * #13 already discharges `creator_payable` when money reaches the
+     * creator's Whop account, so a withdrawal moves the creator's own funds
+     * and writes nothing to the ClipRewards ledger. There is no journal to
+     * point at and no reservation to consume. */
 
     /** Why it failed, when Whop or the application set a reason. */
     failureReason: text("failure_reason"),
@@ -1773,6 +1844,10 @@ export const creatorWithdrawals = pgTable(
     eligibleAt: timestamp("eligible_at", { withTimezone: true }),
     processingAt: timestamp("processing_at", { withTimezone: true }),
     providerPendingAt: timestamp("provider_pending_at", { withTimezone: true }),
+    /** When the provider accepted the payout. */
+    providerSubmittedAt: timestamp("provider_submitted_at", { withTimezone: true }),
+    /** When we last read the provider's authoritative truth for this payout. */
+    reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
     paidAt: timestamp("paid_at", { withTimezone: true }),
     failedAt: timestamp("failed_at", { withTimezone: true }),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
@@ -1782,12 +1857,43 @@ export const creatorWithdrawals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    // ONE ACTIVE WITHDRAWAL PER CREATOR. Prevents double-submission while one
-    // is in flight. Terminal states (paid/failed/canceled/reversed) are excluded
-    // so a creator can withdraw again after a previous request concludes.
+    // ONE ACTIVE WITHDRAWAL PER CREATOR, PER ENVIRONMENT. Prevents
+    // double-submission while one is in flight. Terminal states
+    // (paid/failed/canceled/reversed) are excluded so a creator can withdraw
+    // again once a previous request concludes.
+    //
+    // ENVIRONMENT IS PART OF THE KEY (migration 0012). It used to be
+    // `(firebase_uid)` alone, which fused two unrelated rules: a sandbox
+    // withdrawal blocked a production one for the same creator, so a single
+    // stale sandbox row could permanently stop a real creator withdrawing real
+    // earnings. Unlike the seven keys 0011 widened, this one is OURS rather
+    // than Whop's, so the narrow form never served idempotency — it was simply
+    // missing a dimension.
     uniqueIndex("uniq_withdrawal_active_creator")
-      .on(t.firebaseUid)
+      .on(t.firebaseUid, t.environment)
       .where(sql`status NOT IN ('paid', 'failed', 'canceled', 'reversed')`),
+
+    // PROVIDER ID UNIQUENESS IS PER ENVIRONMENT. A `wdrl_` value is Whop's
+    // namespace, and sandbox and production are separate id spaces with no
+    // guarantee the value is unique across them — a global key would let a
+    // sandbox delivery resolve a production withdrawal.
+    uniqueIndex("uniq_withdrawal_provider_payout_env")
+      .on(t.providerPayoutId, t.environment)
+      .where(sql`provider_payout_id IS NOT NULL`),
+
+    // REQUEST ID UNIQUENESS IS PER CREATOR PER ENVIRONMENT. The token comes
+    // from the client, so only the triple identifies one intent.
+    uniqueIndex("uniq_withdrawal_request_creator_env")
+      .on(t.firebaseUid, t.environment, t.requestId)
+      .where(sql`request_id IS NOT NULL`),
+
+    index("idx_withdrawals_provider_payout").on(t.providerPayoutId),
+
+    // The reconciliation sweep's only query: accepted by the provider, not yet
+    // settled.
+    index("idx_withdrawals_reconcile")
+      .on(t.environment, t.status, t.providerSubmittedAt)
+      .where(sql`provider_payout_id IS NOT NULL`),
     index("idx_withdrawals_uid").on(t.firebaseUid, t.status),
     index("idx_withdrawals_status").on(t.status, t.createdAt),
     index("idx_withdrawals_transfer").on(t.transferId),

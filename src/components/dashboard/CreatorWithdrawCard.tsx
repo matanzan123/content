@@ -56,6 +56,9 @@ export function CreatorWithdrawCard() {
   const [amountInput, setAmountInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [canceling, setCanceling] = useState(false);
+  /* The identity of the withdrawal currently being attempted. Survives a failed
+   * send so a retry is a retry, not a second withdrawal. */
+  const requestIdRef = useRef<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -66,19 +69,36 @@ export function CreatorWithdrawCard() {
    */
   const fetchPhase = useCallback(async (): Promise<Phase> => {
     try {
-      const [earningsRes, withdrawRes] = await Promise.all([
-        fetch("/api/creator/earnings", { credentials: "include" }),
-        fetch("/api/creator/withdraw", { credentials: "include" }),
-      ]);
+      /* ONE REQUEST, AND IT IS THE WITHDRAW ENDPOINT.
+       *
+       * This used to also fetch `/api/creator/earnings` and take its
+       * `available_minor` as the payout balance. That figure is what
+       * ClipRewards still OWES the creator, and Task #13 discharges it when the
+       * money moves into the creator's own Whop account — so it reads zero
+       * exactly when a withdrawal becomes possible. The screen would have shown
+       * "no funds available" to a creator whose money was sitting ready.
+       *
+       * The withdrawable figure comes from the provider, through the same
+       * endpoint that owns withdrawals. */
+      const withdrawRes = await fetch("/api/creator/withdraw", { credentials: "include" });
 
-      if (!earningsRes.ok || !withdrawRes.ok) {
+      if (!withdrawRes.ok) {
         return { phase: "error", message: d.errors.load };
       }
 
-      const earnings = await earningsRes.json() as { available_minor: string };
-      const withdrawData = await withdrawRes.json() as { active: ActiveWithdrawal | null };
+      const withdrawData = await withdrawRes.json() as {
+        active: ActiveWithdrawal | null;
+        withdrawable_minor: string | null;
+      };
 
-      const availableMinor = BigInt(earnings.available_minor);
+      /* NULL IS NOT ZERO. The provider balance could not be read, so we do not
+       * know what is available — showing a zero would tell the creator their
+       * money is gone. */
+      if (withdrawData.withdrawable_minor === null && !withdrawData.active) {
+        return { phase: "error", message: d.errors.load };
+      }
+
+      const availableMinor = BigInt(withdrawData.withdrawable_minor ?? "0");
 
       if (withdrawData.active) {
         return { phase: "active", withdrawal: withdrawData.active, availableMinor };
@@ -124,13 +144,30 @@ export function CreatorWithdrawCard() {
       return;
     }
 
+    /* ONE TOKEN PER USER INTENT, MINTED BEFORE THE FIRST SEND.
+     *
+     * The server treats this as the identity of one intended withdrawal, so a
+     * retry must carry the SAME value — that is what makes a timed-out POST
+     * resolve to the existing row instead of reserving the creator's money a
+     * second time.
+     *
+     * It is held in a ref rather than regenerated here, and deliberately NOT
+     * cleared in the `finally`: a network failure leaves the intent unchanged,
+     * so pressing the button again is a retry of the same withdrawal. It is
+     * cleared only once the server has accepted it, below, because the next
+     * press is then a genuinely new intent. */
+    if (!requestIdRef.current) requestIdRef.current = newRequestId();
+
     setSubmitting(true);
     try {
       const res = await fetch("/api/creator/withdraw", {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amount_minor: Number(amountMinor) }),
+        body: JSON.stringify({
+          amount_minor: Number(amountMinor),
+          request_id: requestIdRef.current,
+        }),
       });
       const json = await res.json() as { ok?: boolean; error?: string };
       if (!json.ok) {
@@ -138,6 +175,8 @@ export function CreatorWithdrawCard() {
         setFieldError((d.errors as Record<string, string>)[key] ?? key);
         return;
       }
+      // Accepted. The next press is a new intent, so the token is retired.
+      requestIdRef.current = null;
       await load();
     } catch {
       setFieldError(d.errors.db_unavailable);
@@ -145,6 +184,21 @@ export function CreatorWithdrawCard() {
       setSubmitting(false);
     }
   };
+
+  /**
+   * A fresh opaque token.
+   *
+   * `crypto.randomUUID` where the browser has it, with a random fallback for
+   * the older ones — the value only has to be unique per creator and match the
+   * server's `[A-Za-z0-9_-]{8,128}` shape. It carries no meaning and confers
+   * nothing; the server derives the amount, the destination and the creator
+   * itself from the session and its own records.
+   */
+  function newRequestId(): string {
+    const c = globalThis.crypto;
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
+    return `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+  }
 
   const handleCancel = async () => {
     if (state.phase !== "active") return;

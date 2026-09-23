@@ -20,11 +20,11 @@
  *   B. Environment and counterparty scoping
  *   C. Pending is eligibility, not a ledger figure
  *   D. Inconsistent positions are reported, never shown as a balance
- *   E. The reservation takes a lock and caps against available
+ *   E. The reservation takes a lock and caps against available (admin transfer)
  *   F. The earning state machine
  *   G. The transfer journal posts against the creator, not the account id
  *   H. The creator API serves the canonical position
- *   I. The withdrawal path shares the cap and the lock
+ *   I. The canonical position is the admin transfer's cap, and only that
  *   J. Reconciliation looks where the bugs actually are
  */
 
@@ -136,6 +136,17 @@ const schema = {
     firebaseUid: col("whop_accounts", "firebase_uid"),
     environment: col("whop_accounts", "environment"),
   },
+  // Retained only so the fake answers if a query ever reaches it. The position
+  // helper no longer reads this table: a withdrawal moves the creator's own
+  // provider funds and is not a ClipRewards obligation.
+  creatorWithdrawals: {
+    withdrawalId: col("creator_withdrawals", "withdrawal_id"),
+    firebaseUid: col("creator_withdrawals", "firebase_uid"),
+    environment: col("creator_withdrawals", "environment"),
+    status: col("creator_withdrawals", "status"),
+    reservedAmountMinor: col("creator_withdrawals", "reserved_amount_minor"),
+    accountingTransactionId: col("creator_withdrawals", "accounting_transaction_id"),
+  },
   creatorTransfers: {
     transferId: col("creator_transfers", "transfer_id"),
     environment: col("creator_transfers", "environment"),
@@ -193,12 +204,14 @@ const PAST = new Date(Date.now() - 86_400_000);
 const FUTURE = new Date(Date.now() + 86_400_000);
 
 /** Builds a db whose ledger sum and earning rows the test dictates. */
-function dbWith({ ledgerTotal = "0", rows = [], accountRows = [{ id: "acct-1" }] }) {
+function dbWith({ ledgerTotal = "0", rows = [], accountRows = [{ id: "acct-1" }], reserved = "0" }) {
   const log = [];
   return makeDb((state) => {
     if (state.from === schema.accountingEntries) return [{ total: ledgerTotal }];
     if (state.from === schema.creatorEarnings) return rows;
     if (state.from === schema.whopAccounts) return accountRows;
+    // Task #15: the in-flight withdrawal reservation total.
+    if (state.from === schema.creatorWithdrawals) return [{ total: reserved }];
     return [];
   }, log);
 }
@@ -310,6 +323,18 @@ section("C. Pending is eligibility, not a ledger figure");
   // NO FAKE ALLOCATION. The $100 row is still worth $100 in the audit trail.
   check("the earning row is not rewritten to match a partial transfer",
     p4.earnedMinor === BigInt(10000));
+
+  /* NO WITHDRAWAL TERM HERE, DELIBERATELY.
+   *
+   * A block here briefly asserted that an in-flight withdrawal reduced
+   * `available`. It was removed with the model that required it: a Task #13
+   * transfer DISCHARGES `creator_payable`, so a withdrawal moves the
+   * creator's own funds out of their own Whop account and is not our
+   * liability. Withdrawal eligibility is the provider's withdrawable
+   * balance, asserted in `whop-withdrawal-test.mjs`.
+   *
+   * This helper answers one question — what ClipRewards still owes — and
+   * every assertion above it is unchanged. */
 
   const db5 = dbWith({
     ledgerTotal: "-2000",
@@ -525,46 +550,65 @@ section("H. The creator API serves the canonical position");
 }
 
 /* ---------------------------------------------------------------- I ---- */
-section("I. The withdrawal path shares the cap and the lock");
+section("I. The canonical position is the ADMIN TRANSFER's cap, and only that");
 
 {
-  const src = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8");
-  // Sliced to the NEXT exported function, not to the next comment banner: the
-  // reservation block carries banner comments of its own, and cutting at the
-  // first one silently hid most of what these checks are meant to read.
-  const fn = src.slice(src.indexOf("export async function requestWithdrawal"));
-  const nextExport = fn.indexOf("export async function", 1);
-  const body = nextExport > 0 ? fn.slice(0, nextExport) : fn;
+  const transferSrc = readFileSync("src/lib/server/creator-transfers.ts", "utf8");
+  const withdrawCode = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
 
-  // THE INTERSECTION. A withdrawal and an admin transfer do not share a row
-  // to collide on, so only a shared lock can stop them both spending the same
-  // balance. Both now take the creator lock through `reserveFromPosition`.
-  check("the withdrawal caps against the canonical position",
-    /reserveFromPosition\(tx, firebaseUid, environment, amountMinor\)/.test(body));
-  check("the reservation runs inside a transaction",
-    body.indexOf("await db.transaction") < body.indexOf("await reserveFromPosition("));
-  check("the earnings scan happens inside that same transaction",
-    /tx\s*\n?\s*\.select\(\{[\s\S]{0,400}earningId: schema\.creatorEarnings\.earningId/.test(body) ||
-    /await tx[\s\S]{0,200}creatorEarnings/.test(body));
-  check("the withdrawal row is inserted inside the transaction",
-    /tx\s*\n?\s*\.insert\(schema\.creatorWithdrawals\)/.test(body));
-  check("it no longer sums earning rows to decide the cap",
-    !/totalAvailable/.test(body));
-  check("a zero balance and an over-ask are still distinguished",
-    /insufficient_available/.test(body) && /amount_exceeds_balance/.test(body));
-  // A network round-trip must never be made while holding a row lock, so the
-  // eligibility probe has to sit after the transaction's catch block closes.
-  check("the provider call stays outside the lock",
-    body.indexOf("fetchPayoutStatus") > body.indexOf("await db.transaction") &&
-    body.indexOf("fetchPayoutStatus") > body.indexOf("if (err instanceof WithdrawalRefusal)"));
+  /* RE-BASELINED. THIS SECTION USED TO COVER TWO CALLERS; NOW IT COVERS ONE.
+   *
+   * It asserted that the creator withdrawal path shared this helper and its
+   * lock with the admin transfer, because an early Task #15 capped withdrawals
+   * against `creator_payable` and reserved from it.
+   *
+   * That was a double count. A Task #13 transfer DISCHARGES `creator_payable`
+   * — it moves the money into the creator's own Whop account, after which
+   * ClipRewards owes them nothing. A Task #15 withdrawal then moves THEIR
+   * funds out of THEIR account and is not our liability at all. Capping it
+   * against this figure asked the wrong question twice over: the number is
+   * zero exactly when a withdrawal becomes possible, and debiting it a second
+   * time drove it negative.
+   *
+   * So the assertions are inverted rather than dropped. What must hold now is
+   * that the admin transfer still uses the lock and the canonical cap, and
+   * that the withdrawal path stays entirely out of this helper. Withdrawal
+   * eligibility is covered against the provider balance in
+   * `whop-withdrawal-test.mjs`.
+   */
+  check("the admin transfer still reserves against the canonical position",
+    /await reserveFromPosition\(/.test(transferSrc));
+  check("and does so inside a transaction, under the creator lock",
+    /await db\.transaction/.test(transferSrc) &&
+    transferSrc.indexOf("await db.transaction") < transferSrc.indexOf("await reserveFromPosition("));
+  // Comment-stripped: the leg carries a long explanation between the account
+  // name and the counterparty, which would push them out of any sane window.
+  const transferCode = transferSrc
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  check("the transfer journal still debits creator_payable by firebase uid",
+    /account: "creator_payable"[\s\S]{0,200}counterpartyId: input\.firebaseUid/.test(transferCode));
 
-  // Terminal states are protected in SQL at every earning write.
-  check("promoting held rows is guarded against terminal states",
-    /earningTransitionGuard\("available"\)/.test(src));
-  check("marking rows paid is guarded",
-    /earningTransitionGuard\("transferred"\)/.test(src));
-  check("marking rows reversed is guarded",
-    /earningTransitionGuard\("reversed"\)/.test(src));
+  // THE BOUNDARY. Task #15 must not appear in this helper's callers at all.
+  check("the withdrawal path does not use the canonical position",
+    !/reserveFromPosition/.test(withdrawCode));
+  check("nor imports creator-position",
+    !/from "\.\/creator-position"/.test(withdrawCode));
+  check("nor names creator_payable anywhere",
+    !/creator_payable/.test(withdrawCode));
+  check("nor posts any accounting entry",
+    !/accountingEntries|accountingTransactions|reverseTransaction/.test(withdrawCode));
+
+  // And the helper itself no longer knows withdrawals exist.
+  const posCode = readFileSync("src/lib/server/creator-position.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  check("the position helper reads no withdrawal table",
+    !/creatorWithdrawals/.test(posCode));
+  check("and reports no reserved term",
+    !/reservedMinor/.test(posCode));
 }
 
 /* ---------------------------------------------------------------- J ---- */

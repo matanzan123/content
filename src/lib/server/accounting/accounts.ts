@@ -58,9 +58,16 @@ export const ACCOUNTS = {
   payout_clearing: {
     kind: "asset",
     normalBalance: "debit",
+    // STILL NOT POSTABLE. Task #15 briefly flipped this, on the assumption
+    // that a creator withdrawal would post DR creator_payable / CR
+    // payout_clearing. That model was wrong: Task #13 already discharges
+    // creator_payable when the money reaches the creator's own Whop account,
+    // so a withdrawal moves THEIR funds and creates no ClipRewards entry at
+    // all. With nothing posting here, widening the permission bought nothing
+    // and weakened the gate.
     postable: false,
     description:
-      "Money that has left the provider balance for a bank account but is not yet confirmed received. Declared for the payout task; nothing posts to it yet.",
+      "Money that has left the provider balance for a bank account but is not yet confirmed received. Declared for a future platform-initiated payout; nothing posts to it. Creator withdrawals (Task #15) move the creator's own provider balance and post no internal journal.",
   },
 
   /* ----------------------------- liabilities ---------------------------- */

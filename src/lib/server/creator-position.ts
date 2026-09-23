@@ -46,6 +46,22 @@ import { canRelease } from "./creator-earnings-policy";
    moves the ledger by $20 and leaves the $100 row untouched and truthful. The
    row says what was earned; the ledger says what is still owed. Marking the
    whole row "transferred" would have been a lie worth $80.
+
+   WHAT THIS DELIBERATELY DOES NOT COUNT: an external payout (Task #15).
+
+   A Task #13 transfer DISCHARGES this obligation — it moves the money into
+   the creator's own Whop account, after which ClipRewards owes them nothing
+   and `creator_payable` is correctly zero. A Task #15 withdrawal then moves
+   THE CREATOR'S OWN FUNDS from that Whop balance to their bank, and touches
+   no liability of ours at all.
+
+   An earlier version of Task #15 subtracted in-flight withdrawals here and
+   posted a second `creator_payable` debit when the payout executed. Both were
+   wrong for the same reason: they treated money we had already handed over as
+   though we still owed it, which drove the balance negative and left a
+   creator whose funds had reached their Whop account unable to withdraw at
+   all. Withdrawal eligibility is the provider's withdrawable balance, not
+   this figure.
    ========================================================================== */
 
 export type CreatorPosition = {

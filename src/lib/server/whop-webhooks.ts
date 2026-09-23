@@ -32,6 +32,10 @@ import {
 } from "./whop-disputes";
 import { updateConnectedAccountStatus } from "./connected-accounts";
 import { refreshTransferFromProvider } from "./creator-transfers";
+import {
+  findWithdrawalByProviderPayoutId,
+  reconcileWithdrawal,
+} from "./creator-withdrawals";
 import { resolveChildAccount } from "./whop-child-router";
 import { reverseForRefund, reverseForDispute } from "./creator-earnings";
 import { fireWebhookNotifications } from "./notification-triggers";
@@ -553,12 +557,13 @@ export async function handleWhopPayoutUpdated(
   const root = (body ?? {}) as Record<string, unknown>;
   const data = (root.data ?? root.object ?? root) as Record<string, unknown>;
 
-  // Extract the provider transfer id from the payload
+  // The payout id from the payload. `data.id` is the payout on every one of
+  // the three payload types; the fallbacks cover older shapes.
   const payoutId =
     resourceId ??
     readString(data, "id") ??
-    readString(data, "transfer_id") ??
-    readString(data, "payout_id");
+    readString(data, "payout_id") ??
+    readString(data, "transfer_id");
 
   if (!payoutId) return { kind: "business_mapping_not_implemented" };
 
@@ -573,15 +578,38 @@ export async function handleWhopPayoutUpdated(
   // It also wrote money state without ownership proof: `payout.*` is not in
   // OWNERSHIP_GATED, so nothing had established the resource was ours.
   //
-  // The event is now only a TRIGGER. The authority is `transfers.retrieve`,
-  // which the SDK documents as the way to follow a transfer to resolution —
-  // and retrieving it with our own platform key IS the ownership proof, so the
-  // gap closes without a separate gate. An id we do not hold locally, in this
-  // environment, never reaches the provider at all.
+  // The event is only a TRIGGER. The authority is a provider retrieve, and
+  // retrieving the resource with our own platform key IS the ownership proof,
+  // so the gap closes without a separate gate entry. An id we do not hold
+  // locally, in this environment, never reaches the provider at all.
+  //
+  // ROUTED TO WITHDRAWALS FIRST, AND THAT ORDER IS THE FIX.
+  //
+  // `payout.*` events belong to the PAYOUTS resource: their ids are `wdrl_`,
+  // and that is the resource a creator withdrawal uses. They were being handed
+  // to the TRANSFER reconciler, which looks the id up in
+  // `creator_transfers.provider_transfer_id` — a different id space entirely.
+  // The two never intersect, so every payout delivery fell through
+  // unrecognised and the withdrawal lifecycle received nothing at all.
+  //
+  // The transfer path is still tried second and unchanged. Task #13 transfers
+  // have no webhook of their own in the installed SDK and are reconciled by
+  // polling, but if a `payout.*` delivery ever does name one of ours, the
+  // existing behaviour still applies.
+  const withdrawal = await findWithdrawalByProviderPayoutId(payoutId);
+  if (withdrawal) {
+    const reconciled = await reconcileWithdrawal(withdrawal.withdrawalId);
+    // A failed reconcile is a provider read we could not trust, not a bad
+    // delivery. Reporting it as unhandled keeps the delivery retryable.
+    return reconciled.ok
+      ? { kind: "handled" }
+      : { kind: "failed", category: "payout_reconcile_failed" };
+  }
+
   const refreshed = await refreshTransferFromProvider(payoutId);
   if (!refreshed.ok) {
-    // Not a ledger transfer of ours: another environment, another system, or a
-    // payout resource that is not a transfer. Acknowledged and ignored.
+    // Neither a withdrawal nor a ledger transfer of ours: another environment,
+    // another system, or a payout we did not create. Acknowledged and ignored.
     return { kind: "business_mapping_not_implemented" };
   }
   return { kind: "handled" };

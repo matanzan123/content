@@ -372,13 +372,23 @@ export async function fireWebhookNotifications(
       const payoutId = resourceId ?? (typeof data.id === "string" ? data.id : null);
       if (!payoutId) return;
 
-      const isReversed =
-        eventType === "payout.reversed" ||
-        (typeof data.status === "string" && (data.status === "reversed" || data.status === "failed"));
-      const isCompleted =
-        !isReversed &&
-        typeof data.status === "string" &&
-        (data.status === "paid" || data.status === "completed" || data.status === "succeeded");
+      /* THE PROVIDER'S OWN VOCABULARY, and only it.
+       *
+       * A payout has exactly eight statuses: requested, in_review, processing,
+       * completed, reversed, canceled, failed, denied. This used to match
+       * "paid" and "succeeded" as well — neither is a payout status, so those
+       * branches could never fire, and "completed" was being reached only by
+       * accident of being listed alongside them.
+       *
+       * NOTIFICATIONS ONLY. This decides what a creator is told, never what the
+       * books say: money state comes from `payouts.retrieve` through the
+       * withdrawal reconciler. Reading a payload status here is safe precisely
+       * because nothing financial depends on it, and a wrong guess sends a
+       * wrong email rather than moving a wrong amount.
+       */
+      const payloadStatus = typeof data.status === "string" ? data.status : null;
+      const isReversed = eventType === "payout.reversed" || payloadStatus === "reversed";
+      const isCompleted = !isReversed && payloadStatus === "completed";
 
       if (isReversed) {
         await notifyPayoutReversed(payoutId);

@@ -490,11 +490,31 @@ for (const [file, fn] of MUST_STAY_SCOPED) {
   // than being dropped.
   for (const [file, fn] of [
     ["creator-position.ts", "eligibilityRows"],
-    ["creator-withdrawals.ts", "requestWithdrawal"],
   ]) {
     const qs = earningsByUid.filter((q) => q.file.endsWith(file) && q.fn === fn);
     check(`${file}:${fn}() scopes its earnings scan by environment`,
       qs.length > 0 && qs.every((q) => q.scoped), `${qs.length} query(ies)`);
+  }
+
+  /* RE-BASELINED: `requestWithdrawal` NO LONGER SCANS EARNINGS AT ALL.
+   *
+   * It used to pick backing earning rows FIFO, and this asserted that scan was
+   * environment-scoped. Task #15 removed the scan rather than scoping it
+   * better: a withdrawal moves the creator's own provider funds, so earning
+   * rows have no part in deciding whether it may happen, and the cap is the
+   * provider's withdrawable balance.
+   *
+   * Asserting the absence is stronger than asserting the scope — a scoped
+   * query can still be wrong about eligibility, whereas a query that is not
+   * there cannot leak across environments at all. */
+  {
+    const code = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    check("creator-withdrawals.ts reads no creator_earnings at all",
+      !/creatorEarnings/.test(code));
+    check("and no withdrawal-earning junction",
+      !/creatorWithdrawalEarnings/.test(code));
   }
 
   // Both must fail closed rather than fall back to an unscoped scan.
