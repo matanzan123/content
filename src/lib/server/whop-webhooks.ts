@@ -639,8 +639,78 @@ export async function handleWhopAccountUpdated(
   if (!accountId || !status) return { kind: "business_mapping_not_implemented" };
   if (!/^biz_[A-Za-z0-9]{4,}$/.test(accountId)) return { kind: "business_mapping_not_implemented" };
 
-  const result = await updateConnectedAccountStatus(accountId, environment, status);
+  /* THE TWO ACCOUNT IDENTITIES IN THIS PAYLOAD MUST AGREE.
+   *
+   * `PostAccountUpdatedPayload` carries the account twice, in two different
+   * roles: a TOP-LEVEL `account_id` — "the account ID that this webhook event
+   * is associated with" — and `data`, the `Account` resource itself, whose
+   * `id` says which account the body describes.
+   *
+   * NOTE WHAT THE ENVELOPE GATE DOES *NOT* DO HERE. `readEnvelope` looks for
+   * `company_id`, and this payload has none: `Account` does not carry that
+   * field and the root carries `account_id` instead. So `companyId` is null
+   * for this family, `wrongCompany` is false, and the delivery passes the gate
+   * WITHOUT any child ever being resolved. The gate cannot be the thing that
+   * establishes account identity for `account.updated`; this check is.
+   *
+   * A MISMATCH IS REFUSED, NOT RECONCILED. A signed delivery proves Whop sent
+   * the body. It does not license us to decide which of two disagreeing
+   * identifiers inside that body is the real subject. If the event is
+   * attributed to account A and the resource describes account B, then one of
+   * our two readings is wrong — and picking either would write a status onto an
+   * account the payload does not unambiguously name. Neither A nor B is
+   * touched, and nothing is written at all.
+   *
+   * ABSENT IS NOT A MISMATCH. `account_id` is optional and nullable in the
+   * contract, and an early sandbox delivery omitted the analogous field on the
+   * payment family entirely. When it is absent there is no second identity to
+   * disagree with, so the rule below still applies on its own: `data.id` must
+   * resolve to a connected account we know, in this environment.
+   */
+  const attributedTo = readString(root, "account_id");
+  if (attributedTo && attributedTo !== accountId) {
+    return { kind: "business_mapping_not_implemented" };
+  }
+
+  /* THE ACCOUNT IS PROVED AGAINST OUR OWN RECORDS BEFORE ANYTHING IS WRITTEN.
+   *
+   * `data.id` is NOT the field the envelope gate checked. The gate resolves
+   * the envelope's `company_id`; this is a separate, unverified field of the
+   * payload, and an event that passed the gate can still name a different
+   * account here — including one we have never heard of.
+   *
+   * Until now the only thing between an arbitrary `biz_` id and a write was
+   * the UPDATE's own WHERE clause. That failed closed in effect, but it
+   * reported `handled` whether or not a row matched, so a delivery naming an
+   * account we do not know was recorded as `processed` and became
+   * indistinguishable from a real update.
+   *
+   * `resolveChildAccount` is the same helper the envelope gate uses for the
+   * families that DO carry a `company_id` — the `whop_accounts` table, scoped
+   * to the current environment. No second mapping and no new identity system.
+   * For this family it is not a repeat of the gate but the ONLY place account
+   * identity is established, because the gate resolves nothing here (see
+   * above). An account we do not know, or one belonging to the other
+   * environment, is reported as unmapped rather than handled.
+   */
+  const known = await resolveChildAccount(accountId);
+  if (!known) return { kind: "business_mapping_not_implemented" };
+
+  /* THE STATUS IS INFORMATIONAL, AND IS NOT TRUSTED FOR MONEY.
+   *
+   * It is copied from the payload deliberately. Nothing financial reads this
+   * column: payout readiness is decided by `fetchPayoutStatus`, which
+   * retrieves the account from the provider and reads the provider's own
+   * `status` and `required_actions`. If that ever changes — if a money path
+   * starts consulting `whop_accounts.status` — this write must become a
+   * provider retrieve instead, because a payload field cannot gate a payout.
+   */
+  const result = await updateConnectedAccountStatus(known.whopAccountId, environment, status);
   if (!result.ok) return { kind: "failed", category: result.reason };
+
+  // The row was proved to exist a moment ago, so a miss here means it was
+  // removed concurrently. Unmapped is the honest answer, not handled.
+  if (!result.updated) return { kind: "business_mapping_not_implemented" };
 
   return { kind: "handled" };
 }
