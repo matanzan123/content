@@ -197,6 +197,14 @@ const position = loadModule("src/lib/server/creator-position.ts", {
   "@/lib/db": { getDb: () => currentDb, schema },
   "./creator-earnings-policy": {
     canRelease: (holdUntil, frozen, now) => !frozen && now >= holdUntil,
+    /* THE REAL FUNCTION, not a stub.
+     *
+     * Task #17 made the position subtract the creator share already returned by
+     * partial refunds, derived through the canonical fee policy. Faking it here
+     * would let the position and the policy drift apart silently, so the
+     * genuine implementation is loaded and used. */
+    remainingCreatorNet: loadModule("src/lib/server/creator-earnings-policy.ts", {})
+      .remainingCreatorNet,
   },
 });
 
@@ -216,14 +224,23 @@ function dbWith({ ledgerTotal = "0", rows = [], accountRows = [{ id: "acct-1" }]
   }, log);
 }
 
-const earning = (over = {}) => ({
-  status: "available",
-  netAmountMinor: BigInt(0),
-  holdUntil: PAST,
-  frozenByDispute: false,
-  currency: "usd",
-  ...over,
-});
+const earning = (over = {}) => {
+  const netAmountMinor = over.netAmountMinor ?? BigInt(0);
+  return {
+    status: "available",
+    netAmountMinor,
+    /* Task #17 fields. A gross consistent with a 20% fee and NOTHING refunded,
+     * so `remainingCreatorNet` returns the full net and every assertion written
+     * before Task #17 still describes the same arithmetic. */
+    grossAmountMinor: (netAmountMinor * BigInt(10000)) / BigInt(8000),
+    platformFeeBps: 2000,
+    refundedGrossMinor: BigInt(0),
+    holdUntil: PAST,
+    frozenByDispute: false,
+    currency: "usd",
+    ...over,
+  };
+};
 
 /* ---------------------------------------------------------------- A ---- */
 section("A. The position helper reads the ledger, with the right sign");

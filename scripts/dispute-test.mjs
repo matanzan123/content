@@ -78,7 +78,21 @@ function loadTs(file) {
 
   const req = (spec) => {
     if (spec === "server-only") return {};
-    if (spec === "@/lib/db") return { getDb: () => DB, isDatabaseConfigured: () => DB !== null };
+    if (spec === "@/lib/db") {
+      /* `schema` IS PART OF THIS MODULE AND MUST BE SUPPLIED.
+       *
+       * It was omitted, so any module importing
+       * `{ getDb, schema } from "@/lib/db"` received `undefined` and threw on
+       * first use. The REAL table definitions are loaded rather than a stub:
+       * they are pure drizzle metadata with no connection of their own, so this
+       * is exactly what production hands the module. Which schema the queries
+       * land in is still decided solely by `search_path` on the proved client. */
+      return {
+        getDb: () => DB,
+        isDatabaseConfigured: () => DB !== null,
+        schema: loadTs("src/lib/db/schema.ts"),
+      };
+    }
     if (spec === "@whop/sdk") return { WhopError: FakeWhopError, WhopClient: class {} };
     if (spec === "./whop-payments" || spec.endsWith("/whop-payments")) {
       const real = loadTs("src/lib/server/whop-payments.ts");
@@ -607,26 +621,110 @@ async function sequences() {
     await client.unsafe(`drop schema if exists ${SCRATCH} cascade`);
     await client.unsafe(`create schema ${SCRATCH}`);
 
-    const ddl = [
-      readFileSync("drizzle/0002_misty_obadiah_stane.sql", "utf8"),
-      readFileSync("drizzle/0004_thin_ben_urich.sql", "utf8"),
-      readFileSync("drizzle/0005_slippery_hitman.sql", "utf8"),
-      readFileSync("drizzle/0006_wise_unus.sql", "utf8"),
-    ].join("\n--> statement-breakpoint\n");
+    /*
+     * THE WHOLE MIGRATION CHAIN, IN JOURNAL ORDER. Not a hand-picked subset.
+     *
+     * This used to load 0002, 0004, 0005 and 0006 — the migrations that built
+     * the dispute tables. That is how the harness fell behind the code:
+     * migration 0011 widened `uniq_disputes_provider_dispute` to
+     * (provider, whop_dispute_id, environment), and `payment-disputes.ts` names
+     * exactly those three columns in its ON CONFLICT target. Postgres needs a
+     * unique index matching them, so every `recordDispute` failed with
+     * `dispute_storage_error` — a harness defect that read like a product bug.
+     * The alert and case tables carry the same widening and the same exposure.
+     *
+     * Reading the journal removes the class: nothing here names a migration, so
+     * none can be forgotten.
+     *
+     * 0013 IS APPENDED DELIBERATELY. It is written but not journalled or applied
+     * to public, and the modules under test already expect
+     * `creator_earnings.refunded_gross_minor`. Building it into the throwaway
+     * schema tests the code as it actually is. Nothing here touches public.
+     */
+    const journal = JSON.parse(readFileSync("drizzle/meta/_journal.json", "utf8"));
+    /*
+     * PENDING MIGRATIONS ARE A FALLBACK, NOT AN ADDITION.
+     *
+     * A migration that is WRITTEN but not yet journalled still has to be built
+     * into the throwaway schema, because the modules under test already expect
+     * its columns. But once it IS journalled, the chain above already includes
+     * it — appending it unconditionally would run its DDL a second time and the
+     * duplicate ADD COLUMN would fail the whole setup.
+     *
+     * So each pending tag is filtered against what the journal already carries.
+     * The list can be left in place across the registration it describes: while
+     * 0013 is unjournalled it is appended, and the moment it is registered this
+     * silently stops appending and loads it through the journal in order. No
+     * edit needed at the crossover, and no way to apply it twice.
+     */
+    const journalledTags = journal.entries.map((e) => e.tag);
+    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const tags = [
+      ...journalledTags,
+      ...PENDING.filter((tag) => !journalledTags.includes(tag)),
+    ];
 
     await client.unsafe(`set search_path = ${SCRATCH}`);
     const [ddlSchema] = await client`select current_schema() as schema`;
     if (ddlSchema.schema !== SCRATCH) {
       throw new Error(`ISOLATION FAILED — DDL would run in ${ddlSchema.schema}`);
     }
-    await client.unsafe(`create type ${SCRATCH}.whop_environment as enum ('sandbox','production')`);
-    for (const stmt of ddl
-      .split("--> statement-breakpoint")
-      .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
-      .filter(Boolean)) {
-      await client.unsafe(stmt);
+
+    // No manual `create type whop_environment` — 0001 creates it, and creating
+    // it first would collide once the chain runs.
+    for (const tag of tags) {
+      const sql = readFileSync(`drizzle/${tag}.sql`, "utf8");
+      for (const stmt of sql
+        .split("--> statement-breakpoint")
+        .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
+        .filter(Boolean)) {
+        try {
+          await client.unsafe(stmt);
+        } catch (err) {
+          throw new Error(`DDL FAILED in ${tag}: ${String(err?.message ?? err).slice(0, 200)}`);
+        }
+      }
     }
-    check("migration 0006 applies cleanly on top of 0002, 0004 and 0005", true);
+    check(
+      "the full migration chain applies cleanly into the throwaway schema",
+      true,
+      `${tags.length} migrations`,
+    );
+
+    /*
+     * THE THREE CONFLICT TARGETS THE FAILURE WAS ABOUT, asserted not assumed.
+     * Each of these modules performs ON CONFLICT on a three-column key that
+     * only exists after 0011.
+     */
+    for (const [indexName, cols] of [
+      ["uniq_disputes_provider_dispute", "(provider, whop_dispute_id, environment)"],
+      ["uniq_alerts_provider_alert", "(provider, whop_alert_id, environment)"],
+      ["uniq_cases_provider_case", "(provider, whop_case_id, environment)"],
+    ]) {
+      const [idx] = await client`
+        select indexdef from pg_indexes
+         where schemaname = ${SCRATCH} and indexname = ${indexName}`;
+      check(
+        `${indexName} is environment-scoped, as migration 0011 made it`,
+        Boolean(idx) && idx.indexdef.includes(cols),
+        idx?.indexdef?.replace(/.*USING btree /, "") ?? "(index missing)",
+      );
+    }
+
+    // And the Task #17 column the dispute reversal writes.
+    const [refundedCol] = await client`
+      select data_type, is_nullable, column_default
+        from information_schema.columns
+       where table_schema = ${SCRATCH}
+         and table_name = 'creator_earnings'
+         and column_name = 'refunded_gross_minor'`;
+    check(
+      "creator_earnings.refunded_gross_minor exists, NOT NULL, defaulting to 0",
+      refundedCol?.data_type === "bigint" &&
+        refundedCol?.is_nullable === "NO" &&
+        String(refundedCol?.column_default ?? "").startsWith("0"),
+      JSON.stringify(refundedCol ?? null),
+    );
 
     /*
      * THE ISOLATION SEAM, PROVED BEFORE ANY FIXTURE IS WRITTEN. The modules
@@ -1443,6 +1541,202 @@ async function sequences() {
       }
       check("0006 refuses an invented alert type", alertTypeBlocked);
     }
+    /* =====================================================================
+       TASK #17 — DISPUTE / REFUND INTERACTION, AGAINST REAL POSTGRES.
+
+       The pure suite proves the cumulative arithmetic. This proves the two
+       reversal paths compose: a dispute after a partial refund must return only
+       what is left, and a refund after a full dispute must return nothing. Both
+       read and advance the same cumulative column, so only a real database can
+       show they agree.
+
+       All inside the throwaway schema, on the proved client.
+       ===================================================================== */
+    {
+      const earnings = loadTs("src/lib/server/creator-earnings.ts");
+      const policy = loadTs("src/lib/server/creator-earnings-policy.ts");
+
+      const seedEarning = async (uid, paymentId, grossMinor, opts = {}) => {
+        const b = policy.computeEarningsBreakdown(BigInt(grossMinor), "usd");
+        await scoped.unsafe(
+          `insert into ${SCRATCH}.users (firebase_uid)
+           values ('${uid}') on conflict (firebase_uid) do nothing`,
+        );
+        await scoped.unsafe(
+          `insert into ${SCRATCH}.creator_earnings
+             (firebase_uid, environment, whop_payment_id, gross_amount_minor,
+              platform_fee_minor, net_amount_minor, currency, platform_fee_bps,
+              status, hold_until, payment_settled_at, frozen_by_dispute)
+           values ('${uid}','sandbox','${paymentId}',${b.grossAmountMinor},
+                   ${b.platformFeeMinor},${b.netAmountMinor},'usd',${b.platformFeeBps},
+                   '${opts.status ?? "available"}', now() - interval '1 day', now(),
+                   ${opts.frozen ? "true" : "false"})`,
+        );
+        return b;
+      };
+
+      const readEarning = async (paymentId) => {
+        const [row] = await scoped.unsafe(
+          `select status, refunded_gross_minor::text as refunded,
+                  gross_amount_minor::text as gross, frozen_by_dispute as frozen
+             from ${SCRATCH}.creator_earnings where whop_payment_id = '${paymentId}'`,
+        );
+        return row;
+      };
+
+      /** Signed sum of one account's legs for one counterparty. */
+      const legSum = async (account, counterparty) => {
+        const [r] = await scoped.unsafe(
+          `select coalesce(sum(amount_minor),0)::text as s
+             from ${SCRATCH}.accounting_entries
+            where account = '${account}' and counterparty_id = '${counterparty}'`,
+        );
+        return BigInt(r.s);
+      };
+
+      /* --- partial refund, then dispute: only the remainder ----------- */
+      {
+        const uid = "t17d_mix";
+        await seedEarning(uid, "pay_t17d_mix", 10000); // fee 2000, net 8000
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17d_mix", refundId: "rf_t17d_1",
+          refundAmountMinor: BigInt(3000), currency: "usd", environment: "sandbox",
+        });
+        const creatorAfterRefund = await legSum("creator_payable", uid);
+        const feeAfterRefund = await legSum("platform_revenue", "cliprewards");
+        check("T17D: a 30% refund returns 2400 creator / 600 fee",
+          creatorAfterRefund === BigInt(2400) && feeAfterRefund === BigInt(600),
+          `creator=${creatorAfterRefund} fee=${feeAfterRefund}`);
+
+        let row = await readEarning("pay_t17d_mix");
+        check("T17D: and leaves the earning active with cumulative 3000",
+          row.status === "available" && row.refunded === "3000",
+          `status=${row.status} refunded=${row.refunded}`);
+
+        // THE INTERACTION. A lost dispute must return only what is left.
+        await earnings.reverseForDispute({
+          whopPaymentId: "pay_t17d_mix", whopDisputeId: "dp_t17d_1",
+          currency: "usd", environment: "sandbox",
+        });
+        const creatorAfterDispute = await legSum("creator_payable", uid);
+        const feeAfterDispute = await legSum("platform_revenue", "cliprewards");
+
+        check("T17D: the dispute returns only the REMAINING creator share",
+          creatorAfterDispute - creatorAfterRefund === BigInt(5600),
+          `${creatorAfterDispute - creatorAfterRefund}`);
+        check("T17D: and only the remaining percentage fee",
+          feeAfterDispute - feeAfterRefund === BigInt(1400),
+          `${feeAfterDispute - feeAfterRefund}`);
+        check("T17D: totals never exceed what the earning created",
+          creatorAfterDispute === BigInt(8000) && feeAfterDispute === BigInt(2000),
+          `creator=${creatorAfterDispute} fee=${feeAfterDispute}`);
+
+        row = await readEarning("pay_t17d_mix");
+        check("T17D: cumulative refunded gross reaches the full gross exactly",
+          row.refunded === row.gross && row.refunded === "10000",
+          `refunded=${row.refunded} gross=${row.gross}`);
+        check("T17D: and only then is the earning reversed", row.status === "reversed");
+
+        /* A REFUND ARRIVING AFTER THE FULL DISPUTE MUST RETURN NOTHING. This is
+         * the double-reverse the cumulative column exists to prevent. */
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17d_mix", refundId: "rf_t17d_late",
+          refundAmountMinor: BigInt(7000), currency: "usd", environment: "sandbox",
+        });
+        check("T17D: a later refund cannot double-reverse the creator share",
+          (await legSum("creator_payable", uid)) === creatorAfterDispute);
+        check("T17D: nor the platform fee",
+          (await legSum("platform_revenue", "cliprewards")) === feeAfterDispute);
+        check("T17D: and the cumulative figure does not move past gross",
+          (await readEarning("pay_t17d_mix")).refunded === "10000");
+      }
+
+      /* --- a replayed dispute id advances nothing twice --------------- */
+      {
+        const uid = "t17d_replay";
+        await seedEarning(uid, "pay_t17d_replay", 10000);
+        const once = {
+          whopPaymentId: "pay_t17d_replay", whopDisputeId: "dp_t17d_replay",
+          currency: "usd", environment: "sandbox",
+        };
+        await earnings.reverseForDispute(once);
+        const after1 = await legSum("creator_payable", uid);
+        const row1 = await readEarning("pay_t17d_replay");
+
+        await earnings.reverseForDispute(once);
+        const after2 = await legSum("creator_payable", uid);
+        const row2 = await readEarning("pay_t17d_replay");
+
+        check("T17D: replaying the same dispute id returns nothing further",
+          after1 === after2 && after1 === BigInt(8000), `${after1} -> ${after2}`);
+        check("T17D: and the cumulative state does not advance twice",
+          row1.refunded === row2.refunded && row2.refunded === "10000",
+          `${row1.refunded} -> ${row2.refunded}`);
+        check("T17D: the earning stays reversed, not rewritten",
+          row2.status === "reversed");
+      }
+
+      /* --- a transferred earning is never clawed back ----------------- */
+      {
+        const uid = "t17d_xfer";
+        await seedEarning(uid, "pay_t17d_xfer", 10000, { status: "transferred" });
+        await earnings.reverseForDispute({
+          whopPaymentId: "pay_t17d_xfer", whopDisputeId: "dp_t17d_xfer",
+          currency: "usd", environment: "sandbox",
+        });
+        const row = await readEarning("pay_t17d_xfer");
+        check("T17D: a lost dispute does NOT claw back a transferred earning",
+          row.status === "transferred" && row.refunded === "0",
+          `status=${row.status} refunded=${row.refunded}`);
+        check("T17D: and posts no creator leg for it",
+          (await legSum("creator_payable", uid)) === BigInt(0));
+      }
+
+      /* --- a frozen earning is not withdrawable ----------------------- */
+      {
+        /* THE INVARIANT THE STALE SOURCE CHECK USED TO GUARD, proved
+         * behaviourally instead. A frozen earning must count as PENDING in the
+         * canonical position, so the Task #13 transfer — the only step that can
+         * move money into the creator's Whop balance — cannot release it. */
+        const position = loadTs("src/lib/server/creator-position.ts");
+        const uid = "t17d_frozen";
+        await seedEarning(uid, "pay_t17d_frozen", 10000, { frozen: true });
+
+        const pos = await position.computeCreatorPosition(uid, "sandbox", DB);
+        check("T17D: a dispute-frozen earning is counted as PENDING, not available",
+          pos.pendingMinor === BigInt(8000) && pos.availableMinor === BigInt(0),
+          `pending=${pos.pendingMinor} available=${pos.availableMinor}`);
+
+        // The same earning unfrozen becomes available, so the freeze is what did it.
+        await scoped.unsafe(
+          `update ${SCRATCH}.creator_earnings set frozen_by_dispute = false
+            where whop_payment_id = 'pay_t17d_frozen'`,
+        );
+        const thawed = await position.computeCreatorPosition(uid, "sandbox", DB);
+        check("T17D: unfreezing the same earning makes it pending-free",
+          thawed.pendingMinor === BigInt(0),
+          `pending=${thawed.pendingMinor}`);
+      }
+
+      /* --- the journal still balances --------------------------------- */
+      {
+        const [r] = await scoped.unsafe(
+          `select coalesce(sum(amount_minor),0)::text as s
+             from ${SCRATCH}.accounting_entries`,
+        );
+        check("T17D: every leg this section posted sums to zero overall",
+          BigInt(r.s) === BigInt(0), `residual=${r.s}`);
+
+        const [unbalanced] = await scoped.unsafe(
+          `select count(*)::int as n from (
+             select transaction_id from ${SCRATCH}.accounting_entries
+              group by transaction_id having sum(amount_minor) <> 0) x`,
+        );
+        check("T17D: and no individual transaction is unbalanced",
+          unbalanced.n === 0, `${unbalanced.n} unbalanced`);
+      }
+    }
+
   } finally {
     try {
       const rows = await client.unsafe(
@@ -1617,13 +1911,56 @@ function sourceInvariants() {
         !/dispute|resolution_center|freezeForDispute|reverseForDispute/i.test(payoutBody),
     );
   }
-  // THE REAL INVARIANT: the newer withdrawal/payout path cannot become a way
-  // around dispute reversal. A frozen earning is excluded at reservation time
-  // and refused again by the release rule.
+  /*
+   * RE-BASELINED. THE PROTECTION MOVED; IT DID NOT VANISH.
+   *
+   * This asserted that `creator-withdrawals.ts` filtered earnings on
+   * `frozenByDispute = false`. That was the right property while a withdrawal
+   * was backed by earning rows.
+   *
+   * Task #15 removed earning rows from the withdrawal path entirely: a
+   * withdrawal now moves the creator's OWN Whop balance to their own external
+   * destination, capped by the provider's withdrawable balance. The file
+   * contains no reference to `creatorEarnings` at all, so the old assertion
+   * tests for the absence of something deliberately deleted.
+   *
+   * WHERE THE PROTECTION LIVES NOW. A frozen earning cannot reach the
+   * creator's Whop balance in the first place, because the step that funds it
+   * is the Task #13 transfer, and that reserves against
+   * `computeCreatorPosition`, which counts a frozen earning as PENDING through
+   * `canRelease` and subtracts it from `available`. One definition of
+   * "releasable", used by both the balance and the release rule, so they cannot
+   * drift. The behavioural proof is in part B.
+   *
+   * THE ONE CASE THAT IS NOT PROTECTED IS PROTECTED BY POLICY, NOT BY ACCIDENT:
+   * an earning already `transferred` before the dispute opened. `freezeForDispute`
+   * and `reverseForDispute` both exclude it, and the module states the rule —
+   * the platform absorbs a dispute on money already sent rather than clawing
+   * back a completed payout.
+   */
   const withdrawalsSource = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8");
+  const withdrawalsCode = withdrawalsSource
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
   check(
-    "a dispute-frozen earning cannot be reserved by a withdrawal",
-    /eq\(schema\.creatorEarnings\.frozenByDispute, false\)/.test(withdrawalsSource),
+    "the withdrawal path no longer reserves earnings at all (Task #15)",
+    !/creatorEarnings/.test(withdrawalsCode) && !/frozenByDispute/.test(withdrawalsCode),
+  );
+  check(
+    "it caps against the provider balance and the canonical payable instead",
+    /readWithdrawableBalance|reserveFromPosition/.test(withdrawalsCode),
+  );
+  check(
+    "a frozen earning is counted as pending by the canonical position",
+    /canRelease\(row\.holdUntil, row\.frozenByDispute, now\)/.test(
+      readFileSync("src/lib/server/creator-position.ts", "utf8"),
+    ),
+  );
+  check(
+    "and the Task #13 transfer — the step that funds the creator — caps against it",
+    /await reserveFromPosition\(/.test(
+      readFileSync("src/lib/server/creator-transfers.ts", "utf8"),
+    ),
   );
   check(
     "and the release rule refuses a frozen earning outright",

@@ -70,7 +70,18 @@ function loadTs(file) {
 
   const req = (spec) => {
     if (spec === "server-only") return {};
-    if (spec === "@/lib/db") return { getDb: () => DB, isDatabaseConfigured: () => DB !== null };
+    if (spec === "@/lib/db") {
+      // `schema` is part of this module. Omitting it hands any module importing
+      // `{ getDb, schema }` an undefined and throws on first use; the real table
+      // definitions are pure drizzle metadata with no connection of their own,
+      // so this is what production supplies. Which schema the queries land in is
+      // still decided solely by `search_path`.
+      return {
+        getDb: () => DB,
+        isDatabaseConfigured: () => DB !== null,
+        schema: loadTs("src/lib/db/schema.ts"),
+      };
+    }
     if (spec === "@whop/sdk") return { WhopError: FakeWhopError, WhopClient: class {} };
     if (spec === "./whop-payments" || spec.endsWith("/whop-payments")) {
       // The payments client is the network seam. Configuration is real.
@@ -725,6 +736,9 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
     environment: "environment", status: "status", grossAmountMinor: "grossAmountMinor",
     platformFeeMinor: "platformFeeMinor", netAmountMinor: "netAmountMinor",
     platformFeeBps: "platformFeeBps", currency: "currency", frozenByDispute: "frozenByDispute",
+    // Task #17 (migration 0013). Without it, a predicate or update naming this
+    // column would resolve to undefined and silently match nothing.
+    refundedGrossMinor: "refundedGrossMinor",
     frozenByDisputeId: "frozenByDisputeId", holdUntil: "holdUntil", reversedAt: "reversedAt",
     updatedAt: "updatedAt", amountMinor: "amountMinor", whopRefundId: "whopRefundId",
     whopDisputeId: "whopDisputeId", createdAt: "createdAt", provider: "provider",
@@ -829,9 +843,25 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
   }
 
   /* --- creator earnings: the same payment id in both environments --- */
+  /*
+   * `refundedGrossMinor` IS PART OF AN EARNING ROW AS OF TASK #17, and omitting
+   * it was not a cosmetic gap.
+   *
+   * The reversal path reads it as the cumulative refunded gross and feeds it to
+   * `computeCumulativeRefundDelta`. An absent field arrives as `undefined`, and
+   * `undefined` slips past BOTH guards in `computeRefundSplitReversal`:
+   * `undefined <= 0n` is false and `undefined >= gross` is false, because every
+   * comparison with undefined is false. Execution therefore fell through to the
+   * proportional branch and multiplied a bigint by undefined —
+   * "Cannot mix BigInt and other types".
+   *
+   * In production the column is NOT NULL DEFAULT 0 and the query selects it
+   * explicitly, so a real row always carries a bigint. `0n` is exactly what an
+   * un-refunded earning holds.
+   */
   const collidingEarnings = () => [
-    { earningId: "e_sandbox", whopPaymentId: "pay_collide", firebaseUid: "uid_sandbox", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, currency: "usd" },
-    { earningId: "e_prod", whopPaymentId: "pay_collide", firebaseUid: "uid_production", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 9999n, platformFeeMinor: 1999n, netAmountMinor: 8000n, platformFeeBps: 2000, currency: "usd" },
+    { earningId: "e_sandbox", whopPaymentId: "pay_collide", firebaseUid: "uid_sandbox", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, refundedGrossMinor: 0n, currency: "usd" },
+    { earningId: "e_prod", whopPaymentId: "pay_collide", firebaseUid: "uid_production", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 9999n, platformFeeMinor: 1999n, netAmountMinor: 8000n, platformFeeBps: 2000, refundedGrossMinor: 0n, currency: "usd" },
   ];
 
   const EARNINGS = "src/lib/server/creator-earnings.ts";
@@ -949,8 +979,8 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
    */
   {
     const bothEnv = () => [
-      { earningId: "e_sandbox", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, currency: "usd" },
-      { earningId: "e_prod", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 5000n, platformFeeMinor: 1000n, netAmountMinor: 4000n, platformFeeBps: 2000, currency: "usd" },
+      { earningId: "e_sandbox", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "sandbox", status: "available", frozenByDispute: false, grossAmountMinor: 1000n, platformFeeMinor: 200n, netAmountMinor: 800n, platformFeeBps: 2000, refundedGrossMinor: 0n, currency: "usd" },
+      { earningId: "e_prod", whopPaymentId: "pay_same", firebaseUid: "uid_a", environment: "production", status: "available", frozenByDispute: false, grossAmountMinor: 5000n, platformFeeMinor: 1000n, netAmountMinor: 4000n, platformFeeBps: 2000, refundedGrossMinor: 0n, currency: "usd" },
     ];
 
     // IDEMPOTENCY WITHIN THE ENVIRONMENT: the sandbox row is found, so the
@@ -1156,29 +1186,78 @@ async function sequences() {
     await client.unsafe(`drop schema if exists ${SCRATCH} cascade`);
     await client.unsafe(`create schema ${SCRATCH}`);
 
-    // Real DDL for the two tables the mapping touches, taken from the applied
-    // migrations so column types and constraints cannot drift from production.
-    const ddl = [
-      readFileSync("drizzle/0002_misty_obadiah_stane.sql", "utf8"),
-      readFileSync("drizzle/0004_thin_ben_urich.sql", "utf8"),
-    ].join("\n--> statement-breakpoint\n");
+    /*
+     * THE WHOLE MIGRATION CHAIN, IN JOURNAL ORDER. Not a hand-picked subset.
+     *
+     * This loaded 0002 and 0004 — the migrations building the two tables the
+     * mapping touches. That was sufficient and is exactly how the refund and
+     * dispute suites fell behind the code: each named the migrations it thought
+     * it needed, and neither noticed when 0011 widened the unique indexes their
+     * modules then named in ON CONFLICT.
+     *
+     * This suite did not fail that way only because the tables it exercises
+     * were untouched by 0011 — a latent hazard rather than a safe design. It is
+     * converted here so the last instance of the class is gone: nothing names a
+     * migration, so none can be forgotten.
+     *
+     * The tables it needs are a subset of the chain, so building all of them
+     * costs a little setup time and removes a whole failure mode.
+     *
+     * 0013 IS APPENDED DELIBERATELY. It is written but not journalled or applied
+     * to public, and the modules under test already expect
+     * `creator_earnings.refunded_gross_minor`. Building it into the throwaway
+     * schema tests the code as it actually is. Nothing here touches public.
+     *
+     * The migration text creates its tables unqualified, so which schema they
+     * land in is decided by search_path — which is why it is set and then
+     * VERIFIED before any DDL runs.
+     */
+    const journal = JSON.parse(readFileSync("drizzle/meta/_journal.json", "utf8"));
+    /*
+     * PENDING MIGRATIONS ARE A FALLBACK, NOT AN ADDITION.
+     *
+     * A migration that is WRITTEN but not yet journalled still has to be built
+     * into the throwaway schema, because the modules under test already expect
+     * its columns. But once it IS journalled, the chain above already includes
+     * it — appending it unconditionally would run its DDL a second time and the
+     * duplicate ADD COLUMN would fail the whole setup.
+     *
+     * So each pending tag is filtered against what the journal already carries.
+     * The list can be left in place across the registration it describes: while
+     * 0013 is unjournalled it is appended, and the moment it is registered this
+     * silently stops appending and loads it through the journal in order. No
+     * edit needed at the crossover, and no way to apply it twice.
+     */
+    const journalledTags = journal.entries.map((e) => e.tag);
+    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const tags = [
+      ...journalledTags,
+      ...PENDING.filter((tag) => !journalledTags.includes(tag)),
+    ];
 
-    // The migration text creates its TABLES unqualified, so the schema they
-    // land in is decided by search_path. Without this they would be attempted
-    // in `public` — which is how this test first tried to create a second
-    // `payment_orders` over the real one, and was refused by Postgres.
     await client.unsafe(`set search_path = ${SCRATCH}`);
     const [ddlSchema] = await client`select current_schema() as schema`;
     if (ddlSchema.schema !== SCRATCH) {
       throw new Error(`ISOLATION FAILED — DDL would run in ${ddlSchema.schema}`);
     }
-    await client.unsafe(`create type ${SCRATCH}.whop_environment as enum ('sandbox','production')`);
-    for (const stmt of ddl
-      .split("--> statement-breakpoint")
-      .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
-      .filter(Boolean)) {
-      await client.unsafe(stmt);
+
+    // No manual `create type whop_environment` — 0001 creates it, and creating
+    // it first would collide once the chain runs.
+    for (const tag of tags) {
+      const sql = readFileSync(`drizzle/${tag}.sql`, "utf8");
+      for (const stmt of sql
+        .split("--> statement-breakpoint")
+        .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
+        .filter(Boolean)) {
+        try {
+          await client.unsafe(stmt);
+        } catch (err) {
+          throw new Error(`DDL FAILED in ${tag}: ${String(err?.message ?? err).slice(0, 200)}`);
+        }
+      }
     }
+    check("REAL DB: the full migration chain applies cleanly into the throwaway schema",
+      true, `${tags.length} migrations`);
 
     /*
      * THE ISOLATION SEAM, and the one that has to be proved rather than

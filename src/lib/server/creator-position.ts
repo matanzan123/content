@@ -2,7 +2,7 @@ import "server-only";
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
-import { canRelease } from "./creator-earnings-policy";
+import { canRelease, remainingCreatorNet } from "./creator-earnings-policy";
 
 /* ==========================================================================
    THE CREATOR'S FINANCIAL POSITION — one answer to "what is this creator owed".
@@ -153,6 +153,10 @@ async function ledgerPayableMinor(
 type EligibilityRow = {
   status: string;
   netAmountMinor: bigint;
+  grossAmountMinor: bigint;
+  platformFeeBps: number;
+  /** Cumulative gross refunded. Reduces what this earning still represents. */
+  refundedGrossMinor: bigint;
   holdUntil: Date;
   frozenByDispute: boolean;
   currency: string;
@@ -172,6 +176,9 @@ async function eligibilityRows(
     .select({
       status: schema.creatorEarnings.status,
       netAmountMinor: schema.creatorEarnings.netAmountMinor,
+      grossAmountMinor: schema.creatorEarnings.grossAmountMinor,
+      platformFeeBps: schema.creatorEarnings.platformFeeBps,
+      refundedGrossMinor: schema.creatorEarnings.refundedGrossMinor,
       holdUntil: schema.creatorEarnings.holdUntil,
       frozenByDispute: schema.creatorEarnings.frozenByDispute,
       currency: schema.creatorEarnings.currency,
@@ -225,10 +232,27 @@ export async function computeCreatorPosition(
       continue;
     }
 
-    earnedMinor += row.netAmountMinor;
+    /* PARTIAL REFUNDS REDUCE WHAT THIS EARNING STILL REPRESENTS.
+     *
+     * `net_amount_minor` is what the earning was WORTH when created, not what
+     * is still owed. One payment may be refunded many times, and each refund
+     * returns part of the creator's share to suspense. Using the original net
+     * here would overstate the creator on every aggregate and put the row
+     * totals permanently at odds with the ledger — which is precisely the
+     * `payable_mismatch` the reconciler would then report forever.
+     *
+     * `remainingCreatorNet` derives the remainder from the cumulative refunded
+     * gross through the canonical fee policy. It is not a second formula. */
+    const remaining = remainingCreatorNet(row, row.refundedGrossMinor);
+    const returned = row.netAmountMinor - remaining;
+
+    // The returned portion is economically reversed, and is reported as such
+    // so that earned + reversed still totals what was originally earned.
+    reversedMinor += returned;
+    earnedMinor += remaining;
 
     if (row.status === "transferred") {
-      transferredMinor += row.netAmountMinor;
+      transferredMinor += remaining;
       continue;
     }
 
@@ -237,7 +261,7 @@ export async function computeCreatorPosition(
     // is the single definition of both conditions and is reused here rather
     // than restated, so the balance and the release path can never drift.
     if (!canRelease(row.holdUntil, row.frozenByDispute, now)) {
-      pendingMinor += row.netAmountMinor;
+      pendingMinor += remaining;
     }
   }
 

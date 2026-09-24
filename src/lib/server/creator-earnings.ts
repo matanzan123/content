@@ -8,7 +8,11 @@ import {
 } from "./creator-earnings-policy";
 import { postRevenueSplit, postRevenueSplitReversal } from "./accounting/revenue-split-posting";
 import { getWhopEnvironment } from "./whop-payments";
-import { computeRefundSplitReversal } from "./creator-earnings-policy";
+import {
+  capRefundedGross,
+  computeCumulativeRefundDelta,
+  isFullyRefunded,
+} from "./creator-earnings-policy";
 import { computeCreatorPosition, type CreatorPosition } from "./creator-position";
 
 /* ==========================================================================
@@ -321,6 +325,7 @@ export async function reverseForDispute(
       platformFeeMinor: schema.creatorEarnings.platformFeeMinor,
       netAmountMinor: schema.creatorEarnings.netAmountMinor,
       platformFeeBps: schema.creatorEarnings.platformFeeBps,
+      refundedGrossMinor: schema.creatorEarnings.refundedGrossMinor,
       currency: schema.creatorEarnings.currency,
     })
     .from(schema.creatorEarnings)
@@ -336,19 +341,46 @@ export async function reverseForDispute(
     );
 
   for (const row of rows) {
-    const percentageFeeMinor = (row.grossAmountMinor * BigInt(row.platformFeeBps)) / BigInt(10_000);
-    const reversal = computeRefundSplitReversal(
-      { grossAmountMinor: row.grossAmountMinor, netAmountMinor: row.netAmountMinor, percentageFeeMinor },
-      row.grossAmountMinor, // full reversal
+    const economics = {
+      grossAmountMinor: row.grossAmountMinor,
+      netAmountMinor: row.netAmountMinor,
+      platformFeeBps: row.platformFeeBps,
+    };
+
+    /* A LOST DISPUTE UNWINDS WHATEVER IS LEFT, NOT THE WHOLE EARNING.
+     *
+     * This used to post a full reversal unconditionally. After Task #17 an
+     * earning may already be PARTLY refunded, and returning the full net on top
+     * of a refund that had already returned part of it would claw back more than
+     * was ever created — a $100 earning refunded $30 and then disputed would
+     * have returned $80 of creator share against $56 outstanding.
+     *
+     * Taking the cumulative delta to full gross returns exactly the remainder,
+     * and is identical to the old behaviour on the untouched earning that was
+     * previously the only case. */
+    const reversal = computeCumulativeRefundDelta(
+      economics,
+      row.refundedGrossMinor,
+      row.grossAmountMinor,
     );
-    await postRevenueSplitReversal({
-      refundOrDisputeId: input.whopDisputeId,
-      creatorFirebaseUid: row.firebaseUid,
-      reversal,
-      currency: row.currency,
-      environment: input.environment,
-      description: `Revenue split reversal — dispute lost ${input.whopDisputeId}`,
-    });
+
+    // Nothing left to unwind: already fully refunded. The status update below
+    // still runs, so the row reaches `reversed` either way.
+    if (reversal.totalToReturn > BigInt(0)) {
+      await postRevenueSplitReversal({
+        refundOrDisputeId: input.whopDisputeId,
+        creatorFirebaseUid: row.firebaseUid,
+        reversal,
+        currency: row.currency,
+        // THE TRUSTED ENVIRONMENT, the same one the rows were read under.
+        // `input.environment` was a second, caller-supplied authority: the rows
+        // were selected under one environment and the journal posted under
+        // another, so a disagreement would file the reversal in the wrong
+        // environment's books.
+        environment,
+        description: `Revenue split reversal — dispute lost ${input.whopDisputeId}`,
+      });
+    }
   }
 
   try {
@@ -359,6 +391,10 @@ export async function reverseForDispute(
         frozenByDispute: false,
         reversedAt: new Date(),
         updatedAt: new Date(),
+        // FULLY UNWOUND, RECORDED AS SUCH. Without this a refund arriving after
+        // a lost dispute would compute a delta against a stale cumulative
+        // figure and reverse the same money twice.
+        refundedGrossMinor: sql`${schema.creatorEarnings.grossAmountMinor}`,
       })
       .where(
         and(
@@ -417,11 +453,13 @@ export async function reverseForRefund(
 
   const rows = await db
     .select({
+      earningId: schema.creatorEarnings.earningId,
       firebaseUid: schema.creatorEarnings.firebaseUid,
       grossAmountMinor: schema.creatorEarnings.grossAmountMinor,
       platformFeeMinor: schema.creatorEarnings.platformFeeMinor,
       netAmountMinor: schema.creatorEarnings.netAmountMinor,
       platformFeeBps: schema.creatorEarnings.platformFeeBps,
+      refundedGrossMinor: schema.creatorEarnings.refundedGrossMinor,
       currency: schema.creatorEarnings.currency,
     })
     .from(schema.creatorEarnings)
@@ -429,6 +467,19 @@ export async function reverseForRefund(
       and(
         eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
         eq(schema.creatorEarnings.environment, environment),
+        /* A PARTIALLY REFUNDED EARNING IS STILL FOUND, and that is the fix.
+         *
+         * This filter used to be `status IN (held, available)`, and the first
+         * partial refund set the row to `reversed` — so the second and third
+         * refunds of the same payment matched nothing and reversed NOTHING.
+         * ClipRewards kept fee revenue and the creator kept payable on a
+         * payment the brand had been refunded in full.
+         *
+         * `reversed` is excluded because it means fully unwound; there is
+         * genuinely nothing left. `transferred` is excluded because the
+         * platform deliberately absorbs a refund on money already sent — that
+         * rule is unchanged. Everything else remains eligible however many
+         * times it has already been partly refunded. */
         or(
           eq(schema.creatorEarnings.status, "held"),
           eq(schema.creatorEarnings.status, "available"),
@@ -437,46 +488,103 @@ export async function reverseForRefund(
     );
 
   for (const row of rows) {
-    // Derive processing fee from stored columns (historically correct even if
-    // env vars change later: platformFeeMinor = percentageFee + processingFee).
-    const percentageFeeMinor = (row.grossAmountMinor * BigInt(row.platformFeeBps)) / BigInt(10_000);
-    const reversal = computeRefundSplitReversal(
-      { grossAmountMinor: row.grossAmountMinor, netAmountMinor: row.netAmountMinor, percentageFeeMinor },
+    const economics = {
+      grossAmountMinor: row.grossAmountMinor,
+      netAmountMinor: row.netAmountMinor,
+      platformFeeBps: row.platformFeeBps,
+    };
+
+    /* CAPPED, then posted as a DELTA between cumulative targets.
+     *
+     * The cap means no sequence of provider refunds can return more than this
+     * earning created. The delta means the postings telescope: any split of
+     * partial refunds totals exactly what one refund of the sum would, where
+     * flooring each refund on its own would lose a fraction every time. */
+    const previousRefundedGross = row.refundedGrossMinor;
+    const newRefundedGross = capRefundedGross(
+      economics,
+      previousRefundedGross,
       input.refundAmountMinor,
     );
-    await postRevenueSplitReversal({
+
+    // Already fully unwound, or a replay that adds nothing. Post no journal and
+    // leave the row alone rather than writing a zero-amount transaction.
+    if (newRefundedGross <= previousRefundedGross) continue;
+
+    const reversal = computeCumulativeRefundDelta(
+      economics,
+      previousRefundedGross,
+      newRefundedGross,
+    );
+
+    /* THE JOURNAL FIRST, then the row.
+     *
+     * Its economic key is the refund id, so a redelivery of the SAME refund is
+     * refused by the ledger's unique constraint and cannot double-reverse. The
+     * cumulative column is advanced only after the posting is accepted, so a
+     * crash between them leaves the row understated — recoverable, and visible
+     * to reconciliation — rather than silently swallowing a reversal. */
+    const posted = await postRevenueSplitReversal({
       refundOrDisputeId: input.refundId,
       creatorFirebaseUid: row.firebaseUid,
       reversal,
-      currency: input.currency,
-      environment: input.environment,
+      currency: row.currency,
+      environment,
       description: `Revenue split reversal — refund ${input.refundId}`,
     });
-  }
 
-  try {
+    /* A REPLAY MUST NOT ADVANCE THE COLUMN, and getting this wrong was a real
+     * double-count.
+     *
+     * `already_posted` means the ledger already holds a reversal under this
+     * refund id, so `previousRefundedGross` has ALREADY absorbed this refund.
+     * Adding it again moves the cumulative figure past what was actually
+     * refunded — and a later genuine refund would then compute its delta from
+     * an inflated base and under-reverse. The journal is refused correctly by
+     * its unique economic key either way; it is the column that must not move.
+     *
+     * THE CRASH WINDOW THIS LEAVES, stated honestly: if the process dies
+     * between a successful posting and this update, the column stays behind and
+     * a retry sees `already_posted` and skips it. The figure is then understated
+     * and reconciliation reports it, which is the trade the module header
+     * already describes for the journal-before-row ordering. The alternative —
+     * advancing on a replay — double-counts on every ordinary webhook
+     * redelivery, which is routine rather than exceptional. Total exposure stays
+     * bounded either way, because no cumulative target can exceed the amounts
+     * the earning created. */
+    if (!posted.ok) continue;
+
+    const fullyRefunded = isFullyRefunded(economics, newRefundedGross);
+
+    /* PARTIAL REFUNDS DO NOT REVERSE THE EARNING.
+     *
+     * Only a cumulative refund reaching the earning's whole gross may. The
+     * status guard stays in SQL so a row that reached a terminal state between
+     * the read and this write is not walked back. */
     await db
       .update(schema.creatorEarnings)
       .set({
-        status: "reversed",
-        reversedAt: new Date(),
+        refundedGrossMinor: newRefundedGross,
         updatedAt: new Date(),
+        ...(fullyRefunded ? { status: "reversed" as const, reversedAt: new Date() } : {}),
       })
       .where(
         and(
-          eq(schema.creatorEarnings.whopPaymentId, input.whopPaymentId),
-        eq(schema.creatorEarnings.environment, environment),
+          eq(schema.creatorEarnings.earningId, row.earningId),
+          eq(schema.creatorEarnings.environment, environment),
+          // Not already advanced past this point by a concurrent delivery.
+          eq(schema.creatorEarnings.refundedGrossMinor, previousRefundedGross),
           or(
             eq(schema.creatorEarnings.status, "held"),
             eq(schema.creatorEarnings.status, "available"),
           ),
         ),
       );
-    return { ok: true };
-  } catch {
-    return { ok: false };
   }
+
+  return { ok: true };
 }
+
 
 /* -------------------------------------------------------------------------
    Hold sweep

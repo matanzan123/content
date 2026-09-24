@@ -1,0 +1,61 @@
+-- CUMULATIVE REFUNDS AGAINST ONE CREATOR EARNING (Task #17).
+--
+-- WHY THIS COLUMN EXISTS.
+--
+-- One payment may be refunded many times. `payment_refunds` is a table rather
+-- than three columns on `payment_orders` for exactly that reason: a $10 payment
+-- refunded $2, then $3, then $5 is three `rf_` resources with three ids.
+--
+-- The creator-earning side could not represent that. `reverseForRefund`
+-- computed a correct pro-rata reversal for the first refund and then marked the
+-- whole earning `reversed`, after which the row no longer matched the
+-- `status IN (held, available)` filter — so the second and third refunds
+-- reversed NOTHING. ClipRewards kept fee revenue and the creator kept payable
+-- on a payment the brand had been refunded in full.
+--
+-- WHY ONE COLUMN IS ENOUGH.
+--
+-- Both amounts that must be unwound — the creator's share and the percentage
+-- portion of the platform fee — are pure functions of the CUMULATIVE refunded
+-- gross plus figures already on the row (`gross_amount_minor`,
+-- `net_amount_minor`, `platform_fee_bps`). Nothing else has to be stored:
+--
+--   percentageFee            = floor(gross * platform_fee_bps / 10000)
+--   creatorReturned(R)       = R >= gross ? net        : floor(net * R / gross)
+--   platformFeeReturned(R)   = R >= gross ? percentageFee
+--                                        : floor(percentageFee * R / gross)
+--
+-- GROSS IS THE RIGHT UNIT. Provider refunds arrive as gross amounts, and both
+-- derived figures are proportions of gross. Storing a reversed NET instead
+-- would make the fee portion unrecoverable without re-deriving the proportion
+-- anyway, and storing two columns would let them disagree.
+--
+-- WHY CUMULATIVE AND NOT A PER-REFUND LOG. Each posting is the DELTA between
+-- the target at the new cumulative gross and the target at the previous one.
+-- Flooring each refund on its own loses a fraction every time: 1000 at 20%
+-- refunded 333+333+333+1 returns 198 of a 200 fee independently, and exactly
+-- 200 cumulatively. The delta makes the postings telescope, so any sequence of
+-- partial refunds totals the same as one refund of the sum.
+--
+-- WHY NOT AN EXISTING COLUMN. `accounting_transactions.reverses_transaction_id`
+-- looks like the natural link from a reversal back to the split it unwinds, but
+-- `uniq_accounting_reversal` is UNIQUE on it where not null — at most ONE
+-- reversal per original. It cannot carry N partial reversals, and it is not
+-- exposed by `postTransaction` in any case. The reversal journal's
+-- `provider_resource_id` is the refund id, not the payment, so cumulative
+-- reversal per payment is not derivable from the ledger either.
+--
+-- SAFETY. Additive, NOT NULL with a DEFAULT of 0, so every existing row reads
+-- as "nothing refunded yet" — which is true of every row written before this,
+-- because a partial refund previously marked the earning fully `reversed` and a
+-- fully reversed earning has nothing further to unwind. No backfill is needed
+-- and no existing figure changes.
+
+--> statement-breakpoint
+
+ALTER TABLE "creator_earnings" ADD COLUMN "refunded_gross_minor" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
+
+-- Finds partially-refunded earnings: the rows whose remaining creator share is
+-- less than their original net, which reconciliation and the creator position
+-- must treat differently from an untouched earning.
+CREATE INDEX "idx_earnings_partially_refunded" ON "creator_earnings" USING btree ("firebase_uid","environment") WHERE refunded_gross_minor > 0;

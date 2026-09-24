@@ -1479,6 +1479,27 @@ export const creatorEarnings = pgTable(
     platformFeeMinor: bigint("platform_fee_minor", { mode: "bigint" }).notNull(),
     /** What the creator actually receives: gross - platformFee. */
     netAmountMinor: bigint("net_amount_minor", { mode: "bigint" }).notNull(),
+
+    /**
+     * CUMULATIVE gross refunded against this earning. Minor units.
+     *
+     * One payment may be refunded many times, and both amounts that must be
+     * unwound — the creator share and the percentage portion of the platform
+     * fee — are pure functions of this cumulative figure plus `grossAmountMinor`,
+     * `netAmountMinor` and `platformFeeBps`. One column therefore carries the
+     * whole representation; see `creator-earnings-policy.ts`.
+     *
+     * GROSS IS THE UNIT because provider refunds arrive as gross amounts and
+     * both derived figures are proportions of gross.
+     *
+     * EVERY ROW-SIDE AGGREGATE MUST SUBTRACT THE RETURNED SHARE. Treating a
+     * partially refunded earning as still owing its full `net_amount_minor`
+     * overstates the creator and puts the row totals permanently at odds with
+     * the ledger — use `remainingCreatorNet()`, never `netAmountMinor` alone.
+     */
+    refundedGrossMinor: bigint("refunded_gross_minor", { mode: "bigint" })
+      .notNull()
+      .default(BigInt(0)),
     /** Lowercase ISO 4217. Currently always "usd". */
     currency: char("currency", { length: 3 }).notNull(),
 
@@ -1533,6 +1554,11 @@ export const creatorEarnings = pgTable(
     // Without the environment column this index made a sandbox payment id
     // collide with a production one, and the unscoped read-back it backed
     // resolved across environments.
+    // Finds partially-refunded earnings, which reconciliation and the creator
+    // position must treat differently from untouched ones.
+    index("idx_earnings_partially_refunded")
+      .on(t.firebaseUid, t.environment)
+      .where(sql`refunded_gross_minor > 0`),
     uniqueIndex("uniq_creator_earnings_payment_creator")
       .on(t.whopPaymentId, t.firebaseUid, t.environment),
     index("idx_creator_earnings_uid").on(t.firebaseUid, t.status),

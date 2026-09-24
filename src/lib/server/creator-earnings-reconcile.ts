@@ -124,7 +124,14 @@ export async function reconcileCreatorEarnings(
      outstanding: everything earned that has been neither transferred nor
      reversed. A gap in either direction is a real discrepancy, and the sign
      says which way: a ledger LOWER than the rows is the classic symptom of
-     money paid out without the rows being settled.                         */
+     money paid out without the rows being settled.
+
+     PARTIAL REFUNDS ARE ALREADY ACCOUNTED FOR. `earnedMinor` and
+     `transferredMinor` come from `computeCreatorPosition`, which reports the
+     REMAINING creator share of each earning rather than its original net — so a
+     partly refunded earning contributes only what is still owed, exactly as the
+     ledger does. Comparing original nets here would flag every partial refund
+     as a discrepancy forever.                                              */
   const creators = options.firebaseUid
     ? [{ firebaseUid: options.firebaseUid }]
     : await db

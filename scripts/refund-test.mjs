@@ -87,7 +87,26 @@ function loadTs(file) {
 
   const req = (spec) => {
     if (spec === "server-only") return {};
-    if (spec === "@/lib/db") return { getDb: () => DB, isDatabaseConfigured: () => DB !== null };
+    if (spec === "@/lib/db") {
+      /* `schema` IS PART OF THIS MODULE AND MUST BE SUPPLIED.
+       *
+       * It was omitted, so any module importing
+       * `{ getDb, schema } from "@/lib/db"` received `undefined` and threw on
+       * first use. Nothing noticed while `recordRefund` failed earlier for an
+       * unrelated reason; once the schema drift was fixed the flow reached
+       * `reverseForRefund`, which is the first module here to read
+       * `schema.creatorEarnings`.
+       *
+       * The REAL table definitions are loaded, not a stub: they are pure
+       * drizzle metadata with no connection of their own, so this is exactly
+       * what production hands the module. Which schema the queries land in is
+       * still decided solely by `search_path` on the proved client. */
+      return {
+        getDb: () => DB,
+        isDatabaseConfigured: () => DB !== null,
+        schema: loadTs("src/lib/db/schema.ts"),
+      };
+    }
     if (spec === "@whop/sdk") return { WhopError: FakeWhopError, WhopClient: class {} };
     if (spec === "./whop-payments" || spec.endsWith("/whop-payments")) {
       // The payments client is the network seam. Configuration is real.
@@ -674,27 +693,109 @@ async function sequences() {
     await client.unsafe(`drop schema if exists ${SCRATCH} cascade`);
     await client.unsafe(`create schema ${SCRATCH}`);
 
-    // Real DDL, taken from the applied migrations plus the NOT-YET-APPLIED
-    // 0005, so the table under test is exactly the one 0005 would create.
-    const ddl = [
-      readFileSync("drizzle/0002_misty_obadiah_stane.sql", "utf8"),
-      readFileSync("drizzle/0004_thin_ben_urich.sql", "utf8"),
-      readFileSync("drizzle/0005_slippery_hitman.sql", "utf8"),
-    ].join("\n--> statement-breakpoint\n");
+    /*
+     * THE WHOLE MIGRATION CHAIN, IN JOURNAL ORDER. Not a hand-picked subset.
+     *
+     * This used to load three migrations — 0002, 0004, 0005 — chosen because
+     * they were the ones that built `payment_refunds` and its neighbours. That
+     * is how the harness silently fell behind the code: migration 0011 widened
+     * `uniq_refunds_provider_refund` to (provider, whop_refund_id, environment)
+     * and `payment-refunds.ts` now names that key in its ON CONFLICT, but the
+     * scratch schema still carried the two-column index. Every `recordRefund`
+     * therefore failed with `refund_storage_error` — a harness defect that read
+     * exactly like a product bug.
+     *
+     * Reading the journal removes the whole class of drift: a migration cannot
+     * be forgotten here, because nothing here names migrations at all.
+     *
+     * 0013 IS APPENDED DELIBERATELY. It is written but not yet journalled or
+     * applied to public, and the modules under test already expect
+     * `creator_earnings.refunded_gross_minor`. Building it into the throwaway
+     * schema is how this suite tests the code as it actually is; nothing here
+     * applies it to public, which stays untouched.
+     */
+    const journal = JSON.parse(readFileSync("drizzle/meta/_journal.json", "utf8"));
+    /*
+     * PENDING MIGRATIONS ARE A FALLBACK, NOT AN ADDITION.
+     *
+     * A migration that is WRITTEN but not yet journalled still has to be built
+     * into the throwaway schema, because the modules under test already expect
+     * its columns. But once it IS journalled, the chain above already includes
+     * it — appending it unconditionally would run its DDL a second time and the
+     * duplicate ADD COLUMN would fail the whole setup.
+     *
+     * So each pending tag is filtered against what the journal already carries.
+     * The list can be left in place across the registration it describes: while
+     * 0013 is unjournalled it is appended, and the moment it is registered this
+     * silently stops appending and loads it through the journal in order. No
+     * edit needed at the crossover, and no way to apply it twice.
+     */
+    const journalledTags = journal.entries.map((e) => e.tag);
+    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const tags = [
+      ...journalledTags,
+      ...PENDING.filter((tag) => !journalledTags.includes(tag)),
+    ];
 
     await client.unsafe(`set search_path = ${SCRATCH}`);
     const [ddlSchema] = await client`select current_schema() as schema`;
     if (ddlSchema.schema !== SCRATCH) {
       throw new Error(`ISOLATION FAILED — DDL would run in ${ddlSchema.schema}`);
     }
-    await client.unsafe(`create type ${SCRATCH}.whop_environment as enum ('sandbox','production')`);
-    for (const stmt of ddl
-      .split("--> statement-breakpoint")
-      .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
-      .filter(Boolean)) {
-      await client.unsafe(stmt);
+
+    // No manual `create type whop_environment` — 0001 creates it, and creating
+    // it here first would collide once the chain runs.
+    for (const tag of tags) {
+      const sql = readFileSync(`drizzle/${tag}.sql`, "utf8");
+      for (const stmt of sql
+        .split("--> statement-breakpoint")
+        .map((x) => x.replace(/"public"\./g, `"${SCRATCH}".`).trim())
+        .filter(Boolean)) {
+        try {
+          await client.unsafe(stmt);
+        } catch (err) {
+          throw new Error(`DDL FAILED in ${tag}: ${String(err?.message ?? err).slice(0, 200)}`);
+        }
+      }
     }
-    check("migration 0005 applies cleanly on top of 0002 and 0004", true);
+    check(
+      "the full migration chain applies cleanly into the throwaway schema",
+      true,
+      `${tags.length} migrations`,
+    );
+
+    /*
+     * THE INDEX THE FAILURE WAS ABOUT, asserted rather than assumed.
+     *
+     * `payment-refunds.ts` performs ON CONFLICT on
+     * (provider, whop_refund_id, environment). Postgres requires a unique index
+     * matching those columns exactly, so this is the one piece of schema whose
+     * absence turns every refund write into a storage error.
+     */
+    const [refundIdx] = await client`
+      select indexdef from pg_indexes
+       where schemaname = ${SCRATCH} and indexname = 'uniq_refunds_provider_refund'`;
+    check(
+      "the refund conflict target is environment-scoped, as migration 0011 made it",
+      Boolean(refundIdx) &&
+        /\(provider, whop_refund_id, environment\)/.test(refundIdx.indexdef),
+      refundIdx?.indexdef ?? "(index missing)",
+    );
+
+    // And the Task #17 column the earnings reversal writes.
+    const [refundedCol] = await client`
+      select data_type, is_nullable, column_default
+        from information_schema.columns
+       where table_schema = ${SCRATCH}
+         and table_name = 'creator_earnings'
+         and column_name = 'refunded_gross_minor'`;
+    check(
+      "creator_earnings.refunded_gross_minor exists, NOT NULL, defaulting to 0",
+      refundedCol?.data_type === "bigint" &&
+        refundedCol?.is_nullable === "NO" &&
+        String(refundedCol?.column_default ?? "").startsWith("0"),
+      JSON.stringify(refundedCol ?? null),
+    );
 
     /*
      * THE ISOLATION SEAM, PROVED BEFORE ANY FIXTURE IS WRITTEN.
@@ -1715,6 +1816,296 @@ async function sequences() {
       }
       check("0005 refuses a completed refund with no completed_at", completedNoTimeBlocked);
     }
+    /* =====================================================================
+       TASK #17 — CLIPREWARDS FEE REVERSAL, AGAINST REAL POSTGRES.
+
+       The pure suite proves the arithmetic. This proves the arithmetic is
+       actually reached and persisted: the cumulative column advances, the
+       journal legs land, and a partial refund leaves the earning usable for
+       the next one. Those are the parts a pure test cannot see.
+
+       All of it inside the throwaway schema, on the proved client.
+       ===================================================================== */
+    {
+      const earnings = loadTs("src/lib/server/creator-earnings.ts");
+      const policy = loadTs("src/lib/server/creator-earnings-policy.ts");
+
+      /** A creator and an earning, straight into the throwaway schema. */
+      const seedEarning = async (uid, paymentId, grossMinor, opts = {}) => {
+        const b = policy.computeEarningsBreakdown(BigInt(grossMinor), "usd");
+        await scoped.unsafe(
+          // Only the primary key: the rest of this table is irrelevant here and
+          // its columns are not what this suite is testing.
+          `insert into ${SCRATCH}.users (firebase_uid)
+           values ('${uid}')
+           on conflict (firebase_uid) do nothing`,
+        );
+        await scoped.unsafe(
+          `insert into ${SCRATCH}.creator_earnings
+             (firebase_uid, environment, whop_payment_id, gross_amount_minor,
+              platform_fee_minor, net_amount_minor, currency, platform_fee_bps,
+              status, hold_until, payment_settled_at)
+           values ('${uid}','sandbox','${paymentId}',${b.grossAmountMinor},
+                   ${b.platformFeeMinor},${b.netAmountMinor},'usd',${b.platformFeeBps},
+                   '${opts.status ?? "available"}', now() - interval '1 day', now())`,
+        );
+        return b;
+      };
+
+      const readEarning = async (paymentId) => {
+        const [row] = await scoped.unsafe(
+          `select status, refunded_gross_minor::text as refunded,
+                  net_amount_minor::text as net, gross_amount_minor::text as gross
+             from ${SCRATCH}.creator_earnings where whop_payment_id = '${paymentId}'`,
+        );
+        return row;
+      };
+
+      /** Signed sum of one account's legs, restricted to one counterparty. */
+      const legSum = async (account, counterparty) => {
+        const [r] = await scoped.unsafe(
+          `select coalesce(sum(amount_minor),0)::text as s
+             from ${SCRATCH}.accounting_entries
+            where account = '${account}'
+              and counterparty_id = '${counterparty}'`,
+        );
+        return BigInt(r.s);
+      };
+
+      /* --- $30 + $70 equals one $100 ---------------------------------- */
+      {
+        const uidSplit = "t17_split";
+        await seedEarning(uidSplit, "pay_t17_split", 10000);
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_split", refundId: "rf_t17_a",
+          refundAmountMinor: BigInt(3000), currency: "usd", environment: "sandbox",
+        });
+
+        let row = await readEarning("pay_t17_split");
+        check("T17: a partial refund advances the cumulative column",
+          row.refunded === "3000", `refunded=${row.refunded}`);
+        check("T17: and leaves the earning ACTIVE, not reversed",
+          row.status === "available", `status=${row.status}`);
+
+        const creatorAfter1 = await legSum("creator_payable", uidSplit);
+        const feeAfter1 = await legSum("platform_revenue", "cliprewards");
+        check("T17: the first refund returns 30% of the creator share",
+          creatorAfter1 === BigInt(2400), `${creatorAfter1}`);
+        check("T17: and 30% of the percentage fee",
+          feeAfter1 === BigInt(600), `${feeAfter1}`);
+
+        // THE SECOND REFUND MUST STILL FIND THE EARNING. This is the defect.
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_split", refundId: "rf_t17_b",
+          refundAmountMinor: BigInt(7000), currency: "usd", environment: "sandbox",
+        });
+
+        row = await readEarning("pay_t17_split");
+        check("T17: the second refund IS processed (the P0 this task fixed)",
+          row.refunded === "10000", `refunded=${row.refunded}`);
+        check("T17: and full cumulative refund marks the earning reversed",
+          row.status === "reversed", `status=${row.status}`);
+
+        const creatorTotal = await legSum("creator_payable", uidSplit);
+        const feeTotal = await legSum("platform_revenue", "cliprewards");
+        check("T17: 30+70 returns the whole creator share, exactly",
+          creatorTotal === BigInt(8000), `${creatorTotal}`);
+        check("T17: and the whole percentage fee, exactly",
+          feeTotal - feeAfter1 === BigInt(1400) && feeTotal === BigInt(2000), `${feeTotal}`);
+
+        /* ONE $100 REFUND, for comparison. A second creator so the sums are
+         * independent, and the creator legs are read per counterparty. */
+        const uidOnce = "t17_once";
+        await seedEarning(uidOnce, "pay_t17_once", 10000);
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_once", refundId: "rf_t17_once",
+          refundAmountMinor: BigInt(10000), currency: "usd", environment: "sandbox",
+        });
+        const creatorOnce = await legSum("creator_payable", uidOnce);
+        check("T17: 30+70 equals one $100 refund, on the creator leg",
+          creatorOnce === creatorTotal, `${creatorOnce} vs ${creatorTotal}`);
+        check("T17: and that earning is reversed too",
+          (await readEarning("pay_t17_once")).status === "reversed");
+      }
+
+      /* --- 333 + 333 + 333 + 1, no rounding drift --------------------- */
+      {
+        const uid = "t17_drift";
+        const b = await seedEarning(uid, "pay_t17_drift", 1000);
+        let n = 0;
+        for (const amt of [333, 333, 333, 1]) {
+          n += 1;
+          await earnings.reverseForRefund({
+            whopPaymentId: "pay_t17_drift", refundId: `rf_t17_d${n}`,
+            refundAmountMinor: BigInt(amt), currency: "usd", environment: "sandbox",
+          });
+        }
+        const row = await readEarning("pay_t17_drift");
+        check("T17: four partial refunds reach the full gross",
+          row.refunded === "1000", `refunded=${row.refunded}`);
+        check("T17: and the earning ends reversed", row.status === "reversed");
+
+        const creator = await legSum("creator_payable", uid);
+        check("T17: no drift — the whole creator net is returned",
+          creator === b.netAmountMinor, `${creator} vs ${b.netAmountMinor}`);
+      }
+
+      /* --- a replayed refund id cannot double-reverse ----------------- */
+      {
+        const uid = "t17_replay";
+        await seedEarning(uid, "pay_t17_replay", 10000);
+        const once = {
+          whopPaymentId: "pay_t17_replay", refundId: "rf_t17_replay",
+          refundAmountMinor: BigInt(4000), currency: "usd", environment: "sandbox",
+        };
+        await earnings.reverseForRefund(once);
+        const after1 = await legSum("creator_payable", uid);
+        await earnings.reverseForRefund(once);
+        const after2 = await legSum("creator_payable", uid);
+        check("T17: replaying the same refund id returns nothing further",
+          after1 === after2 && after1 === BigInt(3200), `${after1} -> ${after2}`);
+        check("T17: and the cumulative column does not advance twice",
+          (await readEarning("pay_t17_replay")).refunded === "4000");
+      }
+
+      /* --- cumulative refund cannot exceed gross ---------------------- */
+      {
+        const uid = "t17_over";
+        await seedEarning(uid, "pay_t17_over", 10000);
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_over", refundId: "rf_t17_over",
+          refundAmountMinor: BigInt(999999), currency: "usd", environment: "sandbox",
+        });
+        const row = await readEarning("pay_t17_over");
+        check("T17: an over-large refund is capped at the earning's gross",
+          row.refunded === "10000", `refunded=${row.refunded}`);
+        const creator = await legSum("creator_payable", uid);
+        check("T17: and returns at most the creator share that was created",
+          creator === BigInt(8000), `${creator}`);
+      }
+
+      /* --- dispute after a partial refund returns only the remainder -- */
+      {
+        const uid = "t17_disp";
+        await seedEarning(uid, "pay_t17_disp", 10000);
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_disp", refundId: "rf_t17_disp",
+          refundAmountMinor: BigInt(3000), currency: "usd", environment: "sandbox",
+        });
+        const afterRefund = await legSum("creator_payable", uid);
+
+        await earnings.reverseForDispute({
+          whopPaymentId: "pay_t17_disp", whopDisputeId: "dp_t17",
+          currency: "usd", environment: "sandbox",
+        });
+        const afterDispute = await legSum("creator_payable", uid);
+
+        check("T17: a dispute after a partial refund returns only the remainder",
+          afterDispute - afterRefund === BigInt(5600), `${afterDispute - afterRefund}`);
+        check("T17: and never more in total than was created",
+          afterDispute === BigInt(8000), `${afterDispute}`);
+        const row = await readEarning("pay_t17_disp");
+        check("T17: the lost dispute marks the earning reversed",
+          row.status === "reversed");
+        check("T17: and records it as fully unwound, so a later refund cannot double-reverse",
+          row.refunded === "10000", `refunded=${row.refunded}`);
+
+        // A refund arriving AFTER the dispute must change nothing.
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_disp", refundId: "rf_t17_late",
+          refundAmountMinor: BigInt(7000), currency: "usd", environment: "sandbox",
+        });
+        check("T17: a refund after a full dispute reverses nothing further",
+          (await legSum("creator_payable", uid)) === afterDispute);
+      }
+
+      /* --- a transferred earning is never clawed back ------------------ */
+      {
+        const uid = "t17_xfer";
+        await seedEarning(uid, "pay_t17_xfer", 10000, { status: "transferred" });
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_xfer", refundId: "rf_t17_xfer",
+          refundAmountMinor: BigInt(10000), currency: "usd", environment: "sandbox",
+        });
+        const row = await readEarning("pay_t17_xfer");
+        check("T17: a transferred earning is not reversed by a refund",
+          row.status === "transferred" && row.refunded === "0",
+          `status=${row.status} refunded=${row.refunded}`);
+        check("T17: and no creator leg is posted for it",
+          (await legSum("creator_payable", uid)) === BigInt(0));
+      }
+
+      /* --- the fixed processing fee is retained ------------------------ */
+      {
+        /* PLATFORM_PROCESSING_FEE_MINOR is read at call time, so it is set for
+         * the duration of this case and restored after. The policy keeps the
+         * fixed fee even on a full refund; what must hold is that the creator
+         * share returned equals the share created — no over-clawback. */
+        const prev = process.env.PLATFORM_PROCESSING_FEE_MINOR;
+        process.env.PLATFORM_PROCESSING_FEE_MINOR = "30";
+        try {
+          const uid = "t17_fixed";
+          const b = await seedEarning(uid, "pay_t17_fixed", 10000);
+          check("T17: the fixed fee is part of the stored platform fee",
+            b.platformFeeMinor === BigInt(2030) && b.netAmountMinor === BigInt(7970),
+            `fee=${b.platformFeeMinor} net=${b.netAmountMinor}`);
+
+          const feeBefore = await legSum("platform_revenue", "cliprewards");
+          await earnings.reverseForRefund({
+            whopPaymentId: "pay_t17_fixed", refundId: "rf_t17_fixed",
+            refundAmountMinor: BigInt(10000), currency: "usd", environment: "sandbox",
+          });
+          const creator = await legSum("creator_payable", uid);
+          const feeReturned = (await legSum("platform_revenue", "cliprewards")) - feeBefore;
+
+          check("T17: a full refund returns exactly the creator share created",
+            creator === BigInt(7970), `${creator}`);
+          check("T17: NO over-clawback with a fixed fee", creator <= b.netAmountMinor);
+          check("T17: the percentage fee is returned in full", feeReturned === BigInt(2000));
+          check("T17: but the fixed processing fee is RETAINED",
+            b.platformFeeMinor - feeReturned === BigInt(30), `${b.platformFeeMinor - feeReturned}`);
+        } finally {
+          if (prev === undefined) delete process.env.PLATFORM_PROCESSING_FEE_MINOR;
+          else process.env.PLATFORM_PROCESSING_FEE_MINOR = prev;
+        }
+      }
+
+      /* --- environment isolation -------------------------------------- */
+      {
+        /* A production earning under the same payment id must be untouched by a
+         * sandbox refund. The reversal reads `getWhopEnvironment()`, which is
+         * sandbox for this run. */
+        const uid = "t17_env";
+        await scoped.unsafe(
+          // Only the primary key: the rest of this table is irrelevant here and
+          // its columns are not what this suite is testing.
+          `insert into ${SCRATCH}.users (firebase_uid)
+           values ('${uid}')
+           on conflict (firebase_uid) do nothing`,
+        );
+        await scoped.unsafe(
+          `insert into ${SCRATCH}.creator_earnings
+             (firebase_uid, environment, whop_payment_id, gross_amount_minor,
+              platform_fee_minor, net_amount_minor, currency, platform_fee_bps,
+              status, hold_until, payment_settled_at)
+           values ('${uid}','production','pay_t17_env',10000,2000,8000,'usd',2000,
+                   'available', now() - interval '1 day', now())`,
+        );
+        await earnings.reverseForRefund({
+          whopPaymentId: "pay_t17_env", refundId: "rf_t17_env",
+          refundAmountMinor: BigInt(10000), currency: "usd", environment: "sandbox",
+        });
+        const [row] = await scoped.unsafe(
+          `select status, refunded_gross_minor::text as refunded
+             from ${SCRATCH}.creator_earnings
+            where whop_payment_id = 'pay_t17_env' and environment = 'production'`,
+        );
+        check("T17: a sandbox refund does not touch a production earning",
+          row.status === "available" && row.refunded === "0",
+          `status=${row.status} refunded=${row.refunded}`);
+      }
+    }
+
   } finally {
     // The exact set of synthetic refund ids this suite invented, read out of
     // the throwaway schema BEFORE it is dropped. The tail then proves not one
@@ -1972,11 +2363,52 @@ function sourceInvariants() {
       return (scoped?.length ?? 0) >= 2 && !/status, "transferred"/.test(body);
     })(),
   );
+  /*
+   * RE-BASELINED, AND THE REASON MATTERS.
+   *
+   * This asserted that `creator-withdrawals.ts` filtered earnings on
+   * `frozenByDispute = false`, so a withdrawal could not reserve money a
+   * reversal had claimed. That was the right property while a withdrawal was
+   * backed by earning rows.
+   *
+   * Task #15 removed earning rows from the withdrawal path entirely: a
+   * withdrawal now moves the creator's OWN Whop balance to their own external
+   * destination, capped by the provider's withdrawable balance. There is no
+   * earnings scan left to filter, so the old assertion tests for the absence of
+   * something that was deliberately deleted — and `creator-withdrawals.ts`
+   * contains no reference to `creatorEarnings` at all.
+   *
+   * THE PROPERTY IS STILL TRUE, BY A STRONGER MECHANISM, and that is what is
+   * asserted now:
+   *
+   *   - A refund or lost dispute reverses `held`/`available` earnings only, so
+   *     it can never claw back money a payout already moved.
+   *   - A Task #13 transfer — the step that funds the creator's Whop balance —
+   *     reserves under a per-creator row lock against the canonical
+   *     `creator_payable` ledger, which a reversal has already reduced. So a
+   *     transfer cannot hand over money a reversal claimed, and the withdrawal
+   *     downstream of it is spending the creator's own funds.
+   */
+  const withdrawalSource = readFileSync("src/lib/server/creator-withdrawals.ts", "utf8");
+  const withdrawalCode = withdrawalSource
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
   check(
-    "and the withdrawal path reserves only earnings a reversal has not claimed",
-    /eq\(schema\.creatorEarnings\.frozenByDispute, false\)/.test(
-      readFileSync("src/lib/server/creator-withdrawals.ts", "utf8"),
-    ),
+    "the withdrawal path no longer reserves earnings at all (Task #15)",
+    !/creatorEarnings/.test(withdrawalCode) && !/frozenByDispute/.test(withdrawalCode),
+  );
+  check(
+    "it reserves against the canonical payable under a per-creator lock instead",
+    /reserveFromPosition|readWithdrawableBalance/.test(withdrawalCode),
+  );
+  check(
+    "and a reversal still cannot reach an earning a payout already moved",
+    (() => {
+      const body = earningsSource.slice(
+        earningsSource.indexOf("export async function reverseForRefund"),
+      );
+      return !/status, "transferred"/.test(body);
+    })(),
   );
 
   // THE ORIGINAL PAYMENT IS NEVER MUTATED.

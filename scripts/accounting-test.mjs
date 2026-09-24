@@ -416,9 +416,48 @@ check("and a gated event that is not `verified` never reaches its handler",
       gate.includes('ownership.kind !== "verified"');
   })());
 check("nothing anywhere writes financial_ledger", (() => {
-  const { execSync } = require("node:child_process");
-  const out = execSync("git grep -l \"insert(financialLedger)\" -- src || true", { encoding: "utf8" }).trim();
-  return out === "";
+  /*
+   * NO SHELL, AND THE EXIT CODE READ EXPLICITLY.
+   *
+   * This was `execSync("git grep ... || true")`. `|| true` is a POSIX idiom:
+   * cmd.exe parses `||` but has no `true` binary, so on Windows the whole
+   * suite aborted with "'true' is not recognized" before Part B ever ran.
+   *
+   * `spawnSync` without `shell: true` invokes git directly, so there is no
+   * shell to have an opinion about operators or quoting on any platform.
+   *
+   * WHAT `|| true` WAS FOR, kept deliberately: `git grep` exits 1 when it
+   * selects no lines, and 1 is the ANSWER HERE — no file writes
+   * financial_ledger. Only a status above 1 is a real failure, and that now
+   * throws instead of being swallowed.
+   */
+  const { spawnSync } = require("node:child_process");
+  const r = spawnSync("git", ["grep", "-l", "insert(financialLedger)", "--", "src"], {
+    encoding: "utf8",
+  });
+
+  if (r.error) throw r.error;
+  if (typeof r.status !== "number" || r.status > 1) {
+    throw new Error(
+      `git grep failed (status ${r.status}): ${String(r.stderr ?? "").trim().slice(0, 200)}`,
+    );
+  }
+
+  /*
+   * THE PATHSPEC IS VERIFIED, which the old form could not do.
+   *
+   * git grep also exits 1 for a pathspec that matches nothing at all, so a
+   * renamed or moved `src` would have made this assertion pass vacuously —
+   * reporting "nothing writes financial_ledger" because nothing was searched.
+   * Requiring the tree to contain tracked files under `src` keeps the check
+   * honest about having actually looked.
+   */
+  const probe = spawnSync("git", ["ls-files", "--", "src"], { encoding: "utf8" });
+  if (probe.status !== 0 || String(probe.stdout ?? "").trim() === "") {
+    throw new Error("git grep searched nothing: no tracked files under src");
+  }
+
+  return String(r.stdout ?? "").trim() === "";
 })());
 
 console.log("\n--- C. settling twice must not rewrite history ---");
@@ -467,6 +506,25 @@ async function databaseInvariants() {
   const db = postgres(process.env.DATABASE_URL, { max: 1, prepare: false, onnotice: () => {} });
 
   const before = await db`select count(*)::int as n from drizzle.__drizzle_migrations`;
+
+  /*
+   * THE OAUTH BASELINE, CAPTURED RATHER THAN ASSUMED.
+   *
+   * Read here, while the session is still on `public` and before the throwaway
+   * schema exists, so these are the real tables as they stood before this suite
+   * did anything. Compared against the same counts in the `finally` block.
+   *
+   * WHY NOT A FIXED NUMBER. The check below used to assert both tables held
+   * ZERO rows. That was true when it was written and stopped being true the
+   * moment a creator genuinely connected their Whop account — after which the
+   * suite reported a failure for real production data sitting exactly where it
+   * belongs. The invariant was never "these tables are empty"; it is "this
+   * suite did not touch them", which only a before/after comparison can state.
+   * Its sibling checks already work this way.
+   */
+  const beforeOauth = await db`
+    select (select count(*)::int from public.whop_connections) as conns,
+           (select count(*)::int from public.whop_oauth_states) as states`;
 
   try {
     await db.unsafe(`drop schema if exists ${SCRATCH} cascade`);
@@ -795,9 +853,16 @@ async function databaseInvariants() {
     check("financial_ledger is still 0", ledger.n === 0);
     const [orders] = await db`select count(*)::int as n from payment_orders`;
     check("payment_orders is unchanged", orders.n === 3, `${orders.n} orders`);
-    const [conns] = await db`select count(*)::int as n from whop_connections`;
-    const [states] = await db`select count(*)::int as n from whop_oauth_states`;
-    check("the OAuth tables are untouched", conns.n === 0 && states.n === 0);
+    const [afterOauth] = await db`
+      select (select count(*)::int from public.whop_connections) as conns,
+             (select count(*)::int from public.whop_oauth_states) as states`;
+    check(
+      "the OAuth tables are untouched by this suite",
+      afterOauth.conns === beforeOauth[0].conns &&
+        afterOauth.states === beforeOauth[0].states,
+      `connections ${beforeOauth[0].conns} -> ${afterOauth.conns}, ` +
+        `states ${beforeOauth[0].states} -> ${afterOauth.states}`,
+    );
     const [scratchGone] = await db`
       select count(*)::int as n from information_schema.schemata where schema_name = ${SCRATCH}`;
     check("the throwaway schema is gone", scratchGone.n === 0);

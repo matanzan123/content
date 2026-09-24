@@ -27,6 +27,13 @@ import "server-only";
      Policy: the percentage portion of the platform fee is returned pro-rata.
              The fixed processing fee (if any) is kept even on refund.
              computeRefundSplitReversal() encodes this rule.
+     Cumulative: one payment may be refunded MANY times. Each posting is the
+             DELTA between the cumulative target at the new refunded gross and
+             the target at the previous one — never the refund taken on its
+             own. Per-refund arithmetic drifts: 1000 at 20% refunded
+             333+333+333+1 returns 198 of a 200 fee taken independently, and
+             exactly 200 taken cumulatively. computeCumulativeRefundDelta()
+             encodes this, over the same one-shot formula.
 
    HOLD PERIOD
      Duration: CREATOR_HOLD_DAYS env var, default 7 days from settlement
@@ -205,6 +212,134 @@ export function computeRefundSplitReversal(
     platformFeeToReturn,
     totalToReturn: creatorShareToReturn + platformFeeToReturn,
   };
+}
+
+/* -------------------------------------------------------------------------
+   Cumulative refund model — many refunds against one earning
+   ------------------------------------------------------------------------- */
+
+/**
+ * The stored economics of one earning, as persisted on its row.
+ *
+ * Everything the cumulative model needs is already on `creator_earnings`, which
+ * is why ONE new column carries the whole representation: the targets below are
+ * pure functions of the cumulative refunded gross plus these fields.
+ */
+export type StoredEarningEconomics = {
+  grossAmountMinor: bigint;
+  netAmountMinor: bigint;
+  /** The rate captured at creation, so a later rate change cannot rewrite history. */
+  platformFeeBps: number;
+};
+
+/**
+ * The percentage fee as it was taken, rebuilt from the stored rate.
+ *
+ * NOT read from `platform_fee_minor`, which is percentage + fixed processing
+ * fee combined. Only the percentage portion is ever returned, so it has to be
+ * separated — and rebuilding it from the captured `platform_fee_bps` is
+ * historically correct even after the env var changes.
+ */
+export function reconstructPercentageFee(economics: StoredEarningEconomics): bigint {
+  return (economics.grossAmountMinor * BigInt(economics.platformFeeBps)) / BigInt(10_000);
+}
+
+/**
+ * The CUMULATIVE amounts that should have been returned once `refundedGross`
+ * of this earning's gross has been refunded in total.
+ *
+ * Expressed through `computeRefundSplitReversal` deliberately: that function
+ * already defines the policy at any given refunded amount, so there is exactly
+ * one fee formula in the codebase and this is a different question asked of it,
+ * not a second answer.
+ */
+export function cumulativeRefundTarget(
+  economics: StoredEarningEconomics,
+  refundedGross: bigint,
+): RefundSplitReversal {
+  return computeRefundSplitReversal(
+    {
+      grossAmountMinor: economics.grossAmountMinor,
+      netAmountMinor: economics.netAmountMinor,
+      percentageFeeMinor: reconstructPercentageFee(economics),
+    },
+    refundedGross,
+  );
+}
+
+/**
+ * Caps a new cumulative refunded gross at the earning's own gross.
+ *
+ * A provider can legitimately report refunds that, summed, exceed what this
+ * earning represents — a payment split across several creators, or a duplicate
+ * delivery counted twice upstream. Capping means the reversal can never return
+ * more than was created, which is the invariant that matters; the excess is
+ * simply not this earning's to give back.
+ */
+export function capRefundedGross(
+  economics: StoredEarningEconomics,
+  previousRefundedGross: bigint,
+  incomingRefundGross: bigint,
+): bigint {
+  const raw = previousRefundedGross + (incomingRefundGross > BigInt(0) ? incomingRefundGross : BigInt(0));
+  return raw > economics.grossAmountMinor ? economics.grossAmountMinor : raw;
+}
+
+/**
+ * THE AMOUNTS TO POST for one refund, as a delta between cumulative targets.
+ *
+ * WHY A DELTA AND NOT THE REFUND'S OWN SHARE. Both targets floor a
+ * proportional division, and flooring each refund independently loses a
+ * fraction every time. Taking the difference between cumulative targets makes
+ * the postings telescope: whatever the sequence of partial refunds, the total
+ * returned equals the target at the final refunded gross. So 30 then 70
+ * returns exactly what 100 in one go returns.
+ *
+ * Both components are monotonic non-decreasing in the refunded gross, so a
+ * delta is never negative and no posting can claw back more than the previous
+ * ones left outstanding.
+ */
+export function computeCumulativeRefundDelta(
+  economics: StoredEarningEconomics,
+  previousRefundedGross: bigint,
+  newRefundedGross: bigint,
+): RefundSplitReversal {
+  const target = cumulativeRefundTarget(economics, newRefundedGross);
+  const prior = cumulativeRefundTarget(economics, previousRefundedGross);
+
+  const creatorShareToReturn = target.creatorShareToReturn - prior.creatorShareToReturn;
+  const platformFeeToReturn = target.platformFeeToReturn - prior.platformFeeToReturn;
+
+  return {
+    creatorShareToReturn,
+    platformFeeToReturn,
+    totalToReturn: creatorShareToReturn + platformFeeToReturn,
+  };
+}
+
+/**
+ * What the creator is still owed from this earning after cumulative refunds.
+ *
+ * The figure every row-side aggregate must use instead of `net_amount_minor`.
+ * Treating a partially refunded earning as still owing its full original net
+ * overstates the creator's position and puts the row totals permanently at
+ * odds with the ledger.
+ */
+export function remainingCreatorNet(
+  economics: StoredEarningEconomics,
+  refundedGross: bigint,
+): bigint {
+  const returned = cumulativeRefundTarget(economics, refundedGross).creatorShareToReturn;
+  const remaining = economics.netAmountMinor - returned;
+  return remaining > BigInt(0) ? remaining : BigInt(0);
+}
+
+/** True once the whole earning has been refunded and nothing is left to unwind. */
+export function isFullyRefunded(
+  economics: StoredEarningEconomics,
+  refundedGross: bigint,
+): boolean {
+  return refundedGross >= economics.grossAmountMinor;
 }
 
 /* -------------------------------------------------------------------------
