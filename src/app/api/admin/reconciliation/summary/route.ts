@@ -52,6 +52,23 @@ export async function GET(request: Request) {
           transaction_id: c.transactionId,
           gross_minor: c.grossMinor.toString(),
           currency: c.currency,
+          // The drift itself. Minor units as STRINGS: these are bigints, and a
+          // JSON number would silently lose precision on a large total.
+          posted_fee_minor: c.postedFeeMinor.toString(),
+          actual_fee_minor: c.actualFeeMinor.toString(),
+          delta_minor: c.deltaMinor.toString(),
+          // A hint about why this drifted, not a cause. Null for settlements
+          // predating the flag.
+          fees_were_actual_at_settlement: c.feesWereActualAtSettlement,
+        })),
+        /* CANDIDATES THE PROVIDER COULD NOT BE ASKED ABOUT, surfaced rather
+         * than omitted. A provider outage must not read to an operator as
+         * "no drift found". */
+        unresolved: feeDrift.unresolved.map((u) => ({
+          payment_id: u.paymentId,
+          transaction_id: u.transactionId,
+          reason: u.reason,
+          detail: u.detail ?? null,
         })),
       },
     };

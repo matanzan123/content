@@ -124,5 +124,22 @@ export async function withAdminApi<T>(
   }
 
   const body = await handler(check.admin);
+
+  /* A HANDLER MAY ANSWER FOR ITSELF.
+   *
+   * Several admin handlers already return a real `Response` — a 429 from
+   * `rateLimitResponse()`, a 400 for an unusable body — and this wrapper used to
+   * hand that object to `Response.json`, which serialises it to `{}` and sends
+   * it with status 200. A rate limit that answers "200 OK, here is nothing" is
+   * no rate limit at all, and a client cannot tell the refusal from a success.
+   *
+   * So a `Response` passes through untouched, carrying its own status, headers
+   * (`retry-after` among them) and body. Anything else keeps the old
+   * behaviour exactly: JSON, status 200, no-store.
+   *
+   * This changes no authorization decision — the checks above have already run
+   * and already returned on failure. */
+  if (body instanceof Response) return body;
+
   return Response.json(body, { headers: { "cache-control": "no-store" } });
 }

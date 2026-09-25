@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import {
   accountingEntries,
@@ -12,6 +12,9 @@ import {
   resolutionCenterCases,
 } from "@/lib/db/schema";
 import { economicKey } from "./accounts";
+// The READ-ONLY provider comparison, shared with `reconcileProviderFees` so the
+// drift detector and the corrector cannot disagree about what drifted.
+import { inspectProviderFeeDrift } from "./whop-fee-reconciliation";
 import { fetchSettlementFacts } from "./whop-payment-posting";
 import { retrievePaymentPhase } from "../whop-resources";
 import { classifyProviderStatus, isAbsorbing, targetOrderStatus } from "../payment-lifecycle";
@@ -19,7 +22,7 @@ import { classifyRefundStatus } from "../refund-lifecycle";
 import { listRefundsForPayment } from "../whop-refunds";
 import { listRefundsForPaymentLocal } from "../payment-refunds";
 import { refundableBalance } from "../whop-refund-mapping";
-import { getWhopEnvironment, getWhopPaymentsClient } from "../whop-payments";
+import { describeWhopError, getWhopEnvironment, getWhopPaymentsClient } from "../whop-payments";
 import { listDisputesForAccount, listLedgerMovementsForPayment } from "../whop-disputes";
 import { listDisputesForPaymentLocal } from "../payment-disputes";
 import {
@@ -1784,13 +1787,39 @@ export async function reconcilePayoutsAgainstProvider(
    PROVIDER FEE DRIFT SCAN.
 
    This is the READ-ONLY counterpart of `reconcileProviderFees` in
-   `whop-fee-reconciliation.ts`. It does not correct anything; it identifies
-   which payment settlements were posted with `fees_are_actual: false` — meaning
-   Whop had not yet reported any fee lines at settlement time — and flags them
-   for human review or for a fee-reconciliation pass.
+   `whop-fee-reconciliation.ts`. It does not correct anything; it reports which
+   settlements have drifted from the provider's own fee total.
 
-   The flag is stored in the transaction's `metadata.fees_are_actual` field,
-   which `buildSettlementPosting` now sets on every payment settlement.
+   IT NO LONGER FILTERS ON `fees_are_actual`, AND THAT WAS THE DEFECT.
+
+   The scan used to select settlements whose `metadata.fees_are_actual` was the
+   string `'false'` and report every one as a drift candidate. Three things were
+   wrong with that:
+
+     1. IT MISSED EVERY LATER FEE CHANGE. A payment that settled WITH fees has
+        `fees_are_actual: true` forever — the flag records what was true AT
+        settlement and is never updated. So a fee revised afterwards, revised
+        again, revised down, or revised back to a figure already seen was never
+        selected at all. Those are the cases `reconcileProviderFees` exists to
+        correct, and nothing could find them.
+
+     2. IT MISSED LEGACY SETTLEMENTS. The predicate matched the literal
+        `'false'`, so settlements posted before the field existed — where it is
+        NULL — were invisible.
+
+     3. IT WAS NOT ENVIRONMENT-SCOPED. A sandbox pass would have reported
+        production settlements and vice versa.
+
+   And it reported CANDIDATES, not drift: a settlement flagged `false` because
+   the payment genuinely had zero fees was indistinguishable from one whose fees
+   arrived late, because nothing ever asked the provider.
+
+   WHAT IT DOES NOW. It takes a bounded, deterministically ordered page of
+   settlements for THIS environment, asks the provider what each payment's fees
+   actually are through the shared `inspectProviderFeeDrift`, and reports only
+   those where the provider disagrees with the journal. `fees_are_actual` is
+   still surfaced on each finding as a hint about WHY a settlement drifted, but
+   it decides nothing.
    ========================================================================== */
 
 export type FeeDriftFinding = {
@@ -1798,49 +1827,145 @@ export type FeeDriftFinding = {
   transactionId: string;
   grossMinor: bigint;
   currency: string;
+  /** Net `provider_fee_expense` the journal holds for this payment. */
+  postedFeeMinor: bigint;
+  /** The provider's own current fee total. */
+  actualFeeMinor: bigint;
+  /** `actual - posted`. Non-zero by definition for a reported finding. */
+  deltaMinor: bigint;
+  /**
+   * What `fees_are_actual` said at settlement. A HINT ONLY — it explains why a
+   * settlement is likely to have drifted and decides nothing. `null` means the
+   * settlement predates the field.
+   */
+  feesWereActualAtSettlement: boolean | null;
+};
+
+/** A candidate the provider could not be asked about. Never silently dropped. */
+export type FeeDriftUnresolved = {
+  paymentId: string;
+  transactionId: string;
+  reason: string;
+  detail?: string;
 };
 
 export type FeeDriftReport = {
   configured: boolean;
   settlementsScanned: number;
-  /** Settlements posted without actual fee data — candidates for `reconcileProviderFees`. */
+  /** Settlements where the provider's fee total differs from the journal's. */
   driftCandidates: FeeDriftFinding[];
+  /**
+   * Candidates whose provider lookup failed. Reported rather than dropped: a
+   * provider outage must not read as "no drift".
+   */
+  unresolved: FeeDriftUnresolved[];
 };
 
 /**
- * Scans payment settlements for those posted without confirmed fee data.
+ * The largest page of settlements one scan will examine.
  *
- * `fees_are_actual: false` in the metadata means either:
- *   (a) The payment genuinely had no fees — unlikely for most payment methods.
- *   (b) Whop had not yet reported fees when `payment.succeeded` fired.
+ * WHY A BOUNDED PAGE AND NOT A TIME WINDOW. Each candidate costs one
+ * `listFees` call, so the only thing that matters is how many candidates a run
+ * can produce. "The latest N settlements" bounds that by construction: a run
+ * makes at most N provider calls no matter how much history exists or how busy
+ * the period was. A time window ("everything from the last 30 days") bounds
+ * nothing — in a high-volume week it is unbounded in exactly the dimension that
+ * costs — and it needs an arbitrary constant to justify. This needs no constant
+ * about time at all.
  *
- * For (b), calling `reconcileProviderFees` later will post the missing delta.
- * This function names the candidates; the operator or a scheduler decides when
- * and whether to run the correction.
+ * THE TRADE, STATED PLAINLY. A single run only looks at the newest N
+ * settlements, so an older drifted settlement is not examined until an operator
+ * pages back to it with `offset`. That is acceptable because fee revisions
+ * cluster near settlement, and because paging is available rather than
+ * theoretical. It is eventual reconciliation, and recency-biased on purpose.
+ *
+ * Exported so the admin repair runner clamps to the SAME maximum rather than
+ * declaring a second one that could drift from this.
  */
-export async function reconcileFeeDrift(limit = 500): Promise<FeeDriftReport> {
+export const FEE_DRIFT_MAX_PAGE = 200;
+
+/** One settlement that may have drifted. No provider call has been made yet. */
+export type FeeDriftCandidate = {
+  transactionId: string;
+  paymentId: string;
+  currency: string;
+  grossMinor: bigint;
+  /** `fees_are_actual` at settlement. A hint only; `null` predates the field. */
+  feesWereActualAtSettlement: boolean | null;
+};
+
+export type FeeDriftCandidatePage = {
+  configured: boolean;
+  candidates: FeeDriftCandidate[];
+};
+
+/**
+ * Selects a bounded, environment-scoped page of settlements to examine.
+ *
+ * SHARED ON PURPOSE. Both the read-only drift scan and the admin repair runner
+ * need exactly this set, and a second copy of the predicate is how a detector
+ * and a repairer come to disagree about which payments are even in scope. The
+ * provider is not contacted here at all — this only decides WHICH payments to
+ * ask about, so a caller can then ask once, in whichever mode it needs.
+ *
+ * THERE IS NO `fees_are_actual` PREDICATE, deliberately. That flag records what
+ * was true AT settlement and is never updated, so filtering on it can only find
+ * fees that were missing originally — never fees that changed afterwards, which
+ * is most of what this exists for.
+ *
+ * ORDERED NEWEST FIRST with the transaction id as a tiebreaker, so the order is
+ * TOTAL: `posted_at` alone is not unique, and without a tiebreaker two rows
+ * sharing a timestamp could swap between pages and a candidate be seen twice or
+ * skipped.
+ *
+ * PAGING IS LIMIT/OFFSET AND IS NOT SNAPSHOT-SAFE. A settlement posted between
+ * two pages shifts the window, so a concurrent insert can cause a row to be
+ * seen twice or missed across pages. Acceptable for an operator-driven pass
+ * over recent history — every operation it feeds is idempotent, so seeing a row
+ * twice costs nothing — but it is not a guarantee, and a scheduled crawl over
+ * deep history would want a cursor instead.
+ */
+export async function selectFeeDriftCandidates(
+  limit = FEE_DRIFT_MAX_PAGE,
+  offset = 0,
+): Promise<FeeDriftCandidatePage> {
   const db = getDb();
-  if (!db) return { configured: false, settlementsScanned: 0, driftCandidates: [] };
+  if (!db) return { configured: false, candidates: [] };
+
+  /* ENVIRONMENT-SCOPED, like every other sweep in this file. A scan that mixed
+   * environments would compare this environment's provider against the other
+   * environment's books. Fails closed when it cannot be resolved: an unscoped
+   * scan is worse than no scan. */
+  const environment = getWhopEnvironment();
+  if (!environment) return { configured: false, candidates: [] };
+
+  const pageSize = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, FEE_DRIFT_MAX_PAGE)
+    : FEE_DRIFT_MAX_PAGE;
+  const pageOffset = Number.isInteger(offset) && offset > 0 ? offset : 0;
 
   const settlements = await db
     .select({
       transactionId: accountingTransactions.transactionId,
       providerResourceId: accountingTransactions.providerResourceId,
       currency: accountingTransactions.currency,
+      feesWereActual: sql<string | null>`${accountingTransactions.metadata}->>'fees_are_actual'`,
     })
     .from(accountingTransactions)
     .where(
       and(
         eq(accountingTransactions.economicEvent, "payment_settled"),
-        sql`(${accountingTransactions.metadata}->>'fees_are_actual')::text = 'false'`,
+        eq(accountingTransactions.provider, "whop"),
+        eq(accountingTransactions.environment, environment),
       ),
     )
-    .limit(limit);
+    .orderBy(desc(accountingTransactions.postedAt), desc(accountingTransactions.transactionId))
+    .limit(pageSize)
+    .offset(pageOffset);
 
-  if (settlements.length === 0) {
-    return { configured: true, settlementsScanned: 0, driftCandidates: [] };
-  }
+  if (settlements.length === 0) return { configured: true, candidates: [] };
 
+  // Gross per settlement, for reporting only. One grouped query, not one per row.
   const txnIds = settlements.map((s) => s.transactionId);
   const grossRows = await db
     .select({
@@ -1860,13 +1985,100 @@ export async function reconcileFeeDrift(limit = 500): Promise<FeeDriftReport> {
 
   return {
     configured: true,
-    settlementsScanned: settlements.length,
-    driftCandidates: settlements.map((s) => ({
-      paymentId: s.providerResourceId ?? "",
+    candidates: settlements.map((s) => ({
       transactionId: s.transactionId,
-      grossMinor: grossByTxn.get(s.transactionId) ?? BigInt(0),
+      paymentId: s.providerResourceId ?? "",
       currency: s.currency,
+      grossMinor: grossByTxn.get(s.transactionId) ?? BigInt(0),
+      // `null` for a settlement predating the field — carried through as null
+      // rather than coerced to false, which would assert something untrue.
+      feesWereActualAtSettlement:
+        s.feesWereActual === null || s.feesWereActual === undefined
+          ? null
+          : s.feesWereActual === "true",
     })),
+  };
+}
+
+/**
+ * Reports settlements whose provider fee total no longer matches the journal.
+ *
+ * READ-ONLY. It posts nothing; `reconcileProviderFees` does the correcting, and
+ * this function deliberately cannot.
+ */
+export async function reconcileFeeDrift(
+  limit = FEE_DRIFT_MAX_PAGE,
+  offset = 0,
+): Promise<FeeDriftReport> {
+  const page = await selectFeeDriftCandidates(limit, offset);
+  if (!page.configured) {
+    return { configured: false, settlementsScanned: 0, driftCandidates: [], unresolved: [] };
+  }
+
+  const driftCandidates: FeeDriftFinding[] = [];
+  const unresolved: FeeDriftUnresolved[] = [];
+
+  for (const candidate of page.candidates) {
+    // A settlement with no payment id cannot be asked about. Reported, not
+    // silently skipped.
+    if (!candidate.paymentId) {
+      unresolved.push({
+        paymentId: "",
+        transactionId: candidate.transactionId,
+        reason: "missing_payment_id",
+      });
+      continue;
+    }
+
+    /* THE PROVIDER IS ASKED, THROUGH THE SHARED COMPARISON. Same function
+     * `reconcileProviderFees` uses, so the detector and the corrector cannot
+     * disagree about whether this payment drifted or by how much.
+     *
+     * PER-CANDIDATE ISOLATION: one payment's provider failure is recorded and
+     * the loop continues, so it cannot make the rest of the page invisible. */
+    let inspection;
+    try {
+      inspection = await inspectProviderFeeDrift(candidate.paymentId);
+    } catch (error) {
+      unresolved.push({
+        paymentId: candidate.paymentId,
+        transactionId: candidate.transactionId,
+        reason: "inspection_threw",
+        detail: describeWhopError(error),
+      });
+      continue;
+    }
+
+    if (!inspection.ok) {
+      unresolved.push({
+        paymentId: candidate.paymentId,
+        transactionId: candidate.transactionId,
+        reason: inspection.reason,
+        detail: inspection.detail,
+      });
+      continue;
+    }
+
+    // In agreement with the provider. Not drift, whatever the flag said.
+    if (inspection.deltaMinor === BigInt(0)) continue;
+
+    driftCandidates.push({
+      paymentId: candidate.paymentId,
+      transactionId: candidate.transactionId,
+      grossMinor: candidate.grossMinor,
+      currency: candidate.currency,
+      postedFeeMinor: inspection.postedMinor,
+      actualFeeMinor: inspection.actualMinor,
+      deltaMinor: inspection.deltaMinor,
+      feesWereActualAtSettlement: candidate.feesWereActualAtSettlement,
+    });
+  }
+
+  return {
+    configured: true,
+    settlementsScanned: page.candidates.length,
+    driftCandidates,
+    unresolved,
   };
 }
 
