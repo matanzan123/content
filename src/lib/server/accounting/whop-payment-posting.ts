@@ -4,6 +4,7 @@ import { WhopError } from "@whop/sdk";
 import { describeWhopError, getWhopPaymentsClient } from "../whop-payments";
 import { currencyDecimals, decimalToMinor, normaliseCurrency } from "../money";
 import { economicKey } from "./accounts";
+import { feeAccountForOrigin } from "./fee-classification";
 import { postTransaction, type JournalLeg, type PostingInput } from "./journal";
 
 /* ==========================================================================
@@ -41,6 +42,16 @@ import { postTransaction, type JournalLeg, type PostingInput } from "./journal";
    a mismatch means we have misunderstood the fee report, and the right
    response is to stop and look, not to publish a number that adds up because
    we made it add up.
+
+   TWO FEE LINES ARE NOT FEES. `sales_tax_remittance` and its reversal move
+   tax PRINCIPAL — Whop handing the collected sales tax to the authority — so
+   they post against `tax_payable`, discharging the liability this same
+   transaction credits from `tax_amount`, rather than inflating
+   `provider_fee_expense` with money that was never a cost to us.
+   `stripe_sales_tax_fee` is a real service charge and stays in expense. The
+   rule lives in `fee-classification.ts`, shared with the refund and
+   reconciliation paths so the three cannot drift apart, and it changes only
+   which account a leg names — never the provider's amount or its sign.
 
    WHAT IS NOT DECIDED, and therefore not posted:
    the gross goes to `unallocated_customer_funds`, a suspense liability. NOT to
@@ -245,13 +256,23 @@ export function buildSettlementPosting(
     },
   ];
 
-  // One leg per fee line, labelled with Whop's own name for it.
+  /* One leg per fee line, labelled with Whop's own name for it.
+   *
+   * MOST land in `provider_fee_expense`. A sales-tax remittance line lands in
+   * `tax_payable` instead, because it is tax principal moving onward rather
+   * than a fee we were charged — see `fee-classification.ts` for why, and for
+   * why the provider's sign is carried through untouched. Only the ACCOUNT
+   * differs; the amount, the counterparty and the origin do not, so the
+   * transaction balances exactly as it did before. */
   for (const fee of facts.fees) {
     legs.push({
-      account: "provider_fee_expense",
+      account: feeAccountForOrigin(fee.origin),
       amountMinor: fee.amountMinor,
       counterpartyType: "provider",
       counterpartyId: "whop",
+      // Whop's own origin, on either account. A `tax_payable` leg is therefore
+      // always traceable to the exact fee line that produced it, and readers
+      // that mean the BUYER's tax can tell the two apart by this column.
       sourceDetail: fee.origin,
     });
   }

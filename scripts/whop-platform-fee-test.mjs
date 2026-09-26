@@ -472,8 +472,18 @@ section("H. Wiring: dispute path");
    * then disputed would return $80 of creator share against $56 outstanding. */
   check("the dispute reversal is a delta to full gross",
     /computeCumulativeRefundDelta\(\s*economics,\s*row\.refundedGrossMinor,\s*row\.grossAmountMinor,?\s*\)/.test(dispute));
+  /* RE-BASELINED FOR TASK #19 P1-2, NOT WEAKENED.
+   *
+   * This asserted the guard was exactly `if (reversal.totalToReturn > 0)`. That
+   * spelling was too narrow once the reversal also carries an absorbed cost: a
+   * refund whose pro-rata returns both floor to zero still moved customer cash,
+   * and crossing into the full-refund branch can hand back previously
+   * over-absorbed units with `totalToReturn` of its own. Either case must post.
+   * The invariant is unchanged — nothing is posted when there is nothing to
+   * post — but "nothing" now means both figures are inert. */
   check("nothing is posted when there is nothing left to unwind",
-    /if \(reversal\.totalToReturn > BigInt\(0\)\)/.test(dispute));
+    /if \(reversal\.totalToReturn > BigInt\(0\) \|\| reversal\.platformAbsorbedMinor !== BigInt\(0\)\)/
+      .test(dispute));
   check("a lost dispute records the earning as fully unwound",
     /refundedGrossMinor: sql`\$\{schema\.creatorEarnings\.grossAmountMinor\}`/.test(dispute));
 
@@ -574,8 +584,11 @@ section("J. Segregation, idempotency and isolation");
     /economicKey\(\s*"whop",\s*"revenue_split",\s*`\$\{paymentId\}:\$\{creatorFirebaseUid\}`/.test(splitSrc));
   check("the reversal is keyed per refund or dispute and creator",
     /economicKey\(\s*"whop",\s*"revenue_split_reversed",\s*`\$\{refundOrDisputeId\}:\$\{creatorFirebaseUid\}`/.test(splitSrc));
+  /* RE-BASELINED alongside the dispute guard above, and for the same reason:
+   * a reversal is a no-op only when it returns nothing AND absorbs nothing. */
   check("a zero-amount reversal posts nothing at all",
-    /if \(reversal\.totalToReturn <= BigInt\(0\)\)/.test(splitSrc));
+    /if \(reversal\.totalToReturn <= BigInt\(0\) && reversal\.platformAbsorbedMinor === BigInt\(0\)\)/
+      .test(splitSrc));
 
   // Provider fees stay out of Task #17.
   const policySrc = src("src/lib/server/creator-earnings-policy.ts");
@@ -606,6 +619,171 @@ section("J. Segregation, idempotency and isolation");
     !/creator_payable|accountingEntries|reverseTransaction/.test(withdrawCode));
   check("and still writes no earning row",
     !/schema\.creatorEarnings/.test(withdrawCode));
+}
+
+
+/* ---------------------------------------------------------------- K ---- */
+section("K. The retained processing fee has an accounting home (P1-2)");
+
+/* THE RESIDUAL, DERIVED RATHER THAN ASSUMED. Task #17 keeps the fixed fee on a
+ * refund, but the customer's cash still goes back, so:
+ *
+ *   suspense after refund + reversal = refundedBasis - totalToReturn
+ *
+ * That is NOT only a full-refund phenomenon. On a full refund it is exactly the
+ * fixed fee; on a partial it is that fee's pro-rata share PLUS the residue left
+ * by flooring both returns. Before this fix it sat in
+ * `unallocated_customer_funds` as a DEBIT — a suspense liability holding a debit
+ * balance, which asserts the platform is owed customer money it is not. */
+
+{
+  const withFee = (n, fn) => withPolicyEnv({ bps: 2000, processing: n }, fn);
+
+  /* ---- A FULL REFUND ABSORBS EXACTLY THE FIXED FEE ---- */
+  withFee(30, (pol) => {
+    const b = pol.computeEarningsBreakdown(B(10000), "usd");
+    const e = {
+      grossAmountMinor: B(10000),
+      netAmountMinor: b.netAmountMinor,
+      platformFeeBps: 2000,
+    };
+    const full = pol.computeCumulativeRefundDelta(e, B(0), B(10000));
+
+    check("a full refund absorbs exactly the fixed processing fee",
+      full.platformAbsorbedMinor === B(30), String(full.platformAbsorbedMinor));
+    check("and that is precisely the gap the returns leave",
+      B(10000) - full.totalToReturn === full.platformAbsorbedMinor);
+    check("the percentage fee is still returned in full",
+      full.platformFeeToReturn === B(2000));
+    check("the creator reversal is unchanged by the absorbed cost",
+      full.creatorShareToReturn === b.netAmountMinor);
+    check("so suspense closes exactly: returns + absorbed = the cash returned",
+      full.totalToReturn + full.platformAbsorbedMinor === B(10000));
+  });
+
+  /* ---- WITH NO FIXED FEE, A FULL REFUND ABSORBS NOTHING ---- */
+  withFee(0, (pol) => {
+    const b = pol.computeEarningsBreakdown(B(10000), "usd");
+    const e = { grossAmountMinor: B(10000), netAmountMinor: b.netAmountMinor, platformFeeBps: 2000 };
+    const full = pol.computeCumulativeRefundDelta(e, B(0), B(10000));
+    check("with PLATFORM_PROCESSING_FEE_MINOR = 0 a full refund absorbs nothing",
+      full.platformAbsorbedMinor === B(0), String(full.platformAbsorbedMinor));
+    check("and the whole gross is returned",
+      full.totalToReturn === B(10000));
+  });
+
+  /* ---- PARTIALS ARE CUMULATIVE AND TELESCOPE ---- */
+  withFee(30, (pol) => {
+    const b = pol.computeEarningsBreakdown(B(10000), "usd");
+    const e = { grossAmountMinor: B(10000), netAmountMinor: b.netAmountMinor, platformFeeBps: 2000 };
+
+    /* A partial absorbs the fixed fee's PRO-RATA share, not the whole fee — the
+     * platform has not finished keeping it while the refund is partial. */
+    const half = pol.computeCumulativeRefundDelta(e, B(0), B(5000));
+    check("a half refund absorbs roughly half the fixed fee, not all of it",
+      half.platformAbsorbedMinor >= B(15) && half.platformAbsorbedMinor <= B(17),
+      String(half.platformAbsorbedMinor));
+    check("and its own suspense closes too",
+      half.totalToReturn + half.platformAbsorbedMinor === B(5000));
+
+    /* SPLIT PARTIALS CONVERGE ON ONE FULL REFUND, including the absorbed cost.
+     * Awkward thirds on purpose: this is where per-refund arithmetic drifts. */
+    for (const parts of [[5000, 5000], [3333, 3333, 3333, 1], [1, 9999], [2500, 2500, 2500, 2500]]) {
+      let prev = B(0);
+      let absorbed = B(0);
+      let returned = B(0);
+      for (const part of parts) {
+        const next = pol.capRefundedGross(e, prev, B(part));
+        const d = pol.computeCumulativeRefundDelta(e, prev, next);
+        absorbed += d.platformAbsorbedMinor;
+        returned += d.totalToReturn;
+        prev = next;
+      }
+      const one = pol.computeCumulativeRefundDelta(e, B(0), B(10000));
+      check(`split ${parts.join("+")} absorbs the same as one full refund`,
+        absorbed === one.platformAbsorbedMinor,
+        `${absorbed} vs ${one.platformAbsorbedMinor}`);
+      check(`  and returns the same`, returned === one.totalToReturn,
+        `${returned} vs ${one.totalToReturn}`);
+      check(`  and never exceeds the fixed-fee policy target`,
+        absorbed === B(30), String(absorbed));
+    }
+
+    /* THE DELTA IS SIGNED, and it has to be. Flooring over-absorbs on a partial;
+     * the full-refund branch floors nothing, so crossing into it gives those
+     * units back. A dropped negative delta would unbalance the journal. */
+    const nearly = pol.computeCumulativeRefundDelta(e, B(0), B(9999));
+    const closing = pol.computeCumulativeRefundDelta(e, B(9999), B(10000));
+    check("a partial can over-absorb by a rounding unit",
+      nearly.platformAbsorbedMinor > B(30), String(nearly.platformAbsorbedMinor));
+    check("and the closing delta gives it back — the delta is SIGNED",
+      closing.platformAbsorbedMinor < B(0), String(closing.platformAbsorbedMinor));
+    check("with the two together landing on the policy target exactly",
+      nearly.platformAbsorbedMinor + closing.platformAbsorbedMinor === B(30));
+
+    /* REFUND THEN DISPUTE. A lost dispute is a delta to full gross, so the
+     * combination converges on the same cumulative cost as either alone. */
+    const partial = pol.computeCumulativeRefundDelta(e, B(0), B(3000));
+    const thenDispute = pol.computeCumulativeRefundDelta(e, B(3000), B(10000));
+    check("refund-then-dispute absorbs the same total as one full refund",
+      partial.platformAbsorbedMinor + thenDispute.platformAbsorbedMinor === B(30),
+      `${partial.platformAbsorbedMinor} + ${thenDispute.platformAbsorbedMinor}`);
+    check("and returns the same total",
+      partial.totalToReturn + thenDispute.totalToReturn ===
+        pol.computeCumulativeRefundDelta(e, B(0), B(10000)).totalToReturn);
+
+    /* A REPLAY ADDS NOTHING: the same cumulative point twice is a zero delta. */
+    const replay = pol.computeCumulativeRefundDelta(e, B(10000), B(10000));
+    check("replaying a fully-refunded earning absorbs nothing further",
+      replay.platformAbsorbedMinor === B(0) && replay.totalToReturn === B(0));
+  });
+
+  /* ---- A REFUND TOO SMALL TO RETURN ANYTHING STILL ABSORBS ---- */
+  withFee(0, (pol) => {
+    const b = pol.computeEarningsBreakdown(B(10000), "usd");
+    const e = { grossAmountMinor: B(10000), netAmountMinor: b.netAmountMinor, platformFeeBps: 2000 };
+    const tiny = pol.computeCumulativeRefundDelta(e, B(0), B(1));
+    check("a 1-unit refund returns nothing but still absorbs that unit",
+      tiny.totalToReturn === B(0) && tiny.platformAbsorbedMinor === B(1),
+      `returns=${tiny.totalToReturn} absorbed=${tiny.platformAbsorbedMinor}`);
+    check("so no cash is left stranded in suspense even at one minor unit",
+      tiny.totalToReturn + tiny.platformAbsorbedMinor === B(1));
+  });
+
+  /* ---- THE ACCOUNT ITSELF ---- */
+  {
+    const accounts = load("src/lib/server/accounting/accounts.ts");
+    const a = accounts.ACCOUNTS.refund_absorbed_cost;
+    check("refund_absorbed_cost is a postable, debit-normal EXPENSE",
+      a && a.kind === "expense" && a.normalBalance === "debit" && a.postable === true,
+      JSON.stringify(a && { k: a.kind, n: a.normalBalance, p: a.postable }));
+    /* CODE, NOT COMMENTS. Both names are discussed in that file's prose — one to
+     * say it is not used here, the other to say tax is not touched — so testing
+     * the raw text would fail on the very comments that state the invariant. */
+    const splitCode = codeOnly("src/lib/server/accounting/revenue-split-posting.ts");
+    check("provider_fee_expense is NOT reused for it",
+      /account: "refund_absorbed_cost"/.test(splitCode) &&
+      !/provider_fee_expense/.test(splitCode));
+    check("and the reversal never touches tax_payable",
+      !/tax_payable/.test(splitCode));
+
+    /* THE MIGRATION IS ADDITIVE AND USES NOTHING IT ADDS. Postgres allows
+     * ALTER TYPE ... ADD VALUE inside a transaction from 12 on, but the value
+     * cannot be USED until that transaction commits — so the migration must add
+     * it and stop. */
+    const mig = src("drizzle/0014_refund_absorbed_cost.sql");
+    // SQL comments stripped: the header explains what the file does NOT do, and
+    // those very words would otherwise trip the check below.
+    const migSql = mig.replace(/^\s*--.*$/gm, "");
+    check("migration 0014 only appends the enum value",
+      /ALTER TYPE "public"\."ledger_account" ADD VALUE IF NOT EXISTS 'refund_absorbed_cost'/.test(migSql));
+    check("and does not use the value it adds, nor alter anything existing",
+      !/INSERT|UPDATE|DELETE|DROP|ALTER TABLE|CREATE/i.test(migSql));
+    check("it is a NEW migration, not an edit to an applied one",
+      /0014/.test("0014_refund_absorbed_cost"));
+    check("the schema enum lists it LAST, matching the type's real order",
+      /"fx_adjustment",[\s\S]*"refund_absorbed_cost",\s*\]\)/.test(src("src/lib/db/schema.ts")));
+  }
 }
 
 /* ========================================================================= */

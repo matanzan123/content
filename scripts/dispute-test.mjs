@@ -658,7 +658,7 @@ async function sequences() {
      * edit needed at the crossover, and no way to apply it twice.
      */
     const journalledTags = journal.entries.map((e) => e.tag);
-    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const PENDING = ["0013_creator_earning_cumulative_refunds", "0014_refund_absorbed_cost"];
     const tags = [
       ...journalledTags,
       ...PENDING.filter((tag) => !journalledTags.includes(tag)),

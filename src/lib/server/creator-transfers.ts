@@ -860,11 +860,17 @@ async function writePayoutJournal(
     await db.transaction(async (tx) => {
       // THE CAP. Under the lock, and inside this transaction, or it is not a
       // cap at all — see the note above.
+      /* THE TRANSFER'S OWN CURRENCY, passed explicitly. The cap has to be
+       * denominated in the same money as the amount it caps, and this is the
+       * same `input.currency` the journal legs below are posted in — so the
+       * figure checked and the figure written can never describe two different
+       * currencies. */
       const reserved = await reserveFromPosition(
         tx,
         input.firebaseUid,
         input.environment,
         input.amountMinor,
+        input.currency,
       );
       if (!reserved.ok) {
         // The position helper speaks of what is AVAILABLE; a transfer speaks

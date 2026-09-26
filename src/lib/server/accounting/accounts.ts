@@ -85,7 +85,7 @@ export const ACCOUNTS = {
     normalBalance: "credit",
     postable: true,
     description:
-      "Sales tax or VAT collected from a customer and owed onwards. Whop is Merchant of Record and handles remittance in most jurisdictions. Posted only from the provider's own `tax_amount`; never derived from a rate. The `source_detail` column on each leg carries the buyer's billing country (ISO 3166-1 alpha-2) as a jurisdiction proxy — query on that column for per-country breakdowns. This is informational: the country code is not a substitute for a formal tax-reporting integration.",
+      "Sales tax or VAT collected from a customer and owed onwards, less what has been returned to buyers or handed to the authority. Never derived from a rate: every leg comes from a provider fact. TWO SOURCES, TOLD APART BY `source_detail`. (1) The buyer's tax — credited from the payment's own `tax_amount`, debited by the part a refund returns; `source_detail` carries the buyer's billing country (ISO 3166-1 alpha-2) as a jurisdiction proxy, so per-country breakdowns are a query on that column. (2) Whop's remittance of that tax onward — Whop is Merchant of Record and reports it as a fee line (`sales_tax_remittance`, or its reversal), so those legs carry that origin, or `sales_tax_remittance_net` when the figure is a net movement rather than one line. A reader that means the buyer's tax MUST exclude the remittance origins, or a remittance will read as tax already given back to the buyer. The country code is informational and is not a substitute for a formal tax-reporting integration.",
   },
 
   creator_payable: {
@@ -146,6 +146,14 @@ export const ACCOUNTS = {
     postable: false,
     description:
       "Difference arising when a movement settles in a currency other than the one it was charged in. POLICY DECISION: Whop is Merchant of Record and performs the FX conversion internally before paying out to the platform. The net we receive is already in the settlement currency; no FX leg is ever needed on our side. This account remains declared but non-postable — if policy changes, enable it here.",
+  },
+
+  refund_absorbed_cost: {
+    kind: "expense",
+    normalBalance: "debit",
+    postable: true,
+    description:
+      "Customer cash returned on a refund or lost dispute that no revenue reversal covers — the cost the platform absorbs. Two things land here, both the same economic event: the FIXED PROCESSING FEE that Task #17 policy deliberately retains (pro-rata on a partial refund), and the floor residue left by flooring both pro-rata returns so the platform never returns more than it holds. This exists because the alternative was leaving the amount in `unallocated_customer_funds` as a DEBIT — a suspense liability holding a debit balance, which asserts the platform is owed customer money it is not, and which no reconciliation check could explain. NOT `provider_fee_expense`: nothing here was charged by a provider. It is posted only inside `revenue_split_reversed`, in that reversal's own currency, and never touches `tax_payable`.",
   },
 } as const satisfies Record<string, AccountDefinition>;
 

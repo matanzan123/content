@@ -288,7 +288,7 @@ async function run() {
      */
     const journalFile = JSON.parse(readFileSync("drizzle/meta/_journal.json", "utf8"));
     const journalledTags = journalFile.entries.map((e) => e.tag);
-    const PENDING = [];
+    const PENDING = ["0014_refund_absorbed_cost"];
     const tags = [...journalledTags, ...PENDING.filter((t) => !journalledTags.includes(t))];
 
     for (const tag of tags) {
@@ -1536,6 +1536,186 @@ async function run() {
             guardSrc.lastIndexOf("Response.json(body"));
       check("and the object path is byte-for-byte the old one",
         /return Response\.json\(body, \{ headers: \{ "cache-control": "no-store" \} \}\);/.test(guardSrc));
+    }
+
+
+    /* ------------------------------------------------------------ N ---- */
+    section("N. Tax remittance reconciles against tax_payable, not fees");
+
+    {
+      const fees = loadTs("src/lib/server/accounting/whop-fee-reconciliation.ts");
+
+      /* WHY THIS BELONGS IN THE DB SUITE. Whop remits sales tax when it FILES —
+       * days or weeks after settlement — so the remittance line usually appears
+       * on a later `listFees`, which means this path, not the settlement
+       * posting, is where `tax_payable` actually gets discharged in production.
+       * Proving it needs the real posted totals, which need the real journal. */
+
+      const seedTaxed = async (paymentId, feeMinor, taxMinor) => {
+        const r = await journal.postTransaction({
+          economicEvent: "payment_settled",
+          provider: "whop",
+          providerResourceId: paymentId,
+          environment: ENVIRONMENT,
+          currency: "usd",
+          idempotencyKey: "whop:payment_settled:" + paymentId,
+          description: "settlement " + paymentId,
+          metadata: { fees_are_actual: true },
+          legs: [
+            /* Whop still HOLDS the tax at this point — it has not filed yet, so
+             * the remittance is not a fee line and the balance is only net of
+             * the real fees: 10.80 - 0.07. The tax leaves this balance later,
+             * which is exactly the movement this section is about. */
+            { account: "provider_balance", amountMinor: BigInt(1080) - feeMinor,
+              counterpartyType: "provider", counterpartyId: "whop" },
+            { account: "provider_fee_expense", amountMinor: feeMinor,
+              counterpartyType: "provider", counterpartyId: "whop", sourceDetail: "stripe_radar_fee" },
+            { account: "tax_payable", amountMinor: -taxMinor,
+              counterpartyType: "tax_authority", sourceDetail: "US" },
+            { account: "unallocated_customer_funds", amountMinor: -(BigInt(1080) - taxMinor),
+              counterpartyType: "customer" },
+          ].filter((l) => l.amountMinor !== BigInt(0)),
+        });
+        if (!r.ok) throw new Error("seed failed: " + r.reason + " " + (r.detail ?? ""));
+      };
+
+      const acctTotal = async (paymentId, account) => BigInt((await scoped.unsafe(
+        "select coalesce(sum(e.amount_minor), 0)::text as total" +
+        "  from " + SCRATCH + ".accounting_entries e" +
+        "  join " + SCRATCH + ".accounting_transactions t on t.transaction_id = e.transaction_id" +
+        " where e.account = $2" +
+        "   and (t.provider_resource_id = $1 or t.metadata->>'payment_id' = $1)",
+        [paymentId, account]))[0].total);
+
+      const residualFor = async (paymentId) => BigInt((await scoped.unsafe(
+        "select coalesce(sum(e.amount_minor), 0)::text as total" +
+        "  from " + SCRATCH + ".accounting_entries e" +
+        "  join " + SCRATCH + ".accounting_transactions t on t.transaction_id = e.transaction_id" +
+        " where t.provider_resource_id = $1 or t.metadata->>'payment_id' = $1",
+        [paymentId]))[0].total);
+
+      /* A payment of 10.80 including 0.80 tax, settled with 0.07 of fees and the
+       * tax NOT yet remitted. `tax_payable` therefore stands at -80: owed. */
+      await seedTaxed("pay_tax_remit", BigInt(7), BigInt(80));
+      check("before reconciliation the tax liability is outstanding",
+        (await acctTotal("pay_tax_remit", "tax_payable")) === BigInt(-80),
+        String(await acctTotal("pay_tax_remit", "tax_payable")));
+
+      /* Whop now reports the remittance alongside the unchanged fee. */
+      FAKE_WHOP = fakeWhop([
+        { origin: "stripe_radar_fee", amount: "0.07" },
+        { origin: "sales_tax_remittance", amount: "0.80" },
+      ]);
+
+      const remit = await fees.reconcileProviderFees("pay_tax_remit");
+      check("a remittance arriving with NO fee change still posts — it is a real movement",
+        remit.ok === true && remit.posted === true,
+        show(remit));
+      check("and the fee delta it reports is zero, because no fee changed",
+        remit.ok && remit.deltaMinor === BigInt(0), show(remit.ok ? String(remit.deltaMinor) : remit));
+
+      check("tax_payable is DISCHARGED by the provider's own remittance",
+        (await acctTotal("pay_tax_remit", "tax_payable")) === BigInt(0),
+        String(await acctTotal("pay_tax_remit", "tax_payable")));
+      check("and provider_fee_expense is untouched by the tax",
+        (await acctTotal("pay_tax_remit", "provider_fee_expense")) === BigInt(7),
+        String(await acctTotal("pay_tax_remit", "provider_fee_expense")));
+      check("every transaction for the payment still balances exactly",
+        (await residualFor("pay_tax_remit")) === BigInt(0),
+        String(await residualFor("pay_tax_remit")));
+
+      /* THE LEG IS AUDITABLE AND DISTINGUISHABLE. */
+      const [remitLeg] = await scoped.unsafe(
+        "select e.source_detail, e.amount_minor::text as amount" +
+        "  from " + SCRATCH + ".accounting_entries e" +
+        "  join " + SCRATCH + ".accounting_transactions t on t.transaction_id = e.transaction_id" +
+        " where t.economic_event = 'provider_fee_reconciled'" +
+        "   and t.provider_resource_id = $1 and e.account = 'tax_payable'",
+        ["pay_tax_remit"]);
+      check("the correction's tax leg is labelled as a net remittance movement",
+        remitLeg?.source_detail === "sales_tax_remittance_net" && remitLeg?.amount === "80",
+        JSON.stringify(remitLeg));
+
+      /* REPLAY CONVERGES. The provider has not changed its mind. */
+      const replayTax = await fees.reconcileProviderFees("pay_tax_remit");
+      check("replaying it posts nothing further",
+        replayTax.ok === true && replayTax.posted === false, show(replayTax));
+      check("and the liability stays discharged, not double-discharged",
+        (await acctTotal("pay_tax_remit", "tax_payable")) === BigInt(0));
+
+      /* A REVERSAL RESTORES IT, in whatever sign the provider uses. */
+      FAKE_WHOP = fakeWhop([
+        { origin: "stripe_radar_fee", amount: "0.07" },
+        { origin: "sales_tax_remittance", amount: "0.80" },
+        { origin: "sales_tax_remittance_reversal", amount: "-0.80" },
+      ]);
+      const reversed = await fees.reconcileProviderFees("pay_tax_remit");
+      check("a remittance reversal posts against tax_payable",
+        reversed.ok === true && reversed.posted === true, show(reversed));
+      check("and restores the liability to outstanding",
+        (await acctTotal("pay_tax_remit", "tax_payable")) === BigInt(-80),
+        String(await acctTotal("pay_tax_remit", "tax_payable")));
+      check("the payment's transactions still all balance",
+        (await residualFor("pay_tax_remit")) === BigInt(0));
+
+      /* stripe_sales_tax_fee IS A FEE. One word apart, different account. */
+      await seedTaxed("pay_tax_svc", BigInt(7), BigInt(80));
+      FAKE_WHOP = fakeWhop([
+        { origin: "stripe_radar_fee", amount: "0.07" },
+        { origin: "stripe_sales_tax_fee", amount: "0.05" },
+      ]);
+      const svc = await fees.reconcileProviderFees("pay_tax_svc");
+      check("a Stripe tax-SERVICE fee reconciles as a fee",
+        svc.ok === true && svc.posted === true && svc.deltaMinor === BigInt(5),
+        show(svc.ok ? String(svc.deltaMinor) : svc));
+      check("it lands in provider_fee_expense",
+        (await acctTotal("pay_tax_svc", "provider_fee_expense")) === BigInt(12),
+        String(await acctTotal("pay_tax_svc", "provider_fee_expense")));
+      check("and leaves the tax liability alone",
+        (await acctTotal("pay_tax_svc", "tax_payable")) === BigInt(-80),
+        String(await acctTotal("pay_tax_svc", "tax_payable")));
+
+      /* BOTH CLASSES MOVING AT ONCE: one transaction, three legs, balanced. */
+      await seedTaxed("pay_tax_both", BigInt(7), BigInt(80));
+      FAKE_WHOP = fakeWhop([
+        { origin: "stripe_radar_fee", amount: "0.10" },
+        { origin: "sales_tax_remittance", amount: "0.80" },
+      ]);
+      const both = await fees.reconcileProviderFees("pay_tax_both");
+      check("a fee change and a remittance post together",
+        both.ok === true && both.posted === true && both.deltaMinor === BigInt(3),
+        show(both.ok ? String(both.deltaMinor) : both));
+      check("each class reaches its own account",
+        (await acctTotal("pay_tax_both", "provider_fee_expense")) === BigInt(10) &&
+          (await acctTotal("pay_tax_both", "tax_payable")) === BigInt(0),
+        (await acctTotal("pay_tax_both", "provider_fee_expense")) + "/" +
+          (await acctTotal("pay_tax_both", "tax_payable")));
+      check("and the combined correction balances",
+        (await residualFor("pay_tax_both")) === BigInt(0));
+
+      /* THE DRIFT INSPECTION REPORTS THE TWO SEPARATELY. */
+      const inspected = await fees.inspectProviderFeeDrift("pay_tax_both");
+      check("the inspection reports fee and tax totals as distinct figures",
+        inspected.ok === true && inspected.actualMinor === BigInt(10) &&
+          inspected.taxRemittanceActualMinor === BigInt(80),
+        show(inspected.ok
+          ? { fee: String(inspected.actualMinor), tax: String(inspected.taxRemittanceActualMinor) }
+          : inspected));
+      check("and both are bigints, in minor units",
+        inspected.ok && typeof inspected.taxRemittanceDeltaMinor === "bigint" &&
+          typeof inspected.deltaMinor === "bigint");
+
+      /* THE CLASSIFIER IS SHARED, not re-implemented here. */
+      const reconSrc = readFileSync("src/lib/server/accounting/whop-fee-reconciliation.ts", "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      check("the reconciler uses the shared classifier",
+        /from "\.\/fee-classification"/.test(reconSrc) &&
+          !/"sales_tax_remittance"\s*===/.test(reconSrc));
+      check("and compares each class against its own posted total",
+        /postedTaxRemittanceTotal/.test(reconSrc) &&
+          /account, "tax_payable"/.test(reconSrc));
+      check("a zero fee delta alone is no longer treated as nothing to do",
+        /delta === BigInt\(0\) && taxDelta === BigInt\(0\)/.test(reconSrc));
     }
 
   } finally {

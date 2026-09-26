@@ -287,6 +287,208 @@ check("tax is credited to tax_payable, separately from suspense",
 check("suspense holds the gross LESS tax",
   taxed.legs.find((l) => l.account === "unallocated_customer_funds").amountMinor === -1000n);
 
+console.log("\n--- A. tax remittance is tax principal, not a provider fee ---");
+
+/* WHY THIS SECTION EXISTS. `payments.listFees` reports Whop's remittance of the
+ * sales tax it collected as a FEE LINE (`sales_tax_remittance`). Booked as
+ * expense it overstated `provider_fee_expense` by the tax and left `tax_payable`
+ * — credited from the provider's own `tax_amount` — never discharged. The
+ * journal still balanced, because the two errors were equal and opposite, which
+ * is precisely why nothing caught it. */
+
+const fees = loadTs("src/lib/server/accounting/fee-classification.ts");
+
+{
+  check("a sales tax remittance is classified to tax_payable",
+    fees.feeAccountForOrigin("sales_tax_remittance") === "tax_payable");
+  check("and so is its reversal",
+    fees.feeAccountForOrigin("sales_tax_remittance_reversal") === "tax_payable");
+
+  /* THE NAME TRAP. `stripe_sales_tax_fee` is what Stripe charges for running tax
+   * calculation — a service we are billed for, not tax anyone owes. The names
+   * are one word apart and the accounting is not the same. */
+  check("stripe_sales_tax_fee is a REAL FEE and stays in provider_fee_expense",
+    fees.feeAccountForOrigin("stripe_sales_tax_fee") === "provider_fee_expense");
+  check("and it is not treated as a remittance origin",
+    fees.isTaxRemittanceOrigin("stripe_sales_tax_fee") === false);
+
+  // Every origin the reference payment actually carries keeps its old home.
+  check("every existing fee origin keeps its current behaviour",
+    ["payment_processing_fixed_fee", "payment_processing_percentage_fee",
+     "cross_border_percentage_fee", "orchestration_percentage_fee",
+     "stripe_radar_fee", "fx_percentage_fee", "revshare_percentage_fee",
+     "dispute_fee", "buyer_fee", "whop_processing_fee"]
+      .every((o) => fees.feeAccountForOrigin(o) === "provider_fee_expense"));
+
+  /* AN UNKNOWN ORIGIN IS A FEE. Defaulting an unrecognised line to tax_payable
+   * would quietly discharge a liability with money that was never tax. */
+  check("an origin this build has never seen is still a fee",
+    fees.feeAccountForOrigin("some_future_fee_2031") === "provider_fee_expense");
+  check("and so is a missing or non-string origin",
+    fees.feeAccountForOrigin(undefined) === "provider_fee_expense" &&
+    fees.feeAccountForOrigin(null) === "provider_fee_expense" &&
+    fees.feeAccountForOrigin(42) === "provider_fee_expense");
+  check("origins are matched case- and whitespace-insensitively",
+    fees.feeAccountForOrigin("  SALES_TAX_REMITTANCE  ") === "tax_payable");
+
+  /* THE SPLIT PRESERVES THE PROVIDER'S IDENTITY. `amount_after_fees + Σfees ==
+   * total` is checked against the sum of ALL lines, so the split's total must
+   * equal what the un-split code summed or the settlement rule would shift
+   * underneath itself. */
+  const lines = [
+    { origin: "stripe_radar_fee", amountMinor: 7n },
+    { origin: "sales_tax_remittance", amountMinor: 80n },
+    { origin: "stripe_sales_tax_fee", amountMinor: 5n },
+  ];
+  const split = fees.splitFeeLines(lines);
+  check("the split totals the fee class on its own", split.providerFeeMinor === 12n);
+  check("and the tax class on its own", split.taxRemittanceMinor === 80n);
+  check("and its combined total still equals the plain sum of every line",
+    split.totalMinor === lines.reduce((a, l) => a + l.amountMinor, 0n));
+  check("the lines themselves are kept, so origins stay auditable",
+    split.providerFeeLines.length === 2 && split.taxRemittanceLines.length === 1);
+}
+
+/* ---- THE SETTLEMENT, WITH TAX COLLECTED AND REMITTED ---------------------- */
+{
+  /* Gross 10.80 including 0.80 tax. Whop charges 0.87 of fees and remits the
+   * 0.80, so it keeps 10.80 - 0.87 - 0.80 = 9.13 for us. The provider's own
+   * identity holds: 913 + 87 + 80 == 1080. */
+  const remitted = posting.buildSettlementPosting(
+    {
+      ...REFERENCE,
+      totalMinor: 1080n,
+      taxMinor: 80n,
+      afterFeesMinor: 913n,
+      taxJurisdiction: "US",
+      fees: [
+        ...REFERENCE.fees,
+        { origin: "sales_tax_remittance", label: "Sales tax remittance", amountMinor: 80n },
+      ],
+    },
+    { environment: "sandbox", orderId: null },
+  );
+
+  const on = (acct) => remitted.legs.filter((l) => l.account === acct);
+  const total = (acct) => on(acct).reduce((a, l) => a + l.amountMinor, 0n);
+
+  check("a settlement with a remitted tax balances to exactly zero",
+    remitted.legs.reduce((a, l) => a + l.amountMinor, 0n) === 0n,
+    remitted.legs.reduce((a, l) => a + l.amountMinor, 0n).toString());
+  check("it validates", journal.validatePosting(remitted).ok === true);
+
+  /* THE POINT OF THE WHOLE FIX: the liability is discharged. Credited 0.80 from
+   * `tax_amount`, debited 0.80 by the remittance line, net zero — the platform
+   * neither owes nor holds tax it never kept. */
+  check("tax_payable is DISCHARGED — the credit and the remittance net to zero",
+    total("tax_payable") === 0n, total("tax_payable").toString());
+  check("and it got there from two legs, not by cancelling one out",
+    on("tax_payable").length === 2);
+  check("the buyer's tax is the credit", on("tax_payable").some((l) => l.amountMinor === -80n));
+  check("the remittance is the debit", on("tax_payable").some((l) => l.amountMinor === 80n));
+
+  /* AND THE FEE ACCOUNT IS UNTOUCHED BY IT. */
+  check("the remittance does NOT reach provider_fee_expense",
+    on("provider_fee_expense").every((l) => l.sourceDetail !== "sales_tax_remittance"));
+  check("provider_fee_expense still holds exactly the real fees",
+    total("provider_fee_expense") === 87n, total("provider_fee_expense").toString());
+  check("still one leg per real fee line", on("provider_fee_expense").length === 5);
+
+  /* AUDITABILITY. A tax_payable leg has to say which line put it there. */
+  check("the remittance leg carries Whop's own origin as its source_detail",
+    on("tax_payable").find((l) => l.amountMinor === 80n).sourceDetail === "sales_tax_remittance");
+  check("and the buyer's tax leg still carries the jurisdiction proxy",
+    on("tax_payable").find((l) => l.amountMinor === -80n).sourceDetail === "US");
+  check("so the two tax_payable legs are distinguishable by source_detail alone",
+    new Set(on("tax_payable").map((l) => l.sourceDetail)).size === 2);
+
+  check("provider_balance is still amount_after_fees, unchanged by the split",
+    total("provider_balance") === 913n);
+  check("suspense still holds the gross LESS tax",
+    total("unallocated_customer_funds") === -1000n);
+
+  /* MIXED ORIGINS STAY DISTINCT. A real Stripe tax-service fee and a tax
+   * remittance on the same payment must land in different accounts. */
+  const mixed = posting.buildSettlementPosting(
+    {
+      ...REFERENCE,
+      totalMinor: 1085n,
+      taxMinor: 80n,
+      afterFeesMinor: 913n,
+      fees: [
+        ...REFERENCE.fees,
+        { origin: "sales_tax_remittance", label: "Sales tax remittance", amountMinor: 80n },
+        { origin: "stripe_sales_tax_fee", label: "Stripe tax fee", amountMinor: 5n },
+      ],
+    },
+    { environment: "sandbox", orderId: null },
+  );
+  const mixedOn = (acct) => mixed.legs.filter((l) => l.account === acct);
+  check("a tax-service fee and a tax remittance land in DIFFERENT accounts",
+    mixedOn("provider_fee_expense").some((l) => l.sourceDetail === "stripe_sales_tax_fee") &&
+    mixedOn("tax_payable").some((l) => l.sourceDetail === "sales_tax_remittance"));
+  check("and the mixed settlement still balances",
+    mixed.legs.reduce((a, l) => a + l.amountMinor, 0n) === 0n);
+  check("the tax-service fee is inside the fee total",
+    mixedOn("provider_fee_expense").reduce((a, l) => a + l.amountMinor, 0n) === 92n);
+
+  /* THE REVERSAL RESTORES THE LIABILITY. */
+  const reversed = posting.buildSettlementPosting(
+    {
+      ...REFERENCE,
+      totalMinor: 1080n,
+      taxMinor: 80n,
+      afterFeesMinor: 993n,
+      fees: [
+        ...REFERENCE.fees,
+        { origin: "sales_tax_remittance", label: "Remittance", amountMinor: 80n },
+        { origin: "sales_tax_remittance_reversal", label: "Reversal", amountMinor: -80n },
+      ],
+    },
+    { environment: "sandbox", orderId: null },
+  );
+  const revTax = reversed.legs
+    .filter((l) => l.account === "tax_payable")
+    .reduce((a, l) => a + l.amountMinor, 0n);
+  check("a remittance and its reversal restore tax_payable to the tax collected",
+    revTax === -80n, revTax.toString());
+  check("the reversal is on tax_payable, never on fees",
+    reversed.legs.some((l) => l.account === "tax_payable" && l.sourceDetail === "sales_tax_remittance_reversal") &&
+    reversed.legs.every((l) => !(l.account === "provider_fee_expense" && l.sourceDetail === "sales_tax_remittance_reversal")));
+  check("and the reversal settlement balances",
+    reversed.legs.reduce((a, l) => a + l.amountMinor, 0n) === 0n);
+
+  /* NO SIGN IS ASSUMED. Whop documents no direction for either origin, so the
+   * classifier maps an ACCOUNT and touches nothing else. Feeding the opposite
+   * sign must still balance and must still land on tax_payable — if the code
+   * had a hard-coded flip, one of these two would break. */
+  const flipped = posting.buildSettlementPosting(
+    {
+      ...REFERENCE,
+      totalMinor: 920n,
+      taxMinor: 80n,
+      afterFeesMinor: 913n,
+      fees: [
+        ...REFERENCE.fees,
+        { origin: "sales_tax_remittance", label: "Remittance", amountMinor: -80n },
+      ],
+    },
+    { environment: "sandbox", orderId: null },
+  );
+  check("a remittance reported with the opposite sign still balances",
+    flipped.legs.reduce((a, l) => a + l.amountMinor, 0n) === 0n,
+    flipped.legs.reduce((a, l) => a + l.amountMinor, 0n).toString());
+  check("and still lands on tax_payable, with the provider's sign preserved",
+    flipped.legs.some((l) =>
+      l.account === "tax_payable" && l.amountMinor === -80n &&
+      l.sourceDetail === "sales_tax_remittance"));
+  check("no sign is flipped, negated or inferred in the classifier", (() => {
+    const src = readFileSync("src/lib/server/accounting/fee-classification.ts", "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    return !/-\s*line\.amountMinor|-amountMinor|Math\.abs|\* *BigInt\(-1\)/.test(src);
+  })());
+}
+
 console.log("\n--- A. fee reconciliation refuses rather than plugs ---");
 
 const source = readFileSync("src/lib/server/accounting/whop-payment-posting.ts", "utf8");

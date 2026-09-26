@@ -7,6 +7,7 @@ import {
   computeHoldUntil,
 } from "./creator-earnings-policy";
 import { postRevenueSplit, postRevenueSplitReversal } from "./accounting/revenue-split-posting";
+import { readSettlementAllocation } from "./accounting/settlement-allocation";
 import { getWhopEnvironment } from "./whop-payments";
 import {
   capRefundedGross,
@@ -54,9 +55,21 @@ import { computeCreatorPosition, type CreatorPosition } from "./creator-position
 export type RecordEarningInput = {
   firebaseUid: string;
   whopPaymentId: string;
+  /**
+   * ASSERTION ONLY. Compared against the order the settlement was posted
+   * against; never used to find or choose one.
+   */
   orderId?: string;
-  grossAmountMinor: bigint;
-  currency: "usd";
+  /**
+   * ASSERTION ONLY, and named so. The gross comes from the settlement's own
+   * suspense credit — see `readSettlementAllocation`. When supplied this is
+   * compared against that figure and a mismatch is refused, which is how a
+   * caller working from a stale number finds out instead of silently allocating
+   * it. It is NOT the accounting source of truth and cannot become one.
+   */
+  expectedGrossAmountMinor?: bigint;
+  /** ASSERTION ONLY. The currency comes from the settlement transaction. */
+  expectedCurrency?: string;
   environment: "sandbox" | "production";
   paymentSettledAt: Date;
   description?: string;
@@ -64,7 +77,32 @@ export type RecordEarningInput = {
 
 export type RecordEarningResult =
   | { ok: true; earningId: string; alreadyRecorded: boolean }
-  | { ok: false; reason: "db_unavailable" | "journal_refused" | "db_error" };
+  | {
+      ok: false;
+      reason:
+        | "db_unavailable"
+        | "journal_refused"
+        | "db_error"
+        /** Nothing settled for this payment in this environment. */
+        | "settlement_not_found"
+        /** Two settlements name this payment; which one is right is unknowable. */
+        | "ambiguous_settlement"
+        /** The settlement's currency is not one we can do exact minor units in. */
+        | "unsupported_currency"
+        /** A settlement leg's currency disagrees with its own header. */
+        | "currency_mismatch"
+        /** No suspense credit to allocate. */
+        | "suspense_unreadable"
+        /** This settlement's suspense has already been moved by a split. */
+        | "already_allocated"
+        /** The caller's gross does not match the settlement's suspense credit. */
+        | "gross_mismatch"
+        /** The caller's currency does not match the settlement's. */
+        | "currency_assertion_failed"
+        /** The caller named an order the settlement was not posted against. */
+        | "order_mismatch";
+      detail?: string;
+    };
 
 export type GetBalanceResult =
   | { ok: true; balance: CreatorPosition }
@@ -89,10 +127,7 @@ export async function recordCreatorEarning(
   const db = getDb();
   if (!db) return { ok: false, reason: "db_unavailable" };
 
-  const breakdown = computeEarningsBreakdown(
-    input.grossAmountMinor,
-    input.currency,
-  );
+
   const holdUntil = computeHoldUntil(input.paymentSettledAt);
 
   // IDEMPOTENCY CHECK, SCOPED TO THE ENVIRONMENT THIS ROW WILL BE WRITTEN IN.
@@ -122,6 +157,77 @@ export async function recordCreatorEarning(
 
   if (existing) return { ok: true, earningId: existing.earningId, alreadyRecorded: true };
 
+  /* ORDER MATTERS, AND THIS IS WHY THE SETTLEMENT IS READ HERE AND NOT EARLIER.
+   *
+   * The idempotency check above answers a repeated call for an earning that
+   * already exists, and it must keep answering it without consulting the
+   * settlement. Reading the settlement first would make a re-record fail as
+   * `already_allocated` — its own revenue split, correctly found — turning an
+   * idempotent no-op into an error the caller cannot act on.
+   *
+   * So: existing row wins, and only a genuinely NEW earning asks what may be
+   * allocated. `already_allocated` then means what it says — some OTHER
+   * creator's split has already moved this settlement's suspense. */
+  /* THE AUTHORITATIVE AMOUNT AND CURRENCY, FROM THE POSTED SETTLEMENT.
+   *
+   * Not from the request. The suspense credit the settlement created IS what
+   * may be allocated — economically `total - tax`, because the settlement
+   * already put the tax on `tax_payable`. Reading it back means no caller can
+   * allocate a number the books do not agree with, and there is no tax
+   * arithmetic here to keep in step with the tax rules.
+   *
+   * Every refusal it can return is a state in which no honest allocation
+   * exists, so they are passed straight through rather than collapsed. */
+  const settlement = await readSettlementAllocation(input.whopPaymentId, input.environment);
+  if (!settlement.ok) {
+    return { ok: false, reason: settlement.reason, detail: settlement.detail };
+  }
+  const { allocatableMinor, currency, orderId: settledOrderId } = settlement.allocation;
+
+  /* THE REQUEST'S FIGURES ARE ASSERTIONS, checked against the settlement and
+   * then discarded. A mismatch is refused by name so a caller working from a
+   * stale or hand-typed number is told which of the two disagreed, rather than
+   * having its number quietly ignored — or, as before, quietly used. */
+  if (
+    input.expectedGrossAmountMinor !== undefined &&
+    input.expectedGrossAmountMinor !== allocatableMinor
+  ) {
+    return {
+      ok: false,
+      reason: "gross_mismatch",
+      detail: `requested ${input.expectedGrossAmountMinor.toString()}, settlement ${allocatableMinor.toString()}`,
+    };
+  }
+
+  if (input.expectedCurrency !== undefined) {
+    const asserted = input.expectedCurrency.trim().toLowerCase();
+    if (asserted !== currency) {
+      return {
+        ok: false,
+        reason: "currency_assertion_failed",
+        detail: `requested ${asserted}, settlement ${currency}`,
+      };
+    }
+  }
+
+  /* THE ORDER, when the caller names one. A request pointing at a different
+   * order than the settlement was posted against is describing a different
+   * economic event, and allocating it would attribute one payment's money to
+   * another campaign. Only checked when the settlement itself recorded an
+   * order — an older settlement without one has nothing to contradict. */
+  if (input.orderId !== undefined && settledOrderId !== null && input.orderId !== settledOrderId) {
+    return {
+      ok: false,
+      reason: "order_mismatch",
+      detail: `requested ${input.orderId}, settlement ${settledOrderId}`,
+    };
+  }
+
+  /* THE FEE FORMULA IS UNTOUCHED — Task #17 policy, applied to an authoritative
+   * gross instead of a supplied one. The split of that gross into platform fee
+   * and creator net is not this change's business. */
+  const breakdown = computeEarningsBreakdown(allocatableMinor, currency);
+
   // Write the earning row
   let earningId: string;
   try {
@@ -131,7 +237,10 @@ export async function recordCreatorEarning(
         firebaseUid: input.firebaseUid,
         environment: input.environment,
         whopPaymentId: input.whopPaymentId,
-        orderId: input.orderId ?? null,
+        // The SETTLEMENT's order, not the request's. They are proven equal above
+        // when the caller named one, and the settlement is the authority when it
+        // did not.
+        orderId: settledOrderId ?? input.orderId ?? null,
         grossAmountMinor: breakdown.grossAmountMinor,
         platformFeeMinor: breakdown.platformFeeMinor,
         netAmountMinor: breakdown.netAmountMinor,
@@ -366,7 +475,7 @@ export async function reverseForDispute(
 
     // Nothing left to unwind: already fully refunded. The status update below
     // still runs, so the row reaches `reversed` either way.
-    if (reversal.totalToReturn > BigInt(0)) {
+    if (reversal.totalToReturn > BigInt(0) || reversal.platformAbsorbedMinor !== BigInt(0)) {
       await postRevenueSplitReversal({
         refundOrDisputeId: input.whopDisputeId,
         creatorFirebaseUid: row.firebaseUid,

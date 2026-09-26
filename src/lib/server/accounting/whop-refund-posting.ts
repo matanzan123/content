@@ -9,6 +9,11 @@ import { currencyDecimals, decimalToMinor, normaliseCurrency } from "../money";
 import { classifyRefundStatus, postsAccounting } from "../refund-lifecycle";
 import { retrieveRefund } from "../whop-refunds";
 import { economicKey } from "./accounts";
+import {
+  isTaxRemittanceOrigin,
+  splitFeeLines,
+  TAX_REMITTANCE_NET_SOURCE_DETAIL,
+} from "./fee-classification";
 import { postTransaction, type JournalLeg, type PostingInput } from "./journal";
 
 /* ==========================================================================
@@ -62,6 +67,13 @@ import { postTransaction, type JournalLeg, type PostingInput } from "./journal";
    the settlement alone, so a SECOND refund on the same payment sees the fee
    movement the FIRST one already booked and does not book it twice. That is
    what makes multiple partial refunds add up.
+
+   TWO DELTAS, NOT ONE. A `sales_tax_remittance` line is tax principal, not a
+   fee, so it is totalled and compared separately and posted against
+   `tax_payable`. A delta only means something against the total it is a
+   difference from: measuring a remittance against the fee account would move
+   the fee total by the tax and never discharge the liability — the original
+   defect, one account further along. See `fee-classification.ts`.
 
    ---------------------------------------------------------------------------
    WHAT A RETAINED FEE LOOKS LIKE, and why the result is correct.
@@ -123,6 +135,11 @@ export type RefundFacts = {
    * charged more, zero means it kept what it had. See the header.
    */
   feeDeltaMinor: bigint;
+  /**
+   * Signed movement of TAX PRINCIPAL the provider remitted onward, in the
+   * provider's own sign. Posted against `tax_payable`, never against fees.
+   */
+  taxRemittanceDeltaMinor: bigint;
   /** The individual fee lines behind a non-zero delta, for the journal. */
   feeLines: { origin: string; amountMinor: bigint }[];
   occurredAt: Date | null;
@@ -173,8 +190,18 @@ function money(
 export type PostedTotals = {
   /** Net `provider_fee_expense` across every transaction naming this payment. */
   feeMinor: bigint;
-  /** Net `tax_payable`, sign-flipped so a collected tax reads positive. */
+  /**
+   * Net BUYER tax on `tax_payable`, sign-flipped so a collected tax reads
+   * positive. Excludes remittance legs — those are the provider handing the tax
+   * onward, not the buyer getting it back.
+   */
   taxMinor: bigint;
+  /**
+   * Net `tax_payable` from tax-remittance fee lines, in the provider's own sign.
+   * Tracked separately so the reconciliation pass can tell a remittance it has
+   * already booked from one that has yet to arrive.
+   */
+  taxRemittanceMinor: bigint;
 };
 
 /**
@@ -205,6 +232,9 @@ export async function postedTotalsForPayment(paymentId: string): Promise<PostedT
   const rows = await db
     .select({
       account: accountingEntries.account,
+      // THE ORIGIN, because `tax_payable` now has two unrelated sources and a
+      // reader that means one must not sum the other. See below.
+      sourceDetail: accountingEntries.sourceDetail,
       total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
     })
     .from(accountingEntries)
@@ -224,18 +254,37 @@ export async function postedTotalsForPayment(paymentId: string): Promise<PostedT
         )`,
       ),
     )
-    .groupBy(accountingEntries.account);
+    .groupBy(accountingEntries.account, accountingEntries.sourceDetail);
 
   let feeMinor = BigInt(0);
   let taxMinor = BigInt(0);
+  let taxRemittanceMinor = BigInt(0);
   for (const row of rows) {
     const value = BigInt(row.total ?? "0");
     if (row.account === "provider_fee_expense") feeMinor += value;
-    // Tax is credited on settlement (negative) and debited on refund
-    // (positive). Flipped so "tax still owed onwards" reads positive.
-    if (row.account === "tax_payable") taxMinor -= value;
+
+    if (row.account === "tax_payable") {
+      /* TWO SOURCES, ONE ACCOUNT, AND THEY MUST NOT BE ADDED TOGETHER.
+       *
+       * `tax_payable` carries the BUYER's tax — credited at settlement from
+       * `tax_amount`, debited as refunds return some of it — and, since the
+       * remittance classification, Whop's handing of that tax to the authority.
+       *
+       * `taxMinor` means "buyer tax still owed onwards" and is the baseline the
+       * refund calculation below subtracts from `tax_refunded_amount`. Letting a
+       * remittance debit into it would make the code believe the buyer had
+       * already been given that tax back: `taxAlreadyReturned` would inflate by
+       * the remittance, the computed refund delta would go negative, get clamped
+       * to zero, and the buyer's tax refund would silently stop being booked.
+       *
+       * The origin on the leg is what separates them, so no column and no
+       * migration is needed to keep the two readings apart. */
+      if (isTaxRemittanceOrigin(row.sourceDetail)) taxRemittanceMinor += value;
+      // Flipped so "tax still owed onwards" reads positive.
+      else taxMinor -= value;
+    }
   }
-  return { feeMinor, taxMinor };
+  return { feeMinor, taxMinor, taxRemittanceMinor };
 }
 
 /* -------------------------------------------------------------------------
@@ -350,7 +399,6 @@ export async function fetchRefundFacts(refundId: string): Promise<RefundFactsRes
   }
 
   const lines: RefundFacts["feeLines"] = [];
-  let feeTotalNow = BigInt(0);
   for (const line of feeLines) {
     // `settlement_amount`, not `amount`: only the settlement figure can be
     // totalled against the payment, which is what we are doing.
@@ -358,10 +406,19 @@ export async function fetchRefundFacts(refundId: string): Promise<RefundFactsRes
     if (!parsed.ok) return { ok: false, reason: parsed.reason, detail: `fee:${line.origin}` };
     if (parsed.minor === BigInt(0)) continue;
     lines.push({ origin: String(line.origin), amountMinor: parsed.minor });
-    feeTotalNow += parsed.minor;
   }
 
-  const feeDeltaMinor = feeTotalNow - posted.feeMinor;
+  /* EACH CLASS AGAINST ITS OWN ACCOUNT.
+   *
+   * A delta is only meaningful against the total it is a difference from, so a
+   * tax-remittance line has to be compared with what `tax_payable` already
+   * holds from remittances — not with what `provider_fee_expense` holds. One
+   * combined delta measured against the fee account would move the fee total by
+   * the remittance and never discharge the tax at all, which is the original
+   * defect wearing a different hat. */
+  const split = splitFeeLines(lines);
+  const feeDeltaMinor = split.providerFeeMinor - posted.feeMinor;
+  const taxRemittanceDeltaMinor = split.taxRemittanceMinor - posted.taxRemittanceMinor;
 
   return {
     ok: true,
@@ -372,6 +429,7 @@ export async function fetchRefundFacts(refundId: string): Promise<RefundFactsRes
       amountMinor: refund.amountMinor,
       taxRefundedMinor,
       feeDeltaMinor,
+      taxRemittanceDeltaMinor,
       feeLines: lines,
       occurredAt: refund.updatedAt ?? refund.createdAt,
     },
@@ -452,11 +510,33 @@ export function buildRefundPosting(
     });
   }
 
+  /* TAX PRINCIPAL THE PROVIDER MOVED ONWARD, if the fee report shows any since
+   * we last looked. Against `tax_payable`, never against fees — this discharges
+   * the liability the settlement credited rather than restating it as a cost.
+   *
+   * The provider's sign is carried through untouched, so a remittance debits
+   * the liability and its reversal credits it back without this code deciding
+   * which is which. `source_detail` names it `tax_remittance` so the reader
+   * that means the BUYER's tax can exclude it. It is labelled as a NET
+   * movement rather than as a specific origin, because a difference between two
+   * totals may net a remittance against a reversal and cannot claim to be
+   * either line. */
+  if (facts.taxRemittanceDeltaMinor !== BigInt(0)) {
+    legs.push({
+      account: "tax_payable",
+      amountMinor: facts.taxRemittanceDeltaMinor,
+      counterpartyType: "provider",
+      counterpartyId: "whop",
+      sourceDetail: TAX_REMITTANCE_NET_SOURCE_DETAIL,
+    });
+  }
+
   // What Whop no longer holds for us: the money that went back to the buyer,
-  // plus or minus whatever the fee report moved.
+  // plus or minus whatever the fee report moved — fees and remitted tax alike,
+  // since both came out of the same balance.
   legs.push({
     account: "provider_balance",
-    amountMinor: -(facts.amountMinor + facts.feeDeltaMinor),
+    amountMinor: -(facts.amountMinor + facts.feeDeltaMinor + facts.taxRemittanceDeltaMinor),
     counterpartyType: "provider",
     counterpartyId: "whop",
   });

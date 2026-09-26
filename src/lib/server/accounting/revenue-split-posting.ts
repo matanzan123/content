@@ -116,7 +116,8 @@ export async function postRevenueSplit(
    THE JOURNAL:
      DR  creator_payable            [creatorShareToReturn]   owed no longer
      DR  platform_revenue           [platformFeeToReturn]    percentage fee back
-     CR  unallocated_customer_funds [totalToReturn]          back to suspense
+     DR  refund_absorbed_cost       [platformAbsorbedMinor]  what we eat
+     CR  unallocated_customer_funds [totalToReturn + absorbed] back to suspense
 
    The `payment_refunded` entry (posted separately by whop-refund-posting.ts)
    then DEBITS unallocated_customer_funds and CREDITS provider_balance. The two
@@ -154,7 +155,13 @@ export async function postRevenueSplitReversal(
 ): Promise<RevenueSplitResult> {
   const { reversal, refundOrDisputeId, creatorFirebaseUid, currency, environment, description } = input;
 
-  if (reversal.totalToReturn <= BigInt(0)) {
+  /* NOTHING TO POST AT ALL — both figures, not just the returns.
+   *
+   * A refund small enough that both pro-rata returns floor to zero still moved
+   * customer cash, and that cash is absorbed. Skipping on `totalToReturn` alone
+   * would leave exactly that amount sitting in suspense as a debit, which is
+   * the defect this leg exists to remove. */
+  if (reversal.totalToReturn <= BigInt(0) && reversal.platformAbsorbedMinor === BigInt(0)) {
     return { ok: true, transactionId: "noop" };
   }
 
@@ -184,9 +191,43 @@ export async function postRevenueSplitReversal(
     });
   }
 
+  /* WHAT THE PLATFORM ABSORBS, as an explicit expense.
+   *
+   * Task #17 keeps the fixed processing fee on a refund, so the cash returned to
+   * the customer exceeds what the revenue reversals above give back. That excess
+   * is a real cost and it is booked as one. `platform_revenue` is NOT reduced —
+   * the fee stays earned, which is the policy — and `provider_fee_expense` is
+   * NOT used, because no provider charged this. */
+  /* THE DELTA IS SIGNED, and it must be.
+   *
+   * The absorbed TOTAL is not monotonic in the refunded gross. The pro-rata
+   * branch floors both returns, so it over-absorbs by up to two minor units;
+   * the full-refund branch returns the exact net and percentage with no
+   * flooring at all. Crossing from one to the other therefore GIVES BACK what
+   * the floors took: for a 1000 earning at 20% with no fixed fee, refunds of
+   * 333+333+333 absorb one unit, and the final refund of 1 absorbs -1, closing
+   * at zero — which is correct, because nothing is retained when the fixed fee
+   * is zero and the whole gross has gone back.
+   *
+   * Dropping a negative delta would leave the ledger UNBALANCED: the returns
+   * still move, so suspense has to move with them. Guarded on `!== 0` rather
+   * than `> 0` for exactly that reason. */
+  if (reversal.platformAbsorbedMinor !== BigInt(0)) {
+    legs.push({
+      account: "refund_absorbed_cost" as const,
+      amountMinor: reversal.platformAbsorbedMinor,
+      counterpartyType: "platform" as const,
+      counterpartyId: "cliprewards",
+    });
+  }
+
+  /* SUSPENSE IS RESTORED IN FULL: what the revenue reversals return PLUS what
+   * the platform absorbs. The refund posting debited suspense by the whole
+   * amount that went back to the customer, so crediting only `totalToReturn`
+   * here is precisely what left the residual behind. */
   legs.push({
     account: "unallocated_customer_funds" as const,
-    amountMinor: -(reversal.totalToReturn),
+    amountMinor: -(reversal.totalToReturn + reversal.platformAbsorbedMinor),
     counterpartyType: "customer" as const,
   });
 

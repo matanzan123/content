@@ -167,6 +167,27 @@ export type RefundSplitReversal = {
   platformFeeToReturn: bigint;
   /** Total: creatorShareToReturn + platformFeeToReturn. */
   totalToReturn: bigint;
+  /**
+   * WHAT THE PLATFORM ABSORBS: cash returned to the customer that no revenue
+   * reversal covers, in minor units, and never negative.
+   *
+   *   platformAbsorbedMinor = (refunded basis) - totalToReturn
+   *
+   * Two things land here, and both are the same economic event — the platform
+   * kept revenue while the customer's money went back:
+   *
+   *   1. the FIXED PROCESSING FEE, which Task #17 policy deliberately retains.
+   *      On a full refund this is exactly `processingFeeMinor`; on a partial it
+   *      is that fee's pro-rata share.
+   *   2. the FLOOR RESIDUE. Both pro-rata figures are floored so the platform
+   *      never returns more than it holds, which leaves up to two minor units
+   *      per partial refund on the platform's side of the line.
+   *
+   * It is a real cost and it now has a real expense account. Before this it sat
+   * in `unallocated_customer_funds` as a debit — a suspense LIABILITY holding a
+   * debit balance, which says the platform is owed customer money it is not.
+   */
+  platformAbsorbedMinor: bigint;
 };
 
 /**
@@ -190,7 +211,12 @@ export function computeRefundSplitReversal(
   refundAmountMinor: bigint,
 ): RefundSplitReversal {
   if (refundAmountMinor <= BigInt(0) || breakdown.grossAmountMinor <= BigInt(0)) {
-    return { creatorShareToReturn: BigInt(0), platformFeeToReturn: BigInt(0), totalToReturn: BigInt(0) };
+    return {
+      creatorShareToReturn: BigInt(0),
+      platformFeeToReturn: BigInt(0),
+      totalToReturn: BigInt(0),
+      platformAbsorbedMinor: BigInt(0),
+    };
   }
 
   // Full refund shortcut — avoids rounding on clean divisions.
@@ -200,17 +226,29 @@ export function computeRefundSplitReversal(
       creatorShareToReturn: breakdown.netAmountMinor,
       platformFeeToReturn: breakdown.percentageFeeMinor,
       totalToReturn,
+      /* THE BASIS IS THE GROSS, NOT THE REQUEST. A refund larger than the
+       * earning cannot make the platform absorb more than the earning created,
+       * so the basis is capped here exactly as the returns above are. On a full
+       * refund this reduces to the fixed processing fee:
+       *   gross - (net + percentage) = processingFee. */
+      platformAbsorbedMinor: breakdown.grossAmountMinor - totalToReturn,
     };
   }
 
   // Partial: floor both to avoid returning more than exists.
   const platformFeeToReturn = (breakdown.percentageFeeMinor * refundAmountMinor) / breakdown.grossAmountMinor;
   const creatorShareToReturn = (breakdown.netAmountMinor * refundAmountMinor) / breakdown.grossAmountMinor;
+  const totalToReturn = creatorShareToReturn + platformFeeToReturn;
 
   return {
     creatorShareToReturn,
     platformFeeToReturn,
-    totalToReturn: creatorShareToReturn + platformFeeToReturn,
+    totalToReturn,
+    /* The pro-rata share of the retained fixed fee, plus whatever the two
+     * floors above left on the platform's side. Derived as a DIFFERENCE rather
+     * than as its own formula, so it cannot drift from the figures it is the
+     * remainder of. */
+    platformAbsorbedMinor: refundAmountMinor - totalToReturn,
   };
 }
 
@@ -314,6 +352,12 @@ export function computeCumulativeRefundDelta(
     creatorShareToReturn,
     platformFeeToReturn,
     totalToReturn: creatorShareToReturn + platformFeeToReturn,
+    /* A DELTA OF CUMULATIVE TARGETS, like every other figure here, which is what
+     * makes the absorbed cost telescope: any split of partial refunds books the
+     * same total as one refund of their sum, because the intermediate targets
+     * cancel. Booking each refund's absorbed cost independently would lose or
+     * duplicate the floor residue at every step. */
+    platformAbsorbedMinor: target.platformAbsorbedMinor - prior.platformAbsorbedMinor,
   };
 }
 

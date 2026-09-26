@@ -83,6 +83,25 @@ function loadTs(file) {
       };
     }
     if (spec === "@whop/sdk") return { WhopError: FakeWhopError, WhopClient: class {} };
+    /* THE ADMIN SEAMS, so a route's own STATUS CODE can be asserted rather than
+     * regex-matched. The wrapper is faked to the real one's semantics exactly —
+     * a `Response` passes through untouched, anything else becomes a 200 JSON
+     * body — because a test asserting 409 is worthless if the harness invents
+     * its own wrapping. See `admin-guard.ts`. */
+    if (spec === "@/lib/server/admin-guard") {
+      return {
+        withAdminApi: async (handler) => {
+          const body = await handler({
+            uid: "admin_lifecycle", email: "admin@example.test", name: null, authTime: 0,
+          });
+          if (body instanceof Response) return body;
+          return Response.json(body, { headers: { "cache-control": "no-store" } });
+        },
+      };
+    }
+    if (spec === "@/lib/server/request-origin") {
+      return { checkRequestOrigin: () => ({ ok: true }) };
+    }
     if (spec === "./whop-payments" || spec.endsWith("/whop-payments")) {
       // The payments client is the network seam. Configuration is real.
       const real = loadTs("src/lib/server/whop-payments.ts");
@@ -867,6 +886,22 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
   const EARNINGS = "src/lib/server/creator-earnings.ts";
   const posts = [];
   const postingStub = {
+    /* THE ALLOCATION SEAM, STUBBED — these blocks are about environment-scoped
+     * IDEMPOTENCY, not about where the amount comes from. A fixed authoritative
+     * allocation keeps them testing the one thing they exist to test; the real
+     * settlement read is exercised against the real journal in the DB section. */
+    "./accounting/settlement-allocation": {
+      readSettlementAllocation: async (paymentId) => ({
+        ok: true,
+        allocation: {
+          transactionId: "txn_stub",
+          paymentId,
+          orderId: null,
+          allocatableMinor: BigInt(1000),
+          currency: "usd",
+        },
+      }),
+    },
     "./accounting/revenue-split-posting": {
       postRevenueSplit: async () => ({ ok: true }),
       postRevenueSplitReversal: async (i) => { posts.push(i); return { ok: true }; },
@@ -987,8 +1022,8 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
     // call reports alreadyRecorded and writes nothing.
     const sandbox = loadWithStore(EARNINGS, { rows: bothEnv(), environment: "sandbox", extra: postingStub });
     const same = await sandbox.mod.recordCreatorEarning({
-      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 1000n,
-      currency: "usd", environment: "sandbox", paymentSettledAt: new Date(),
+      firebaseUid: "uid_a", whopPaymentId: "pay_same",
+      environment: "sandbox", paymentSettledAt: new Date(),
     });
     check("recordCreatorEarning is still idempotent WITHIN one environment",
       same.ok === true && same.alreadyRecorded === true && same.earningId === "e_sandbox",
@@ -999,8 +1034,8 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
     // used to force.
     const prod = loadWithStore(EARNINGS, { rows: bothEnv(), environment: "production", extra: postingStub });
     const cross = await prod.mod.recordCreatorEarning({
-      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 5000n,
-      currency: "usd", environment: "production", paymentSettledAt: new Date(),
+      firebaseUid: "uid_a", whopPaymentId: "pay_same",
+      environment: "production", paymentSettledAt: new Date(),
     });
     check("and in production it resolves the PRODUCTION row, never the sandbox one",
       cross.ok === true && cross.earningId === "e_prod",
@@ -1012,8 +1047,8 @@ console.log("\n--- A. financial lookups cannot cross environments ---");
       rows: [bothEnv()[1]], environment: "sandbox", extra: postingStub,
     });
     const created = await fresh.mod.recordCreatorEarning({
-      firebaseUid: "uid_a", whopPaymentId: "pay_same", grossAmountMinor: 1000n,
-      currency: "usd", environment: "sandbox", paymentSettledAt: new Date(),
+      firebaseUid: "uid_a", whopPaymentId: "pay_same",
+      environment: "sandbox", paymentSettledAt: new Date(),
     });
     check("a production row does NOT make a sandbox earning look already-recorded",
       created.ok === true && created.alreadyRecorded !== true,
@@ -1229,7 +1264,7 @@ async function sequences() {
      * edit needed at the crossover, and no way to apply it twice.
      */
     const journalledTags = journal.entries.map((e) => e.tag);
-    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const PENDING = ["0013_creator_earning_cumulative_refunds", "0014_refund_absorbed_cost"];
     const tags = [
       ...journalledTags,
       ...PENDING.filter((tag) => !journalledTags.includes(tag)),
@@ -1748,7 +1783,404 @@ async function sequences() {
         JSON.stringify(r.result));
     }
 
+    /* ============================================================ P1-4 ====
+       ALLOCATION READS THE SETTLEMENT, NOT THE REQUEST.
+
+       The admin route used to take `gross_minor` from its body and pass the
+       literal `"usd"` onward. Nothing compared either against the settlement.
+       A taxed payment allocated at its `total` paid creator and platform out of
+       money credited to `tax_payable` — a tax authority's money — and the
+       journal balanced the whole way, because suspense simply went negative.
+
+       Run against the real journal and the real modules: the suspense credit
+       these assertions read is the one `postTransaction` actually wrote.
+       ==================================================================== */
+    {
+      const earningsMod = loadTs("src/lib/server/creator-earnings.ts");
+      const allocMod = loadTs("src/lib/server/accounting/settlement-allocation.ts");
+
+      /** A creator row, because `creator_earnings` has a FK to `users`. */
+      let uidSeq = 0;
+      const newCreator = async () => {
+        const uid = `uid_alloc_${++uidSeq}`;
+        await client.unsafe(
+          `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+             on conflict (firebase_uid) do nothing`,
+          [uid],
+        );
+        return uid;
+      };
+
+      /**
+       * Posts a settlement exactly as `buildSettlementPosting` does:
+       * provider balance net of fees, one fee leg, tax split onto `tax_payable`,
+       * and the remainder credited to suspense.
+       */
+      const settle = async ({
+        paymentId,
+        totalMinor,
+        taxMinor = BigInt(0),
+        feeMinor = BigInt(0),
+        currency = "usd",
+        environment = "sandbox",
+        key = null,
+      }) => {
+        const r = await journalMod.postTransaction({
+          economicEvent: "payment_settled",
+          provider: "whop",
+          providerResourceId: paymentId,
+          environment,
+          currency,
+          idempotencyKey: key ?? `whop:payment_settled:${paymentId}`,
+          description: `settlement ${paymentId}`,
+          metadata: { fees_are_actual: true },
+          legs: [
+            { account: "provider_balance", amountMinor: totalMinor - feeMinor,
+              counterpartyType: "provider", counterpartyId: "whop" },
+            { account: "provider_fee_expense", amountMinor: feeMinor,
+              counterpartyType: "provider", counterpartyId: "whop", sourceDetail: "stripe_radar_fee" },
+            { account: "tax_payable", amountMinor: -taxMinor,
+              counterpartyType: "tax_authority", sourceDetail: "US" },
+            { account: "unallocated_customer_funds", amountMinor: -(totalMinor - taxMinor),
+              counterpartyType: "customer" },
+          ].filter((l) => l.amountMinor !== BigInt(0)),
+        });
+        if (!r.ok) throw new Error(`settle failed: ${r.reason} ${r.detail ?? ""}`);
+        return r.transactionId;
+      };
+
+      /** Legs of the revenue split for one payment, by account. */
+      const splitLegs = async (paymentId) => client.unsafe(
+        `select e.account, e.amount_minor::text as amount, e.currency
+           from ${SCRATCH}.accounting_entries e
+           join ${SCRATCH}.accounting_transactions t on t.transaction_id = e.transaction_id
+          where t.economic_event = 'revenue_split' and t.provider_resource_id = $1
+          order by e.account`,
+        [paymentId],
+      );
+      const acctBalance = async (paymentId, account) => BigInt((await client.unsafe(
+        `select coalesce(sum(e.amount_minor), 0)::text as total
+           from ${SCRATCH}.accounting_entries e
+           join ${SCRATCH}.accounting_transactions t on t.transaction_id = e.transaction_id
+          where e.account = $2
+            and (t.provider_resource_id = $1 or t.metadata->>'payment_id' = $1)`,
+        [paymentId, account]))[0].total);
+      const earningRow = async (paymentId, uid) => (await client.unsafe(
+        `select gross_amount_minor::text as gross, platform_fee_minor::text as fee,
+                net_amount_minor::text as net, currency
+           from ${SCRATCH}.creator_earnings
+          where whop_payment_id = $1 and firebase_uid = $2`,
+        [paymentId, uid]))[0];
+
+      /* ---- 1. A TAXED SETTLEMENT ALLOCATES total - tax ---- */
+      {
+        const uid = await newCreator();
+        // $10.80 collected, $0.80 of it tax, $0.07 of fees. Suspense holds
+        // 1080 - 80 = 1000, and that is the ONLY allocatable figure.
+        await settle({ paymentId: "pay_alloc_tax", totalMinor: BigInt(1080), taxMinor: BigInt(80), feeMinor: BigInt(7) });
+
+        const read = await allocMod.readSettlementAllocation("pay_alloc_tax", "sandbox");
+        check("the allocatable amount is the suspense credit, not the payment total",
+          read.ok === true && read.allocation.allocatableMinor === BigInt(1000),
+          read.ok ? String(read.allocation.allocatableMinor) : JSON.stringify(read));
+        check("and it is NOT the gross — the tax is not allocatable",
+          read.ok && read.allocation.allocatableMinor !== BigInt(1080));
+        check("the currency comes from the settlement transaction",
+          read.ok && read.allocation.currency === "usd");
+
+        const rec = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid,
+          whopPaymentId: "pay_alloc_tax",
+          environment: "sandbox",
+          paymentSettledAt: new Date(),
+        });
+        check("the earning records against the authoritative figure",
+          rec.ok === true && rec.alreadyRecorded === false, JSON.stringify(rec));
+
+        const row = await earningRow("pay_alloc_tax", uid);
+        check("the creator_earnings gross is total LESS tax",
+          row?.gross === "1000", JSON.stringify(row));
+        check("tax never enters the earning gross", row?.gross !== "1080");
+
+        /* THE SPLIT DEBITS EXACTLY THE AUTHORITATIVE SUSPENSE. */
+        const legs = await splitLegs("pay_alloc_tax");
+        const by = new Map(legs.map((l) => [l.account, BigInt(l.amount)]));
+        check("the split debits suspense by exactly the allocatable amount",
+          by.get("unallocated_customer_funds") === BigInt(1000),
+          String(by.get("unallocated_customer_funds")));
+        check("creator_payable + platform_revenue equal that debit exactly",
+          -(by.get("creator_payable") + by.get("platform_revenue")) === BigInt(1000),
+          `${by.get("creator_payable")} + ${by.get("platform_revenue")}`);
+        check("the split posts NO tax_payable leg",
+          !by.has("tax_payable"), legs.map((l) => l.account).join(","));
+        check("and it balances exactly",
+          legs.reduce((a, l) => a + BigInt(l.amount), BigInt(0)) === BigInt(0));
+
+        /* THE TAX LIABILITY IS UNTOUCHED BY THE ALLOCATION. */
+        check("tax_payable still holds the whole tax after allocating",
+          (await acctBalance("pay_alloc_tax", "tax_payable")) === BigInt(-80),
+          String(await acctBalance("pay_alloc_tax", "tax_payable")));
+
+        /* AND SUSPENSE IS FULLY CLEARED — no residual, and never negative. */
+        check("suspense nets to zero: credited then allocated, nothing left over",
+          (await acctBalance("pay_alloc_tax", "unallocated_customer_funds")) === BigInt(0),
+          String(await acctBalance("pay_alloc_tax", "unallocated_customer_funds")));
+
+        /* THE OLD BUG, AS AN ASSERTION. Allocating 1080 would have left suspense
+         * at -80 — the tax paid out to creator and platform. */
+        check("the pre-fix outcome (suspense driven negative by the tax) cannot occur",
+          (await acctBalance("pay_alloc_tax", "unallocated_customer_funds")) !== BigInt(-80));
+      }
+
+      /* ---- 2 & 3. THE REQUEST'S FIGURES ARE ASSERTIONS ---- */
+      {
+        const uid = await newCreator();
+        await settle({ paymentId: "pay_alloc_assert", totalMinor: BigInt(1080), taxMinor: BigInt(80) });
+
+        const wrongGross = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid,
+          whopPaymentId: "pay_alloc_assert",
+          environment: "sandbox",
+          paymentSettledAt: new Date(),
+          // The payment TOTAL — exactly the number an admin would copy from the
+          // dashboard, and exactly the one that used to be allocated.
+          expectedGrossAmountMinor: BigInt(1080),
+        });
+        check("an asserted gross that is the pre-tax total is REFUSED",
+          wrongGross.ok === false && wrongGross.reason === "gross_mismatch",
+          JSON.stringify(wrongGross));
+        check("and nothing was written for it",
+          (await earningRow("pay_alloc_assert", uid)) === undefined &&
+          (await splitLegs("pay_alloc_assert")).length === 0);
+
+        const wrongCurrency = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid,
+          whopPaymentId: "pay_alloc_assert",
+          environment: "sandbox",
+          paymentSettledAt: new Date(),
+          expectedCurrency: "eur",
+        });
+        check("an asserted currency that disagrees is REFUSED",
+          wrongCurrency.ok === false && wrongCurrency.reason === "currency_assertion_failed",
+          JSON.stringify(wrongCurrency));
+
+        const rightBoth = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid,
+          whopPaymentId: "pay_alloc_assert",
+          environment: "sandbox",
+          paymentSettledAt: new Date(),
+          expectedGrossAmountMinor: BigInt(1000),
+          expectedCurrency: "USD",
+        });
+        check("assertions that AGREE are accepted, and case-insensitively",
+          rightBoth.ok === true, JSON.stringify(rightBoth));
+      }
+
+      /* ---- 4 & 5. NON-USD, INCLUDING A ZERO-DECIMAL CURRENCY ---- */
+      {
+        const uid = await newCreator();
+        await settle({ paymentId: "pay_alloc_eur", totalMinor: BigInt(5000), taxMinor: BigInt(500), currency: "eur" });
+        const rec = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid, whopPaymentId: "pay_alloc_eur",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("a EUR settlement allocates, rather than being refused as non-USD",
+          rec.ok === true, JSON.stringify(rec));
+        const row = await earningRow("pay_alloc_eur", uid);
+        check("and it allocates IN EUR, at total less tax",
+          row?.currency === "eur" && row?.gross === "4500", JSON.stringify(row));
+        const eurLegs = await splitLegs("pay_alloc_eur");
+        check("every split leg is denominated in eur",
+          eurLegs.length > 0 && eurLegs.every((l) => l.currency === "eur"));
+        check("and the EUR split balances",
+          eurLegs.reduce((a, l) => a + BigInt(l.amount), BigInt(0)) === BigInt(0));
+
+        const jpyUid = await newCreator();
+        // JPY has ZERO decimals: 1000 minor units is ¥1000, not ¥10.00.
+        await settle({ paymentId: "pay_alloc_jpy", totalMinor: BigInt(1000), taxMinor: BigInt(100), currency: "jpy" });
+        const jpy = await earningsMod.recordCreatorEarning({
+          firebaseUid: jpyUid, whopPaymentId: "pay_alloc_jpy",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("a zero-decimal currency allocates through the same path",
+          jpy.ok === true, JSON.stringify(jpy));
+        const jpyRow = await earningRow("pay_alloc_jpy", jpyUid);
+        check("in JPY, at total less tax, with no decimal scaling applied anywhere",
+          jpyRow?.currency === "jpy" && jpyRow?.gross === "900", JSON.stringify(jpyRow));
+      }
+
+      /* ---- 6. MISSING SETTLEMENT FAILS CLOSED ---- */
+      {
+        const uid = await newCreator();
+        const rec = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid, whopPaymentId: "pay_alloc_never_settled",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("allocating a payment that never settled is refused",
+          rec.ok === false && rec.reason === "settlement_not_found", JSON.stringify(rec));
+        check("and writes no earning row and no journal",
+          (await earningRow("pay_alloc_never_settled", uid)) === undefined &&
+          (await splitLegs("pay_alloc_never_settled")).length === 0);
+      }
+
+      /* ---- 7. INCOMPATIBLE SETTLEMENT STATE FAILS CLOSED ---- */
+      {
+        const uid = await newCreator();
+        // Two settlements naming one payment. The economic key makes this
+        // unreachable in production, which is exactly why it must refuse rather
+        // than pick one: if it ever appears, a constraint was bypassed.
+        await settle({ paymentId: "pay_alloc_dup", totalMinor: BigInt(1000) });
+        await settle({ paymentId: "pay_alloc_dup", totalMinor: BigInt(2000), key: "whop:payment_settled:pay_alloc_dup:second" });
+
+        const dup = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid, whopPaymentId: "pay_alloc_dup",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("two settlements for one payment are refused, not resolved by guessing",
+          dup.ok === false && dup.reason === "ambiguous_settlement", JSON.stringify(dup));
+
+        // A SECOND CREATOR on an already-allocated payment. The earning row's
+        // uniqueness is per (payment, creator), so this passes that check — and
+        // would post a second full-suspense debit if nothing stopped it.
+        const first = await newCreator();
+        const second = await newCreator();
+        await settle({ paymentId: "pay_alloc_twice", totalMinor: BigInt(1000) });
+        const one = await earningsMod.recordCreatorEarning({
+          firebaseUid: first, whopPaymentId: "pay_alloc_twice",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("the first creator allocates the settlement", one.ok === true, JSON.stringify(one));
+        const two = await earningsMod.recordCreatorEarning({
+          firebaseUid: second, whopPaymentId: "pay_alloc_twice",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("a SECOND creator cannot allocate the same suspense again",
+          two.ok === false && two.reason === "already_allocated", JSON.stringify(two));
+        check("so suspense is cleared exactly once, never twice",
+          (await acctBalance("pay_alloc_twice", "unallocated_customer_funds")) === BigInt(0),
+          String(await acctBalance("pay_alloc_twice", "unallocated_customer_funds")));
+
+        // And the ORIGINAL creator re-recording is still an idempotent no-op,
+        // NOT an `already_allocated` error — the row check runs first.
+        const repeat = await earningsMod.recordCreatorEarning({
+          firebaseUid: first, whopPaymentId: "pay_alloc_twice",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("re-recording the same creator is still idempotent, not an error",
+          repeat.ok === true && repeat.alreadyRecorded === true, JSON.stringify(repeat));
+      }
+
+      /* ---- 8. ENVIRONMENT ISOLATION ---- */
+      {
+        const uid = await newCreator();
+        await settle({ paymentId: "pay_alloc_env", totalMinor: BigInt(1000), environment: "production" });
+        const wrongEnv = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid, whopPaymentId: "pay_alloc_env",
+          environment: "sandbox", paymentSettledAt: new Date(),
+        });
+        check("a sandbox allocation cannot read a production settlement",
+          wrongEnv.ok === false && wrongEnv.reason === "settlement_not_found",
+          JSON.stringify(wrongEnv));
+        const rightEnv = await allocMod.readSettlementAllocation("pay_alloc_env", "production");
+        check("while production reads its own",
+          rightEnv.ok === true && rightEnv.allocation.allocatableMinor === BigInt(1000));
+      }
+
+      /* ---- 12. EXISTING USD / NO-TAX BEHAVIOUR IS UNCHANGED ---- */
+      {
+        const uid = await newCreator();
+        await settle({ paymentId: "pay_alloc_plain", totalMinor: BigInt(1000), feeMinor: BigInt(87) });
+        const rec = await earningsMod.recordCreatorEarning({
+          firebaseUid: uid, whopPaymentId: "pay_alloc_plain",
+          environment: "sandbox", paymentSettledAt: new Date(),
+          expectedGrossAmountMinor: BigInt(1000),
+          expectedCurrency: "usd",
+        });
+        check("an untaxed USD settlement allocates its full gross, as it always did",
+          rec.ok === true, JSON.stringify(rec));
+        const row = await earningRow("pay_alloc_plain", uid);
+        check("with no tax, allocatable equals the gross — the old figure exactly",
+          row?.gross === "1000" && row?.currency === "usd", JSON.stringify(row));
+        /* TASK #17 POLICY UNTOUCHED: 20% of 1000 is 200, net 800. This asserts
+         * the formula was applied to the authoritative gross, not that the
+         * formula changed. */
+        check("and the Task #17 fee split is applied unchanged to that gross",
+          row?.fee === "200" && row?.net === "800", JSON.stringify(row));
+      }
+
+      /* ---- THE SOURCE OF TRUTH, AT THE SOURCE ---- */
+      {
+        const earnSrc = readFileSync("src/lib/server/creator-earnings.ts", "utf8")
+          .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+        check("the gross handed to the fee policy comes from the settlement",
+          /computeEarningsBreakdown\(allocatableMinor, currency\)/.test(earnSrc));
+        check("no literal usd is passed into the earning any more",
+          !/currency: "usd"/.test(earnSrc));
+        check("the settlement is read AFTER the idempotency check, so a re-record cannot error",
+          earnSrc.indexOf("if (existing) return") <
+            earnSrc.indexOf("readSettlementAllocation(input.whopPaymentId"));
+
+        /* THE ROUTE ITSELF, INVOKED. Two source-regex checks here previously let
+         * mutations through: one that reinstated the non-USD refusal under a
+         * renamed variable, and one that disabled the 409 branch while leaving
+         * the literal `409` in the file for the regex to find. A status code is
+         * not something a regex can assert — so the route is called. */
+        const route = loadTs("src/app/api/admin/earnings/record/route.ts");
+        const post = (payload) => route.POST(new Request("https://app.test/api/admin/earnings/record", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }));
+
+        const uidRoute = await newCreator();
+        await settle({ paymentId: "pay_alloc_route", totalMinor: BigInt(1080), taxMinor: BigInt(80) });
+
+        const mismatched = await post({
+          firebase_uid: uidRoute,
+          whop_payment_id: "pay_alloc_route",
+          gross_minor: 1080,
+        });
+        check("the route answers a gross mismatch with a real 409",
+          mismatched.status === 409, String(mismatched.status));
+        check("and names the refusal in the body",
+          (await mismatched.json()).error === "gross_mismatch");
+
+        const nonUsd = await newCreator();
+        await settle({ paymentId: "pay_alloc_route_eur", totalMinor: BigInt(2000), currency: "eur" });
+        const eurAccepted = await post({
+          firebase_uid: nonUsd,
+          whop_payment_id: "pay_alloc_route_eur",
+          currency: "eur",
+        });
+        check("the route ACCEPTS a non-USD allocation instead of refusing it",
+          eurAccepted.status === 200 && (await eurAccepted.json()).ok === true,
+          String(eurAccepted.status));
+
+        const routeSrc = readFileSync("src/app/api/admin/earnings/record/route.ts", "utf8")
+          .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+        /* SPELLING-INDEPENDENT, deliberately. This began as `/currency !== "usd"/`
+         * and a mutation that reinstated the refusal as `currencyRaw !== "usd"`
+         * walked straight past it — a variable rename defeated the whole check.
+         * What matters is that the route does not compare a currency to a literal
+         * at all, and does not own an `unsupported_currency` refusal of its own:
+         * the settlement decides, and the route only passes that decision on. */
+        check("the route no longer refuses every non-USD request",
+          !/!==\s*"usd"/.test(routeSrc) && !/===\s*"usd"/.test(routeSrc));
+        check("and owns no currency refusal of its own — only the settlement's",
+          !/return \{ error: "unsupported_currency" \}/.test(routeSrc));
+        check("and no longer passes a hard-coded currency to the recorder",
+          !/currency: "usd"/.test(routeSrc));
+        check("its body figures reach the recorder as ASSERTIONS only",
+          /expectedGrossAmountMinor,/.test(routeSrc) && /expectedCurrency,/.test(routeSrc) &&
+          !/grossAmountMinor,/.test(routeSrc));
+        check("a mismatch answers with a real 4xx, not a 200 carrying an error",
+          /status: 409/.test(routeSrc) && /gross_mismatch: true/.test(routeSrc));
+      }
+    }
+
     await scoped.end({ timeout: 5 });
+
+
   } finally {
     DB = null;
     FAKE_WHOP = null;

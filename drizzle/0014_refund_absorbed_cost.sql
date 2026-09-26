@@ -1,0 +1,26 @@
+-- ===========================================================================
+-- TASK #19 P1-2 — a home for the refund cost the platform absorbs.
+--
+-- Task #17 policy retains the fixed processing fee when a refund or lost
+-- dispute unwinds an earning. The customer's cash still goes back, so the
+-- retained fee left a DEBIT balance in `unallocated_customer_funds` — a
+-- suspense liability holding a debit, which asserts the platform is owed
+-- customer money it is not. This account gives that cost an explicit expense
+-- home so suspense returns to zero and the retained revenue stays visible.
+--
+-- ADDITIVE ONLY. `ledger_account` is a Postgres enum, so a new account is a
+-- new enum value; nothing existing is altered, renamed or reordered, and no
+-- row is rewritten. Adding a value cannot invalidate any existing entry.
+--
+-- ON ENUM ORDERING: `ADD VALUE` without BEFORE/AFTER appends, and the enum's
+-- sort order is its declaration order. `schema.ts` lists `refund_absorbed_cost`
+-- last for exactly that reason, so the TypeScript list and the type agree.
+--
+-- ON TRANSACTIONS: Postgres 12+ permits `ALTER TYPE ... ADD VALUE` inside a
+-- transaction block, but the new value cannot be USED until that transaction
+-- commits. This migration therefore adds the value and does nothing else — no
+-- insert, no constraint, no backfill references it. Migration 0010 added three
+-- `economic_event` values the same way and applied cleanly.
+-- ===========================================================================
+
+ALTER TYPE "public"."ledger_account" ADD VALUE IF NOT EXISTS 'refund_absorbed_cost';

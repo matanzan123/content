@@ -635,6 +635,14 @@ export const ledgerAccountEnum = pgEnum("ledger_account", [
   "platform_revenue",
   "provider_fee_expense",
   "fx_adjustment",
+  /**
+   * Added by 0014. Refunded customer cash no revenue reversal covers — the
+   * retained fixed processing fee and the pro-rata floor residue. Appended
+   * LAST because Postgres enum values are ordered by their position in the
+   * type and `ALTER TYPE ... ADD VALUE` without BEFORE/AFTER appends; keeping
+   * this list in the type's real order is what lets the two be compared.
+   */
+  "refund_absorbed_cost",
 ]);
 
 /**

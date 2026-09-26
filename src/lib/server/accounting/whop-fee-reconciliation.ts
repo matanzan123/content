@@ -7,7 +7,12 @@ import { accountingEntries, accountingTransactions } from "@/lib/db/schema";
 import { describeWhopError, getWhopPaymentsClient, getWhopEnvironment } from "../whop-payments";
 import { currencyDecimals, decimalToMinor, normaliseCurrency } from "../money";
 import { economicKey } from "./accounts";
-import { postTransaction } from "./journal";
+import {
+  splitFeeLines,
+  TAX_REMITTANCE_NET_SOURCE_DETAIL,
+  TAX_REMITTANCE_SOURCE_DETAIL_SQL,
+} from "./fee-classification";
+import { postTransaction, type JournalLeg } from "./journal";
 
 /* ==========================================================================
    PROVIDER FEE RECONCILIATION — server only.
@@ -68,6 +73,16 @@ import { postTransaction } from "./journal";
    narrower race of two callers reading the same state concurrently — both
    compute the same count, both build the same key, and the database admits
    one.
+
+   TWO CLASSES, RECONCILED SEPARATELY. `sales_tax_remittance` and its reversal
+   move tax PRINCIPAL, so they are totalled apart from the fees and compared
+   against what `tax_payable` already holds from remittances — never against
+   `provider_fee_expense`. A delta is only meaningful against the total it is a
+   difference from. This is also the path that matters most in practice: Whop
+   remits when it files, days or weeks after settlement, so the remittance
+   usually arrives HERE rather than on the settlement posting, and a
+   reconciliation that ignored it would leave the liability undischarged
+   forever. The rule lives in `fee-classification.ts`.
 
    CURRENCY: fees are always in the payment's own currency (settlement amount),
    and that currency is only ever taken from the provider — the fee lines when
@@ -144,6 +159,50 @@ async function postedFeeTotal(paymentId: string): Promise<bigint | null> {
 }
 
 /**
+ * Tax principal we have already booked as remitted onward for this payment.
+ *
+ * Scoped exactly as `postedFeeTotal` is, and narrowed further by
+ * `source_detail`: `tax_payable` also carries the BUYER's tax, credited at
+ * settlement and debited when a refund returns some, and summing that here
+ * would make a remittance look already-booked the moment a buyer was refunded.
+ * The origin on the leg is what separates the two, so no schema change.
+ *
+ * Returned in the provider's own sign, so it can be subtracted from the
+ * provider's current remittance total directly.
+ */
+async function postedTaxRemittanceTotal(paymentId: string): Promise<bigint | null> {
+  const db = getDb();
+  if (!db) return null;
+
+  const environment = getWhopEnvironment();
+  if (!environment) return null;
+
+  const rows = await db
+    .select({
+      total: sql<string>`coalesce(sum(${accountingEntries.amountMinor}), 0)::text`,
+    })
+    .from(accountingEntries)
+    .innerJoin(
+      accountingTransactions,
+      eq(accountingEntries.transactionId, accountingTransactions.transactionId),
+    )
+    .where(
+      and(
+        eq(accountingEntries.account, "tax_payable"),
+        sql`${accountingEntries.sourceDetail} in (${sql.raw(TAX_REMITTANCE_SOURCE_DETAIL_SQL)})`,
+        eq(accountingTransactions.provider, "whop"),
+        eq(accountingTransactions.environment, environment),
+        sql`(
+          ${accountingTransactions.providerResourceId} = ${paymentId}
+          or ${accountingTransactions.metadata}->>'payment_id' = ${paymentId}
+        )`,
+      ),
+    );
+
+  return rows[0] ? BigInt(rows[0].total) : BigInt(0);
+}
+
+/**
  * How many fee corrections this payment already carries.
  *
  * The idempotency discriminator. Counting `provider_fee_reconciled`
@@ -185,7 +244,17 @@ async function reconciliationCount(paymentId: string): Promise<number | null> {
    ------------------------------------------------------------------------- */
 
 type ActualFees = {
+  /**
+   * Total of the lines that are genuinely FEES.
+   *
+   * Tax-remittance lines are excluded and reported in `taxRemittanceTotal`
+   * instead: they move tax principal, so totalling them here would compare them
+   * against `provider_fee_expense` and drift the fee figure by the tax. See
+   * `fee-classification.ts`.
+   */
   total: bigint;
+  /** Total of the tax-remittance lines, in the provider's own sign. */
+  taxRemittanceTotal: bigint;
   currency: string;
   /** Each fee line for the delta journal's sourceDetail. */
   lines: { origin: string; amountMinor: bigint }[];
@@ -232,7 +301,6 @@ async function fetchActualFees(paymentId: string): Promise<
    */
   let currency: string | null = null;
   const lines: ActualFees["lines"] = [];
-  let total = BigInt(0);
 
   for (const line of feeLines) {
     const raw = line.settlement_amount;
@@ -268,10 +336,24 @@ async function fetchActualFees(paymentId: string): Promise<
     if (minor === BigInt(0)) continue;
 
     lines.push({ origin: String(line.origin), amountMinor: minor });
-    total += minor;
   }
 
-  if (currency) return { ok: true, fees: { total, currency, lines } };
+  /* CLASSIFIED BEFORE ANYTHING IS TOTALLED. `lines` keeps every line, in order,
+   * so the journal's `source_detail` still names exactly what the provider
+   * reported; only the TOTALS are separated by account. */
+  const split = splitFeeLines(lines);
+
+  if (currency) {
+    return {
+      ok: true,
+      fees: {
+        total: split.providerFeeMinor,
+        taxRemittanceTotal: split.taxRemittanceMinor,
+        currency,
+        lines,
+      },
+    };
+  }
 
   /* NO FEE LINE SUPPLIED A CURRENCY — fees are genuinely zero, or not yet
    * reported. The total is zero either way, but the caller still needs a
@@ -299,7 +381,10 @@ async function fetchActualFees(paymentId: string): Promise<
     return { ok: false, reason: "unsupported_currency", detail: "payment_currency_unprovable" };
   }
 
-  return { ok: true, fees: { total: BigInt(0), currency: paymentCurrency, lines: [] } };
+  return {
+    ok: true,
+    fees: { total: BigInt(0), taxRemittanceTotal: BigInt(0), currency: paymentCurrency, lines: [] },
+  };
 }
 
 /**
@@ -368,6 +453,12 @@ export type FeeDriftInspection =
       actualMinor: bigint;
       /** `actual - posted`. Non-zero means the journal has drifted. */
       deltaMinor: bigint;
+      /** Tax principal already booked as remitted, in the provider's sign. */
+      taxRemittancePostedMinor: bigint;
+      /** The provider's current tax-remittance total. */
+      taxRemittanceActualMinor: bigint;
+      /** `actual - posted` for tax principal. Non-zero means tax has moved. */
+      taxRemittanceDeltaMinor: bigint;
       currency: string;
       /** The provider's fee lines behind `actualMinor`. */
       lines: { origin: string; amountMinor: bigint }[];
@@ -396,9 +487,10 @@ export async function inspectProviderFeeDrift(
   const db = getDb();
   if (!db) return { ok: false, reason: "db_unavailable" };
 
-  const [actualResult, posted, booked] = await Promise.all([
+  const [actualResult, posted, postedTaxRemittance, booked] = await Promise.all([
     fetchActualFees(paymentId),
     postedFeeTotal(paymentId),
+    postedTaxRemittanceTotal(paymentId),
     bookedSettlementCurrency(paymentId),
   ]);
 
@@ -406,6 +498,7 @@ export async function inspectProviderFeeDrift(
     return { ok: false, reason: actualResult.reason, detail: actualResult.detail };
   }
   if (posted === null) return { ok: false, reason: "db_unavailable" };
+  if (postedTaxRemittance === null) return { ok: false, reason: "db_unavailable" };
 
   /* THE PROVIDER'S CURRENCY VERSUS THE ONE WE BOOKED THE SETTLEMENT IN.
    *
@@ -430,6 +523,9 @@ export async function inspectProviderFeeDrift(
     postedMinor: posted,
     actualMinor: actualResult.fees.total,
     deltaMinor: actualResult.fees.total - posted,
+    taxRemittancePostedMinor: postedTaxRemittance,
+    taxRemittanceActualMinor: actualResult.fees.taxRemittanceTotal,
+    taxRemittanceDeltaMinor: actualResult.fees.taxRemittanceTotal - postedTaxRemittance,
     currency: actualResult.fees.currency,
     lines: actualResult.fees.lines,
   };
@@ -465,22 +561,62 @@ export async function reconcileProviderFees(
     },
   };
   const delta = inspection.deltaMinor;
+  const taxDelta = inspection.taxRemittanceDeltaMinor;
 
-  if (delta === BigInt(0)) {
+  /* NOTHING HAS MOVED IN EITHER CLASS. A tax remittance arriving on its own is
+   * a real movement even when no fee changed, so both have to be zero before
+   * this is a no-op — checking only the fee delta would leave the liability
+   * undischarged for exactly the case this classification exists to fix. */
+  if (delta === BigInt(0) && taxDelta === BigInt(0)) {
     return { ok: true, deltaMinor: BigInt(0), posted: false, transactionId: null };
   }
 
   const currency = actualResult.fees.currency;
 
-  // Build the legs. The delta is always a two-leg entry:
-  //   provider_fee_expense  [delta]   — positive = more fees, negative = fewer
-  //   provider_balance      [-delta]  — balancing leg
-  const absDelta = delta < BigInt(0) ? -delta : delta;
-  const sign = delta > BigInt(0) ? BigInt(1) : BigInt(-1);
-
+  /* Build the legs. Each class that moved gets its own leg, and
+   * `provider_balance` balances whatever the two of them come to:
+   *
+   *   provider_fee_expense  [delta]     positive = more fees, negative = fewer
+   *   tax_payable           [taxDelta]  tax principal moving onward, or back
+   *   provider_balance      [-(sum)]    the balancing leg
+   *
+   * Both deltas are carried in the provider's own sign, so a remittance debits
+   * the liability and a reversal credits it without this code deciding which is
+   * which. The balancing leg sums them because both came out of the same
+   * provider balance. */
   const sourceDetail = actualResult.fees.lines.length > 0
     ? actualResult.fees.lines.map((l) => l.origin).join(",")
     : "fee_correction";
+
+  const legs: JournalLeg[] = [];
+
+  if (delta !== BigInt(0)) {
+    legs.push({
+      account: "provider_fee_expense",
+      amountMinor: delta,
+      counterpartyType: "provider",
+      counterpartyId: "whop",
+      sourceDetail,
+    });
+  }
+
+  if (taxDelta !== BigInt(0)) {
+    legs.push({
+      account: "tax_payable",
+      amountMinor: taxDelta,
+      counterpartyType: "provider",
+      counterpartyId: "whop",
+      // A NET movement, not a specific provider line — see the classifier.
+      sourceDetail: TAX_REMITTANCE_NET_SOURCE_DETAIL,
+    });
+  }
+
+  legs.push({
+    account: "provider_balance",
+    amountMinor: -(delta + taxDelta),
+    counterpartyType: "provider",
+    counterpartyId: "whop",
+  });
 
   const result = await postTransaction({
     economicEvent: "provider_fee_reconciled",
@@ -501,24 +637,17 @@ export async function reconcileProviderFees(
       fee_lines: actualResult.fees.lines.length,
       previously_posted_minor: posted.toString(),
       actual_total_minor: actualResult.fees.total.toString(),
+      // Tax principal, reported separately so a correction can be read back
+      // without inferring which part of it was tax.
+      tax_remittance_delta_minor: taxDelta.toString(),
+      tax_remittance_previously_posted_minor:
+        inspection.taxRemittancePostedMinor.toString(),
+      tax_remittance_actual_total_minor:
+        inspection.taxRemittanceActualMinor.toString(),
       // Which correction in the sequence this is. Zero-based, matching the key.
       correction_index: corrections,
     },
-    legs: [
-      {
-        account: "provider_fee_expense",
-        amountMinor: sign * absDelta,
-        counterpartyType: "provider",
-        counterpartyId: "whop",
-        sourceDetail,
-      },
-      {
-        account: "provider_balance",
-        amountMinor: -(sign * absDelta),
-        counterpartyType: "provider",
-        counterpartyId: "whop",
-      },
-    ],
+    legs,
   });
 
   if (!result.ok) {

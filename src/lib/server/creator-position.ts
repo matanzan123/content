@@ -3,6 +3,7 @@ import "server-only";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { canRelease, remainingCreatorNet } from "./creator-earnings-policy";
+import { normaliseCurrency } from "./money";
 
 /* ==========================================================================
    THE CREATOR'S FINANCIAL POSITION — one answer to "what is this creator owed".
@@ -65,7 +66,14 @@ import { canRelease, remainingCreatorNet } from "./creator-earnings-policy";
    ========================================================================== */
 
 export type CreatorPosition = {
-  currency: string;
+  /**
+   * The ONE currency every figure below is stated in.
+   *
+   * `null` only when the creator has no earnings and no payable legs at all:
+   * there is no money, so there is nothing to denominate, and naming a currency
+   * anyway would be inventing one. Every amount is zero in that case.
+   */
+  currency: string | null;
   /** Sum of net amounts ever earned, excluding reversed. Audit figure. */
   earnedMinor: bigint;
   /** Net amount unwound by refunds or lost disputes. Audit figure. */
@@ -90,7 +98,21 @@ export type PositionInconsistency =
   /** The ledger says we owe a negative amount: more paid out than credited. */
   | "negative_payable"
   /** More is held than is owed. Rows and ledger disagree. */
-  | "pending_exceeds_payable";
+  | "pending_exceeds_payable"
+  /**
+   * The creator has money in more than one currency, so no single figure
+   * describes what they are owed. The amounts returned alongside this describe
+   * ONE of those currencies and are therefore incomplete — which is why this is
+   * an inconsistency and not a note. Every consumer already refuses on a set
+   * inconsistency, so a payout cannot be made against a partial picture.
+   */
+  | "mixed_currency"
+  /**
+   * A stored currency this build cannot convert to exact minor units. Refused
+   * rather than skipped: ignoring it would report a position that silently
+   * omits real money.
+   */
+  | "unsupported_currency";
 
 export type PositionResult =
   | { ok: true; position: CreatorPosition }
@@ -117,14 +139,28 @@ type Queryable = NonNullable<ReturnType<typeof getDb>>;
  * the reason this lives in one function instead of being written out at each
  * call site.
  *
- * SCOPED THREE WAYS: the account, the creator, and the environment. The
- * environment lives on the transaction, not the entry, so the join is not
- * optional — without it a sandbox read would include production obligations.
+ * SCOPED FOUR WAYS: the account, the creator, the environment, and THE
+ * CURRENCY. The environment lives on the transaction, not the entry, so that
+ * join is not optional — without it a sandbox read would include production
+ * obligations.
+ *
+ * THE CURRENCY IS A REQUIRED PARAMETER, and that is deliberate. This used to
+ * sum every `creator_payable` leg the creator had, in any denomination, and
+ * return one bigint: 1000 EUR-cents added to 1000 USD-cents came back as 2000
+ * of nothing. The figure gates transfers and withdrawals, so it is the last
+ * number that should be summed before its denomination is proven. Making the
+ * currency an argument rather than an option means a caller cannot reach this
+ * without having decided what it is asking about.
+ *
+ * `accounting_entries.currency` is per leg and NOT NULL — the schema calls it
+ * "repeated from the header so a leg can never be read without it" — so this
+ * needs no join to the transaction for the currency and no migration.
  */
 async function ledgerPayableMinor(
   db: Queryable,
   firebaseUid: string,
   environment: "sandbox" | "production",
+  currency: string,
 ): Promise<bigint> {
   const [row] = await db
     .select({
@@ -140,10 +176,102 @@ async function ledgerPayableMinor(
         eq(schema.accountingEntries.account, "creator_payable"),
         eq(schema.accountingEntries.counterpartyId, firebaseUid),
         eq(schema.accountingTransactions.environment, environment),
+        eq(schema.accountingEntries.currency, currency),
       ),
     );
 
   return -BigInt(row?.total ?? "0");
+}
+
+/* -------------------------------------------------------------------------
+   Which currency this creator's position is even in
+   ------------------------------------------------------------------------- */
+
+export type CurrencyResolution =
+  /** Exactly one currency is present. The position can be stated in it. */
+  | { kind: "single"; currency: string }
+  /** No earnings and no payable legs. There is nothing to denominate. */
+  | { kind: "none" }
+  /** More than one. Every currency found, sorted, so the report is stable. */
+  | { kind: "mixed"; currencies: string[] }
+  /** A currency this build cannot do exact minor-unit arithmetic in. */
+  | { kind: "unsupported"; currencies: string[] };
+
+/**
+ * Finds every currency this creator has money in, from BOTH sides.
+ *
+ * WHY BOTH SIDES. The position compares a ledger obligation against earning
+ * rows, so a currency present in only one of them still makes the comparison
+ * meaningless. Reading just the earning rows — which is what the old
+ * `rows.find(Boolean)?.currency` did — would miss a `creator_payable` leg in
+ * another denomination entirely.
+ *
+ * NO DEFAULT IS INVENTED. The old code fell back to `"usd"` when a creator had
+ * no rows, which stated a denomination for money that did not exist, and picked
+ * the FIRST row's currency otherwise — from a query with no ORDER BY, so for a
+ * mixed creator the answer could differ between two calls and the whole
+ * position was non-deterministic. This returns what is actually there and lets
+ * the caller decide, and its ordering is explicit so the answer is stable.
+ *
+ * UNSUPPORTED FAILS CLOSED rather than being filtered out. A stored currency
+ * this build cannot scale to minor units is a data fault, and dropping it would
+ * quietly report a position that ignores real money.
+ */
+export async function resolveCreatorCurrency(
+  db: Queryable,
+  firebaseUid: string,
+  environment: "sandbox" | "production",
+): Promise<CurrencyResolution> {
+  const [earningRows, ledgerRows] = await Promise.all([
+    db
+      .selectDistinct({ currency: schema.creatorEarnings.currency })
+      .from(schema.creatorEarnings)
+      .where(
+        and(
+          eq(schema.creatorEarnings.firebaseUid, firebaseUid),
+          eq(schema.creatorEarnings.environment, environment),
+        ),
+      ),
+    db
+      .selectDistinct({ currency: schema.accountingEntries.currency })
+      .from(schema.accountingEntries)
+      .innerJoin(
+        schema.accountingTransactions,
+        eq(schema.accountingEntries.transactionId, schema.accountingTransactions.transactionId),
+      )
+      .where(
+        and(
+          eq(schema.accountingEntries.account, "creator_payable"),
+          eq(schema.accountingEntries.counterpartyId, firebaseUid),
+          eq(schema.accountingTransactions.environment, environment),
+        ),
+      ),
+  ]);
+
+  const raw = [...earningRows, ...ledgerRows].map((r) => r.currency);
+
+  // Stored codes are trimmed and lower-cased before comparison: `char(3)` pads,
+  // so a leg read back can carry trailing spaces that would otherwise look like
+  // a different currency from the same code on an earning row.
+  const seen = new Set<string>();
+  const unsupported = new Set<string>();
+  for (const value of raw) {
+    const code = typeof value === "string" ? value.trim().toLowerCase() : "";
+    if (!code) continue;
+    const normalised = normaliseCurrency(code);
+    if (!normalised) {
+      unsupported.add(code);
+      continue;
+    }
+    seen.add(normalised);
+  }
+
+  if (unsupported.size > 0) {
+    return { kind: "unsupported", currencies: [...unsupported].sort() };
+  }
+  if (seen.size === 0) return { kind: "none" };
+  if (seen.size === 1) return { kind: "single", currency: [...seen][0] };
+  return { kind: "mixed", currencies: [...seen].sort() };
 }
 
 /* -------------------------------------------------------------------------
@@ -203,18 +331,36 @@ async function eligibilityRows(
  * a reserving caller MUST do that, or two of them can read the same balance
  * and both spend it.
  */
-export async function computeCreatorPosition(
+export async function computeCreatorPositionInCurrency(
   firebaseUid: string,
   environment: "sandbox" | "production",
   db: Queryable,
+  currency: string,
+  /** Carried through when the caller already knows the position is partial. */
+  presetInconsistency: PositionInconsistency | null = null,
 ): Promise<CreatorPosition> {
+  /* THE CURRENCY IS PROVEN BEFORE ANY SUM IS TAKEN. An unsupported code cannot
+   * be scaled to minor units, so there is no honest figure to return for it. */
+  const target = normaliseCurrency(currency);
+  if (!target) {
+    return {
+      currency: null,
+      earnedMinor: BigInt(0),
+      reversedMinor: BigInt(0),
+      pendingMinor: BigInt(0),
+      payableMinor: BigInt(0),
+      availableMinor: BigInt(0),
+      transferredMinor: BigInt(0),
+      inconsistency: "unsupported_currency",
+    };
+  }
+
   const [payableMinor, rows] = await Promise.all([
-    ledgerPayableMinor(db, firebaseUid, environment),
+    ledgerPayableMinor(db, firebaseUid, environment, target),
     eligibilityRows(db, firebaseUid, environment),
   ]);
 
   const now = new Date();
-  const currency = rows.find(Boolean)?.currency ?? "usd";
 
   let earnedMinor = BigInt(0);
   let reversedMinor = BigInt(0);
@@ -222,10 +368,14 @@ export async function computeCreatorPosition(
   let transferredMinor = BigInt(0);
 
   for (const row of rows) {
-    // A mixed-currency row cannot be added to a single total. Skipping keeps
-    // the figure honest for the dominant currency; a second currency becoming
-    // real is a product decision, not something to average over.
-    if (row.currency !== currency) continue;
+    /* ONLY THE TARGET CURRENCY. A row in another denomination is real money
+     * that this figure does not describe, so it is left out rather than added —
+     * and the caller is told the position is partial through `mixed_currency`,
+     * so the omission is never silent.
+     *
+     * Trimmed and lower-cased on both sides: `char(3)` pads on storage, so a
+     * padded `"usd "` must not read as a different currency from `"usd"`. */
+    if (row.currency?.trim().toLowerCase() !== target) continue;
 
     if (row.status === "reversed") {
       reversedMinor += row.netAmountMinor;
@@ -270,14 +420,18 @@ export async function computeCreatorPosition(
   // A negative figure is never shown as money. It is reported as a fault, and
   // the withdrawable amount floors at zero so nothing downstream can spend a
   // negative number into a positive one.
-  let inconsistency: PositionInconsistency | null = null;
-  if (payableMinor < BigInt(0)) inconsistency = "negative_payable";
-  else if (rawAvailable < BigInt(0)) inconsistency = "pending_exceeds_payable";
+  // A preset fault outranks the arithmetic ones: if the position is already
+  // known to be partial, that is the more important thing to say about it.
+  let inconsistency: PositionInconsistency | null = presetInconsistency;
+  if (inconsistency === null) {
+    if (payableMinor < BigInt(0)) inconsistency = "negative_payable";
+    else if (rawAvailable < BigInt(0)) inconsistency = "pending_exceeds_payable";
+  }
 
   const availableMinor = rawAvailable > BigInt(0) ? rawAvailable : BigInt(0);
 
   return {
-    currency,
+    currency: target,
     earnedMinor,
     reversedMinor,
     pendingMinor,
@@ -286,6 +440,78 @@ export async function computeCreatorPosition(
     transferredMinor,
     inconsistency,
   };
+}
+
+/**
+ * The creator's position, with the currency resolved from their own data.
+ *
+ * FOR CALLERS THAT HAVE NO CURRENCY TO OFFER — the balance a creator is shown,
+ * and the reconciler sweeping every creator. A money-moving caller should use
+ * `computeCreatorPositionInCurrency` and name the currency it is moving, so the
+ * cap it checks is denominated in the same thing as the amount it is paying.
+ *
+ * WHAT IT DOES WITH EACH OUTCOME:
+ *
+ *   single       state the position in that currency — the ordinary case, and
+ *                byte-for-byte what this function always returned for a
+ *                single-currency creator
+ *   none         an empty position with a NULL currency. No money exists, so
+ *                nothing is denominated and nothing is invented
+ *   mixed        the alphabetically first currency's figures, flagged
+ *                `mixed_currency`. Deterministic, so two calls agree, and
+ *                flagged, so no consumer treats a partial figure as the whole
+ *   unsupported  refused outright as `unsupported_currency`
+ */
+export async function computeCreatorPosition(
+  firebaseUid: string,
+  environment: "sandbox" | "production",
+  db: Queryable,
+): Promise<CreatorPosition> {
+  const resolution = await resolveCreatorCurrency(db, firebaseUid, environment);
+
+  switch (resolution.kind) {
+    case "single":
+      return computeCreatorPositionInCurrency(firebaseUid, environment, db, resolution.currency);
+
+    case "mixed":
+      /* THE FIRST BY CODE, not the first row a query happened to return. The
+       * choice is arbitrary but it must be STABLE: the figures accompany a
+       * `mixed_currency` flag that makes them unusable for payment anyway, and
+       * an unstable pick would make the same creator's balance change between
+       * two reads for no reason. */
+      return computeCreatorPositionInCurrency(
+        firebaseUid,
+        environment,
+        db,
+        resolution.currencies[0],
+        "mixed_currency",
+      );
+
+    case "unsupported":
+      return {
+        currency: null,
+        earnedMinor: BigInt(0),
+        reversedMinor: BigInt(0),
+        pendingMinor: BigInt(0),
+        payableMinor: BigInt(0),
+        availableMinor: BigInt(0),
+        transferredMinor: BigInt(0),
+        inconsistency: "unsupported_currency",
+      };
+
+    case "none":
+      // Nothing earned, nothing owed. A real, consistent zero — not a fault.
+      return {
+        currency: null,
+        earnedMinor: BigInt(0),
+        reversedMinor: BigInt(0),
+        pendingMinor: BigInt(0),
+        payableMinor: BigInt(0),
+        availableMinor: BigInt(0),
+        transferredMinor: BigInt(0),
+        inconsistency: null,
+      };
+  }
 }
 
 /** Convenience wrapper for read-only callers with no open transaction. */
@@ -343,6 +569,13 @@ export async function reserveFromPosition(
   firebaseUid: string,
   environment: "sandbox" | "production",
   amountMinor: bigint,
+  /**
+   * THE CURRENCY THE AMOUNT IS IN. Required, because the comparison below is
+   * between two numbers and is only meaningful if both are the same money. The
+   * cap is computed in exactly this currency, so a creator owed 1000 EUR-cents
+   * cannot cover a request for 1000 USD-cents.
+   */
+  currency: string,
 ): Promise<ReservationOutcome> {
   const locked = await tx
     .select({ id: schema.whopAccounts.id })
@@ -358,10 +591,20 @@ export async function reserveFromPosition(
 
   if (locked.length === 0) return { ok: false, reason: "creator_not_found" };
 
-  const position = await computeCreatorPosition(firebaseUid, environment, tx);
+  /* IN THE REQUESTED CURRENCY, not in whichever one this creator's data
+   * happens to suggest. A payout is denominated by the payout, and resolving
+   * the currency from the creator's rows here would let a request in one
+   * currency be capped by a balance in another. */
+  const position = await computeCreatorPositionInCurrency(
+    firebaseUid,
+    environment,
+    tx,
+    currency,
+  );
 
   // An inconsistent position is not a small balance, it is an unknown one.
-  // Refusing beats paying out against a number we cannot vouch for.
+  // Refusing beats paying out against a number we cannot vouch for. An
+  // unsupported currency arrives here as exactly that kind of refusal.
   if (position.inconsistency) return { ok: false, reason: "position_inconsistent" };
 
   if (amountMinor > position.availableMinor) {

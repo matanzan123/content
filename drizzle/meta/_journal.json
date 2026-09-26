@@ -99,6 +99,13 @@
       "when": 1790224903953,
       "tag": "0013_creator_earning_cumulative_refunds",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790446296328,
+      "tag": "0014_refund_absorbed_cost",
+      "breakpoints": true
     }
   ]
 }

@@ -43,6 +43,13 @@ export type ReconciliationFinding =
     }
   /** (C) We owe a negative amount: more was paid out than was ever credited. */
   | { check: "negative_payable"; firebaseUid: string; payableMinor: string }
+  /**
+   * (C2) The creator holds money in more than one currency, so no single
+   * payable figure describes what they are owed and the (B) comparison below
+   * cannot be made. Reported rather than skipped silently: the position helper
+   * refuses to pay out against it, and an operator needs to know why.
+   */
+  | { check: "mixed_currency_payable"; firebaseUid: string; currency: string | null }
   /** (D) A `creator_payable` leg keyed to something that is not a creator. */
   | {
       check: "unknown_counterparty";
@@ -150,6 +157,23 @@ export async function reconcileCreatorEarnings(
         check: "negative_payable",
         firebaseUid,
         payableMinor: position.payableMinor.toString(),
+      });
+      continue;
+    }
+
+    /* MIXED OR UNREADABLE CURRENCY: the (B) comparison below subtracts a
+     * ledger figure from a rows figure, and neither describes the whole
+     * position when more than one currency is in play. Reporting it and moving
+     * on beats emitting a `payable_mismatch` that an operator would chase as an
+     * accounting fault when the real problem is the denomination. */
+    if (
+      position.inconsistency === "mixed_currency" ||
+      position.inconsistency === "unsupported_currency"
+    ) {
+      findings.push({
+        check: "mixed_currency_payable",
+        firebaseUid,
+        currency: position.currency,
       });
       continue;
     }

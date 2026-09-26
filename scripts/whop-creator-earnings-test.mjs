@@ -26,6 +26,8 @@
  *   H. The creator API serves the canonical position
  *   I. The canonical position is the admin transfer's cap, and only that
  *   J. Reconciliation looks where the bugs actually are
+ *   K. The payable is summed in ONE currency, never across them
+ *   L. Mixed currency is surfaced to the reconciler, not hidden
  */
 
 import { readFileSync } from "node:fs";
@@ -206,17 +208,55 @@ const position = loadModule("src/lib/server/creator-position.ts", {
     remainingCreatorNet: loadModule("src/lib/server/creator-earnings-policy.ts", {})
       .remainingCreatorNet,
   },
+  /* THE REAL CURRENCY TABLE. Whether a code is supported decides whether the
+   * position is refused as `unsupported_currency`, so faking the list would let
+   * the test agree with itself about a currency the build cannot actually do
+   * exact minor-unit arithmetic in. */
+  "./money": loadModule("src/lib/server/money.ts", {}),
 });
 
 const PAST = new Date(Date.now() - 86_400_000);
 const FUTURE = new Date(Date.now() + 86_400_000);
 
-/** Builds a db whose ledger sum and earning rows the test dictates. */
-function dbWith({ ledgerTotal = "0", rows = [], accountRows = [{ id: "acct-1" }], reserved = "0" }) {
+/**
+ * Builds a db whose ledger sum and earning rows the test dictates.
+ *
+ * `ledgerByCurrency` MAKES THE CURRENCY PREDICATE REAL. When given, the fake
+ * reads the currency condition out of the WHERE clause it was handed and answers
+ * with that currency's total, exactly as a filtered SQL sum would. A query that
+ * forgot the predicate finds no condition and gets "0" — so these assertions
+ * cannot pass by accident, which a fake returning one fixed total would allow.
+ */
+function dbWith({
+  ledgerTotal = "0",
+  ledgerByCurrency = null,
+  ledgerCurrencies = ["usd"],
+  rows = [],
+  accountRows = [{ id: "acct-1" }],
+  reserved = "0",
+}) {
   const log = [];
   return makeDb((state) => {
-    if (state.from === schema.accountingEntries) return [{ total: ledgerTotal }];
-    if (state.from === schema.creatorEarnings) return rows;
+    if (state.from === schema.accountingEntries) {
+      // The DISTINCT-currency probe that resolves which currency to report in.
+      if (state.kind === "selectDistinct") {
+        return (ledgerCurrencies ?? []).map((currency) => ({ currency }));
+      }
+      if (ledgerByCurrency) {
+        const cond = flatten(state.where).find(
+          (c) => c.col === schema.accountingEntries.currency,
+        );
+        return [{ total: cond ? (ledgerByCurrency[cond.value] ?? "0") : "0" }];
+      }
+      return [{ total: ledgerTotal }];
+    }
+    if (state.from === schema.creatorEarnings) {
+      // The DISTINCT-currency probe reads only the currency column.
+      if (state.kind === "selectDistinct") {
+        return [...new Set(rows.map((r) => r.currency))].map((currency) => ({ currency }));
+      }
+      return rows;
+    }
     if (state.from === schema.whopAccounts) return accountRows;
     // Task #15: the in-flight withdrawal reservation total.
     if (state.from === schema.creatorWithdrawals) return [{ total: reserved }];
@@ -395,7 +435,7 @@ section("E. The reservation takes a lock and caps against available");
 
 {
   const db = dbWith({ ledgerTotal: "-10000" });
-  const r = await position.reserveFromPosition(db, "uid_4", "sandbox", BigInt(5000));
+  const r = await position.reserveFromPosition(db, "uid_4", "sandbox", BigInt(5000), "usd");
   check("a covered amount is reserved", r.ok === true);
 
   // THE LOCK IS THE WHOLE POINT. Without it, two callers read the same
@@ -410,14 +450,14 @@ section("E. The reservation takes a lock and caps against available");
     flatten(lockQuery?.where).some((c) => c.col === schema.whopAccounts.environment && c.value === "sandbox"));
 
   const db2 = dbWith({ ledgerTotal: "-10000" });
-  const r2 = await position.reserveFromPosition(db2, "uid_4", "sandbox", BigInt(10001));
+  const r2 = await position.reserveFromPosition(db2, "uid_4", "sandbox", BigInt(10001), "usd");
   check("one minor unit over the balance is refused",
     r2.ok === false && r2.reason === "insufficient_available");
   check("the refusal says what was available",
     r2.availableMinor === BigInt(10000));
 
   const db3 = dbWith({ ledgerTotal: "-10000" });
-  const r3 = await position.reserveFromPosition(db3, "uid_4", "sandbox", BigInt(10000));
+  const r3 = await position.reserveFromPosition(db3, "uid_4", "sandbox", BigInt(10000), "usd");
   check("exactly the balance is allowed", r3.ok === true);
 
   // Held money is not reservable, even though it is owed.
@@ -425,17 +465,17 @@ section("E. The reservation takes a lock and caps against available");
     ledgerTotal: "-10000",
     rows: [earning({ status: "held", netAmountMinor: BigInt(10000), holdUntil: FUTURE })],
   });
-  const r4 = await position.reserveFromPosition(db4, "uid_4", "sandbox", BigInt(1));
+  const r4 = await position.reserveFromPosition(db4, "uid_4", "sandbox", BigInt(1), "usd");
   check("money still on hold cannot be reserved", r4.ok === false);
 
   // An inconsistent position refuses rather than guessing.
   const db5 = dbWith({ ledgerTotal: "500" });
-  const r5 = await position.reserveFromPosition(db5, "uid_4", "sandbox", BigInt(1));
+  const r5 = await position.reserveFromPosition(db5, "uid_4", "sandbox", BigInt(1), "usd");
   check("an inconsistent position refuses the reservation",
     r5.ok === false && r5.reason === "position_inconsistent");
 
   const db6 = dbWith({ ledgerTotal: "-10000", accountRows: [] });
-  const r6 = await position.reserveFromPosition(db6, "uid_4", "sandbox", BigInt(1));
+  const r6 = await position.reserveFromPosition(db6, "uid_4", "sandbox", BigInt(1), "usd");
   check("a creator with no account row cannot be reserved against",
     r6.ok === false && r6.reason === "creator_not_found");
 }
@@ -660,7 +700,12 @@ section("J. Reconciliation looks where the bugs actually are");
   // (B) The ledger and the rows must agree. $100 earned, nothing transferred,
   // but the ledger only owes $20 — money left without the rows settling.
   currentDb = makeDb((state) => {
-    if (state.kind === "selectDistinct") return [{ firebaseUid: "uid_k" }];
+    // A DISTINCT query means one of two different things now: the creator list,
+    // or the currency probe that decides which denomination the position is in.
+    // Told apart by the column asked for, exactly as the real queries are.
+    if (state.kind === "selectDistinct") {
+      return state.fields?.currency ? [{ currency: "usd" }] : [{ firebaseUid: "uid_k" }];
+    }
     if (state.from === schema.accountingEntries) return [{ total: "-2000" }];
     if (state.from === schema.creatorEarnings) {
       return [earning({ status: "available", netAmountMinor: BigInt(10000) })];
@@ -675,7 +720,12 @@ section("J. Reconciliation looks where the bugs actually are");
 
   // (C) A negative obligation.
   currentDb = makeDb((state) => {
-    if (state.kind === "selectDistinct") return [{ firebaseUid: "uid_n" }];
+    // A DISTINCT query means one of two different things now: the creator list,
+    // or the currency probe that decides which denomination the position is in.
+    // Told apart by the column asked for, exactly as the real queries are.
+    if (state.kind === "selectDistinct") {
+      return state.fields?.currency ? [{ currency: "usd" }] : [{ firebaseUid: "uid_n" }];
+    }
     if (state.from === schema.accountingEntries) return [{ total: "500" }];
     return [];
   });
@@ -720,6 +770,296 @@ section("J. Reconciliation looks where the bugs actually are");
   const reconSrc = readFileSync("src/lib/server/creator-earnings-reconcile.ts", "utf8");
   check("the reconciler never writes",
     !/\.insert\(|\.update\(|\.delete\(|db\.transaction/.test(reconSrc));
+}
+
+
+section("K. The payable is summed in ONE currency, never across them");
+
+/* THE BUG THIS SECTION EXISTS FOR. `ledgerPayableMinor` filtered the account,
+ * the creator and the environment — and not the currency. It summed every
+ * `creator_payable` leg the creator had into one bigint, so 1000 EUR-cents plus
+ * 1000 USD-cents came back as 2000 of nothing. That figure is the cap a transfer
+ * is checked against.
+ *
+ * Twenty lines below it, the earning loop was already skipping rows in another
+ * currency with a comment explaining that they cannot be added — while the
+ * ledger figure it was subtracted from added them. The two halves of one
+ * subtraction disagreed about what money is.
+ *
+ * `ledgerByCurrency` in the fake answers from the WHERE clause it is handed, so
+ * a query that forgot the predicate reads zero and these assertions fail. They
+ * cannot pass by accident. */
+
+{
+  /* A creator owed $100 and €50, with matching earning rows in both. */
+  const mixedRows = [
+    earning({ netAmountMinor: BigInt(10000), currency: "usd" }),
+    earning({ netAmountMinor: BigInt(5000), currency: "eur" }),
+  ];
+  const mixedDb = () => dbWith({
+    ledgerByCurrency: { usd: "-10000", eur: "-5000" },
+    ledgerCurrencies: ["usd", "eur"],
+    rows: mixedRows,
+  });
+
+  /* ---- THE EXPLICIT PATH: the caller names the currency ---- */
+
+  const usd = await position.computeCreatorPositionInCurrency("uid_cur", "sandbox", mixedDb(), "usd");
+  check("a USD payable is 10000 — the EUR legs are not added to it",
+    usd.payableMinor === BigInt(10000));
+  check("and it reports itself as usd", usd.currency === "usd");
+
+  const eur = await position.computeCreatorPositionInCurrency("uid_cur", "sandbox", mixedDb(), "eur");
+  check("a EUR payable is 5000 — the USD legs are not added to it",
+    eur.payableMinor === BigInt(5000));
+  check("and it reports itself as eur", eur.currency === "eur");
+
+  check("neither is the sum of both — no arithmetic crossed the currencies",
+    usd.payableMinor + eur.payableMinor === BigInt(15000) &&
+    usd.payableMinor !== BigInt(15000) && eur.payableMinor !== BigInt(15000));
+
+  /* THE PREDICATE IS REALLY IN THE QUERY, not merely implied by the answer. */
+  const probe = dbWith({
+    ledgerByCurrency: { usd: "-10000" },
+    ledgerCurrencies: ["usd"],
+    rows: [],
+  });
+  await position.computeCreatorPositionInCurrency("uid_cur", "sandbox", probe, "usd");
+  const sumQuery = probe.__log.find(
+    (q) => q.from === schema.accountingEntries && q.kind === "select",
+  );
+  const sumConds = flatten(sumQuery?.where);
+  check("the ledger sum filters on the entry's own currency column",
+    sumConds.some((c) => c.col === schema.accountingEntries.currency && c.value === "usd"));
+  check("and still filters account, counterparty and environment",
+    sumConds.some((c) => c.col === schema.accountingEntries.account && c.value === "creator_payable") &&
+    sumConds.some((c) => c.col === schema.accountingEntries.counterpartyId && c.value === "uid_cur") &&
+    sumConds.some((c) => c.col === schema.accountingTransactions.environment && c.value === "sandbox"));
+
+  /* ENVIRONMENT ISOLATION IS UNCHANGED, and is independent of the currency:
+   * same creator, same currency, other environment. */
+  const prodProbe = dbWith({ ledgerByCurrency: { usd: "-700" }, ledgerCurrencies: ["usd"], rows: [] });
+  const prod = await position.computeCreatorPositionInCurrency(
+    "uid_cur", "production", prodProbe, "usd",
+  );
+  check("a production read is still scoped to production",
+    flatten(prodProbe.__log.find((q) => q.from === schema.accountingEntries && q.kind === "select")?.where)
+      .some((c) => c.col === schema.accountingTransactions.environment && c.value === "production"));
+  check("and currency and environment are both applied, not one instead of the other",
+    prod.payableMinor === BigInt(700) &&
+    flatten(prodProbe.__log.find((q) => q.from === schema.accountingEntries && q.kind === "select")?.where)
+      .some((c) => c.col === schema.accountingEntries.currency && c.value === "usd"));
+
+  /* ---- PENDING IS FILTERED TO THE SAME CURRENCY AS THE PAYABLE ---- */
+
+  /* €50 still inside its hold window, $100 released. Available must be the USD
+   * payable less the USD pending only — the EUR hold must not reduce it. */
+  const heldEur = [
+    earning({ netAmountMinor: BigInt(10000), currency: "usd", holdUntil: PAST }),
+    earning({ netAmountMinor: BigInt(5000), currency: "eur", holdUntil: FUTURE }),
+  ];
+  const usdWithEurHold = await position.computeCreatorPositionInCurrency(
+    "uid_cur",
+    "sandbox",
+    dbWith({ ledgerByCurrency: { usd: "-10000", eur: "-5000" }, ledgerCurrencies: ["usd", "eur"], rows: heldEur }),
+    "usd",
+  );
+  check("a EUR hold does not reduce the USD available",
+    usdWithEurHold.availableMinor === BigInt(10000) &&
+    usdWithEurHold.pendingMinor === BigInt(0));
+
+  const eurWithEurHold = await position.computeCreatorPositionInCurrency(
+    "uid_cur",
+    "sandbox",
+    dbWith({ ledgerByCurrency: { usd: "-10000", eur: "-5000" }, ledgerCurrencies: ["usd", "eur"], rows: heldEur }),
+    "eur",
+  );
+  check("while the EUR position sees its own hold",
+    eurWithEurHold.pendingMinor === BigInt(5000) &&
+    eurWithEurHold.availableMinor === BigInt(0));
+
+  /* THE OLD BUG, STATED AS AN ASSERTION. Payable across both currencies (15000)
+   * minus one currency's pending (5000) would have read 10000 available in a
+   * currency the creator is owed only 5000 of. */
+  check("the pre-fix figure — all-currency payable less one currency's pending — is gone",
+    eurWithEurHold.availableMinor !== BigInt(10000));
+
+  /* ---- THE RESOLVING PATH, for callers with no currency to offer ---- */
+
+  const resolvedSingle = await position.computeCreatorPosition(
+    "uid_cur",
+    "sandbox",
+    dbWith({
+      ledgerByCurrency: { eur: "-5000" },
+      ledgerCurrencies: ["eur"],
+      rows: [earning({ netAmountMinor: BigInt(5000), currency: "eur" })],
+    }),
+  );
+  check("a single-currency creator resolves to their own currency, not to usd",
+    resolvedSingle.currency === "eur" && resolvedSingle.payableMinor === BigInt(5000));
+  check("and is not flagged — one currency is not an inconsistency",
+    resolvedSingle.inconsistency === null);
+
+  const resolvedMixed = await position.computeCreatorPosition("uid_cur", "sandbox", mixedDb());
+  check("a MIXED creator is flagged rather than silently reported in one currency",
+    resolvedMixed.inconsistency === "mixed_currency");
+  check("the figures it does return belong to exactly one currency, not the sum",
+    resolvedMixed.payableMinor !== BigInt(15000) &&
+    (resolvedMixed.currency === "eur" || resolvedMixed.currency === "usd"));
+  check("and the pick is deterministic — alphabetically first, so two reads agree",
+    resolvedMixed.currency === "eur" &&
+    (await position.computeCreatorPosition("uid_cur", "sandbox", mixedDb())).currency === "eur");
+
+  /* NO DEFAULT CURRENCY. A creator with nothing has no denomination. */
+  const empty = await position.computeCreatorPosition(
+    "uid_new", "sandbox", dbWith({ ledgerCurrencies: [], rows: [] }),
+  );
+  check("a creator with no earnings and no legs has a NULL currency, not usd",
+    empty.currency === null);
+  check("and a genuine, consistent zero — an empty position is not a fault",
+    empty.payableMinor === BigInt(0) && empty.availableMinor === BigInt(0) &&
+    empty.inconsistency === null);
+
+  /* UNSUPPORTED FAILS CLOSED. `whop_usd` is a real Whop value — internal
+   * credits, not an ISO currency — so it cannot be scaled to minor units. */
+  const unsupported = await position.computeCreatorPosition(
+    "uid_cur",
+    "sandbox",
+    dbWith({ ledgerCurrencies: ["whop_usd"], rows: [earning({ currency: "whop_usd" })] }),
+  );
+  check("a stored currency this build cannot scale is refused, not skipped",
+    unsupported.inconsistency === "unsupported_currency" &&
+    unsupported.payableMinor === BigInt(0));
+
+  const explicitlyUnsupported = await position.computeCreatorPositionInCurrency(
+    "uid_cur", "sandbox", mixedDb(), "whop_usd",
+  );
+  check("and a caller asking for one explicitly is refused too",
+    explicitlyUnsupported.inconsistency === "unsupported_currency" &&
+    explicitlyUnsupported.currency === null);
+
+  /* A PADDED CODE IS THE SAME CURRENCY. `char(3)` pads on storage, so a leg
+   * read back as "usd " must not look like a different denomination. */
+  const padded = await position.computeCreatorPositionInCurrency(
+    "uid_cur",
+    "sandbox",
+    dbWith({
+      ledgerByCurrency: { usd: "-10000" },
+      ledgerCurrencies: ["usd "],
+      rows: [earning({ netAmountMinor: BigInt(10000), currency: "usd " })],
+    }),
+    "usd",
+  );
+  check("a padded stored code still matches its own currency",
+    padded.payableMinor === BigInt(10000) && padded.earnedMinor === BigInt(10000));
+
+  /* ---- ELIGIBILITY USES THE CURRENCY-SPECIFIC FIGURE ---- */
+
+  /* The reservation is the admin transfer's cap. A creator owed €50 and $100
+   * must not have a $100 request covered by the EUR half, nor the reverse. */
+  const reserveDb = () => dbWith({
+    ledgerByCurrency: { usd: "-10000", eur: "-5000" },
+    ledgerCurrencies: ["usd", "eur"],
+    rows: mixedRows,
+  });
+
+  const okUsd = await position.reserveFromPosition(
+    reserveDb(), "uid_cur", "sandbox", BigInt(10000), "usd",
+  );
+  check("a USD request up to the USD payable is reserved",
+    okUsd.ok === true && okUsd.position.currency === "usd");
+
+  const overEur = await position.reserveFromPosition(
+    reserveDb(), "uid_cur", "sandbox", BigInt(10000), "eur",
+  );
+  check("the same amount in EUR is REFUSED — the USD balance cannot cover it",
+    overEur.ok === false && overEur.reason === "insufficient_available");
+  check("and the refusal reports the EUR figure, not the combined one",
+    overEur.ok === false && overEur.availableMinor === BigInt(5000));
+
+  const okEur = await position.reserveFromPosition(
+    reserveDb(), "uid_cur", "sandbox", BigInt(5000), "eur",
+  );
+  check("a EUR request within the EUR payable is reserved",
+    okEur.ok === true && okEur.position.currency === "eur");
+
+  const unsupportedReserve = await position.reserveFromPosition(
+    reserveDb(), "uid_cur", "sandbox", BigInt(1), "whop_usd",
+  );
+  check("reserving in an unsupported currency is refused as inconsistent",
+    unsupportedReserve.ok === false && unsupportedReserve.reason === "position_inconsistent");
+
+  /* THE RESERVATION NEVER RESOLVES THE CURRENCY FOR ITSELF. It must use the one
+   * it was given, or a request in one currency could be capped by another. */
+  const reserveProbe = reserveDb();
+  await position.reserveFromPosition(reserveProbe, "uid_cur", "sandbox", BigInt(1), "eur");
+  check("the reservation's ledger sum is filtered to the currency it was GIVEN",
+    flatten(reserveProbe.__log.find((q) => q.from === schema.accountingEntries && q.kind === "select")?.where)
+      .some((c) => c.col === schema.accountingEntries.currency && c.value === "eur"));
+  check("and it takes the row lock before reading, as it always did",
+    reserveProbe.__log.some((q) => q.from === schema.whopAccounts && q.lock === "update"));
+
+  /* ---- NO DEFAULT-TO-USD PATH REMAINS ---- */
+
+  const posSrc = readFileSync("src/lib/server/creator-position.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  check("no code path defaults a currency to usd",
+    !/\?\?\s*"usd"/.test(posSrc) && !/\|\|\s*"usd"/.test(posSrc));
+  check("the currency is no longer taken from whichever row came back first",
+    !/rows\.find\(Boolean\)/.test(posSrc));
+  check("the ledger sum cannot be reached without a currency",
+    /async function ledgerPayableMinor\([\s\S]{0,220}currency: string,\s*\)/.test(posSrc));
+  check("and it applies that currency to the entry column",
+    /eq\(schema\.accountingEntries\.currency, currency\)/.test(posSrc));
+  check("the resolver reads BOTH the earning rows and the payable legs",
+    /selectDistinct[\s\S]{0,400}creatorEarnings[\s\S]{0,900}selectDistinct[\s\S]{0,400}accountingEntries/.test(posSrc));
+}
+
+section("L. Mixed currency is surfaced to the reconciler, not hidden");
+
+{
+  const recon = loadModule("src/lib/server/creator-earnings-reconcile.ts", {
+    "drizzle-orm": drizzle,
+    "@/lib/db": { getDb: () => currentDb, schema },
+    "./creator-position": position,
+  });
+
+  /* A creator with legs in two currencies. The (B) payable-vs-rows comparison
+   * cannot be made — neither side describes the whole position — so reporting
+   * a `payable_mismatch` would send an operator chasing an accounting fault
+   * when the real problem is the denomination. */
+  currentDb = makeDb((state) => {
+    if (state.kind === "selectDistinct") {
+      if (state.fields?.currency) {
+        return state.from === schema.accountingEntries
+          ? [{ currency: "usd" }, { currency: "eur" }]
+          : [{ currency: "usd" }, { currency: "eur" }];
+      }
+      return [{ firebaseUid: "uid_mixed" }];
+    }
+    if (state.from === schema.accountingEntries) return [{ total: "-10000" }];
+    if (state.from === schema.creatorEarnings) {
+      return [
+        earning({ netAmountMinor: BigInt(10000), currency: "usd" }),
+        earning({ netAmountMinor: BigInt(5000), currency: "eur" }),
+      ];
+    }
+    return [];
+  });
+
+  const out = await recon.reconcileCreatorEarnings("sandbox");
+  check("a mixed-currency creator is reported as such",
+    out.ok && out.report.findings.some((f) => f.check === "mixed_currency_payable" &&
+      f.firebaseUid === "uid_mixed"));
+  check("and NOT as a payable mismatch, which would be the wrong diagnosis",
+    out.ok && !out.report.findings.some((f) => f.check === "payable_mismatch"));
+
+  /* THE CREATOR-FACING API ALREADY REFUSES ON ANY INCONSISTENCY, so mixed
+   * currency needs no route change to stop being served as a balance. */
+  const routeSrc = readFileSync("src/app/api/creator/earnings/route.ts", "utf8");
+  check("the creator balance route refuses to serve an inconsistent position",
+    /if \(balance\.inconsistency\)/.test(routeSrc) &&
+    /balance_unavailable/.test(routeSrc));
 }
 
 /* ========================================================================= */

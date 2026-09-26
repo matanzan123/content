@@ -391,6 +391,7 @@ const retained = build(
     amountMinor: 1000n,
     taxRefundedMinor: 0n,
     feeDeltaMinor: 0n,
+    taxRemittanceDeltaMinor: 0n,
     feeLines: [],
     occurredAt: null,
   },
@@ -425,6 +426,7 @@ const returned = build(
     amountMinor: 1000n,
     taxRefundedMinor: 0n,
     feeDeltaMinor: -87n,
+    taxRemittanceDeltaMinor: 0n,
     feeLines: [],
     occurredAt: null,
   },
@@ -454,6 +456,7 @@ const extraFee = build(
     amountMinor: 1000n,
     taxRefundedMinor: 0n,
     feeDeltaMinor: 25n,
+    taxRemittanceDeltaMinor: 0n,
     feeLines: [],
     occurredAt: null,
   },
@@ -475,6 +478,7 @@ const taxed = build(
     amountMinor: 500n,
     taxRefundedMinor: 50n,
     feeDeltaMinor: 0n,
+    taxRemittanceDeltaMinor: 0n,
     feeLines: [],
     occurredAt: null,
   },
@@ -491,25 +495,153 @@ let allBalance = true;
 for (const amount of [1n, 7n, 250n, 999n, 1000n, 123456n]) {
   for (const tax of [0n, 1n, 50n]) {
     for (const fee of [-87n, -1n, 0n, 3n, 25n]) {
-      if (tax > amount) continue;
-      const p = build(
-        {
-          refundId: "rf_x",
-          paymentId: "pay_1",
-          currency: "usd",
-          amountMinor: amount,
-          taxRefundedMinor: tax,
-          feeDeltaMinor: fee,
-          feeLines: [],
-          occurredAt: null,
-        },
-        ctx,
-      );
-      if (residual(p) !== 0n) allBalance = false;
+      // A REMITTANCE DELTA IS PART OF THE PROPERTY, in both directions, because
+      // Whop documents no sign for it and the journal has to close either way.
+      for (const remit of [0n, 80n, -80n]) {
+        if (tax > amount) continue;
+        const p = build(
+          {
+            refundId: "rf_x",
+            paymentId: "pay_1",
+            currency: "usd",
+            amountMinor: amount,
+            taxRefundedMinor: tax,
+            feeDeltaMinor: fee,
+            taxRemittanceDeltaMinor: remit,
+            feeLines: [],
+            occurredAt: null,
+          },
+          ctx,
+        );
+        if (residual(p) !== 0n) allBalance = false;
+      }
     }
   }
 }
 check("the posting balances for every combination of amount, tax and fee delta", allBalance);
+
+console.log("\n--- A. a refund's tax remittance is tax principal, not a fee ---");
+
+/* THE SAME CLASSIFICATION AS THE SETTLEMENT, because a tax remittance usually
+ * arrives AFTER the payment — Whop remits when it files — so the refund and
+ * reconciliation paths are where it most often shows up. A single combined fee
+ * delta would move `provider_fee_expense` by the tax and never discharge the
+ * liability: the original defect, one account further along. */
+{
+  const remitted = build(
+    {
+      refundId: "rf_tax_1",
+      paymentId: "pay_1",
+      currency: "usd",
+      amountMinor: 500n,
+      taxRefundedMinor: 50n,
+      feeDeltaMinor: -10n,
+      taxRemittanceDeltaMinor: 80n,
+      feeLines: [],
+      occurredAt: null,
+    },
+    ctx,
+  );
+
+  check("a refund carrying a remittance delta balances", residual(remitted) === 0n,
+    residual(remitted).toString());
+
+  const taxLegs = remitted.legs.filter((l) => l.account === "tax_payable");
+  check("the remittance and the buyer's tax are SEPARATE legs on tax_payable",
+    taxLegs.length === 2, String(taxLegs.length));
+  check("the buyer's tax leg is the one without a remittance source_detail",
+    taxLegs.some((l) => l.amountMinor === 50n && l.sourceDetail === undefined));
+  check("and the remittance leg is labelled as a NET movement, not as a real line",
+    taxLegs.some((l) => l.amountMinor === 80n &&
+      l.sourceDetail === "sales_tax_remittance_net"));
+
+  check("the remittance never touches provider_fee_expense",
+    legFor(remitted, "provider_fee_expense") === -10n,
+    String(legFor(remitted, "provider_fee_expense")));
+
+  /* THE BALANCING LEG COVERS BOTH, because both came out of the same provider
+   * balance: -(500 + -10 + 80) = -570. */
+  check("provider_balance absorbs the refund, the fee move AND the remittance",
+    legFor(remitted, "provider_balance") === -570n,
+    String(legFor(remitted, "provider_balance")));
+
+  // A remittance with no fee movement at all must still post, and only to tax.
+  const taxOnly = build(
+    {
+      refundId: "rf_tax_2",
+      paymentId: "pay_1",
+      currency: "usd",
+      amountMinor: 100n,
+      taxRefundedMinor: 0n,
+      feeDeltaMinor: 0n,
+      taxRemittanceDeltaMinor: 80n,
+      feeLines: [],
+      occurredAt: null,
+    },
+    ctx,
+  );
+  check("a remittance with no fee movement still posts, and balances",
+    residual(taxOnly) === 0n && legFor(taxOnly, "tax_payable") === 80n);
+  check("and produces NO provider_fee_expense leg at all",
+    taxOnly.legs.some((l) => l.account === "provider_fee_expense") === false);
+
+  /* NO SIGN IS ASSUMED — the reversal direction is the provider's. */
+  const reversal = build(
+    {
+      refundId: "rf_tax_3",
+      paymentId: "pay_1",
+      currency: "usd",
+      amountMinor: 100n,
+      taxRefundedMinor: 0n,
+      feeDeltaMinor: 0n,
+      taxRemittanceDeltaMinor: -80n,
+      feeLines: [],
+      occurredAt: null,
+    },
+    ctx,
+  );
+  check("a remittance reversal balances too, with the provider's own sign",
+    residual(reversal) === 0n && legFor(reversal, "tax_payable") === -80n);
+  check("and it is still a tax_payable leg, not a fee credit",
+    reversal.legs.some((l) => l.account === "provider_fee_expense") === false);
+
+  // Zero stays zero: no leg for a class that did not move.
+  const none = build(
+    {
+      refundId: "rf_tax_4",
+      paymentId: "pay_1",
+      currency: "usd",
+      amountMinor: 100n,
+      taxRefundedMinor: 0n,
+      feeDeltaMinor: 0n,
+      taxRemittanceDeltaMinor: 0n,
+      feeLines: [],
+      occurredAt: null,
+    },
+    ctx,
+  );
+  check("no remittance movement means no tax_payable leg is invented",
+    none.legs.some((l) => l.account === "tax_payable") === false);
+
+  /* THE READER THAT WOULD HAVE BROKEN. `postedTotalsForPayment` feeds the
+   * buyer-tax refund calculation: `taxAlreadyReturned = collected - taxMinor`.
+   * If a remittance debit were summed into `taxMinor`, that would inflate,
+   * the computed refund delta would go negative, get clamped to zero, and the
+   * buyer's tax refund would silently stop being booked. Asserted at the source
+   * because the split is a SQL-shaped concern. */
+  const refundSrc = readFileSync("src/lib/server/accounting/whop-refund-posting.ts", "utf8");
+  check("the posted-totals reader separates remittance from the buyer's tax",
+    /isTaxRemittanceOrigin\(row\.sourceDetail\)/.test(refundSrc) &&
+    /taxRemittanceMinor \+= value/.test(refundSrc));
+  check("it groups by source_detail so the two can be told apart",
+    /groupBy\(accountingEntries\.account, accountingEntries\.sourceDetail\)/.test(refundSrc));
+  check("each class is compared against its OWN posted total",
+    /split\.providerFeeMinor - posted\.feeMinor/.test(refundSrc) &&
+    /split\.taxRemittanceMinor - posted\.taxRemittanceMinor/.test(refundSrc));
+  check("the refund path uses the shared classifier, not its own origin list",
+    /from "\.\/fee-classification"/.test(refundSrc) &&
+    !/"sales_tax_remittance"\s*===/.test(refundSrc));
+}
 
 console.log("\n--- A. refund idempotency keys ---");
 
@@ -525,6 +657,7 @@ check(
       amountMinor: 100n,
       taxRefundedMinor: 0n,
       feeDeltaMinor: 0n,
+      taxRemittanceDeltaMinor: 0n,
       feeLines: [],
       occurredAt: null,
     },
@@ -731,7 +864,7 @@ async function sequences() {
      * edit needed at the crossover, and no way to apply it twice.
      */
     const journalledTags = journal.entries.map((e) => e.tag);
-    const PENDING = ["0013_creator_earning_cumulative_refunds"];
+    const PENDING = ["0013_creator_earning_cumulative_refunds", "0014_refund_absorbed_cost"];
     const tags = [
       ...journalledTags,
       ...PENDING.filter((tag) => !journalledTags.includes(tag)),
@@ -2104,6 +2237,348 @@ async function sequences() {
           row.status === "available" && row.refunded === "0",
           `status=${row.status} refunded=${row.refunded}`);
       }
+
+      /* =================================================================
+         TASK #19 P1-2 — THE ABSORBED REFUND COST, END TO END.
+
+         Task #17 retains the fixed processing fee when a refund unwinds an
+         earning, but the customer's cash still goes back. The reversal used to
+         credit suspense only what the revenue reversals returned, so the
+         retained fee stayed behind as a DEBIT in
+         `unallocated_customer_funds` — a suspense liability holding a debit
+         balance, which asserts the platform is owed customer money it is not.
+
+         THE WHOLE LIFECYCLE, on the real journal: settlement credits suspense,
+         allocation clears it, the refund debits it, and the reversal must close
+         it to exactly zero while the fee stays earned.
+         ================================================================= */
+      {
+        const withFee = async (n, fn) => {
+          const prev = process.env.PLATFORM_PROCESSING_FEE_MINOR;
+          process.env.PLATFORM_PROCESSING_FEE_MINOR = String(n);
+          try { return await fn(); } finally {
+            if (prev === undefined) delete process.env.PLATFORM_PROCESSING_FEE_MINOR;
+            else process.env.PLATFORM_PROCESSING_FEE_MINOR = prev;
+          }
+        };
+
+        /** Signed sum of one account's legs for one payment, across every
+         *  transaction that names it — the settlement, the split, the refund and
+         *  the reversal all reach it, by resource id or by metadata. */
+        /* THE RESOURCE IDS MUST BE LISTED EXPLICITLY, and that is worth noting.
+         *
+         * A settlement names the payment; a refund posting names the refund and
+         * carries `metadata.payment_id`; a REVERSAL names the refund or dispute
+         * and carries no payment metadata at all. So no single predicate ties a
+         * payment to its reversals, and a per-payment suspense figure has to be
+         * told which events belong to it. Measured that way here; flagged as an
+         * observability gap rather than worked around silently. */
+        const acctFor = async (resourceIds, account) => {
+          const [r] = await scoped.unsafe(
+            `select coalesce(sum(e.amount_minor),0)::text as s
+               from ${SCRATCH}.accounting_entries e
+               join ${SCRATCH}.accounting_transactions t
+                 on t.transaction_id = e.transaction_id
+              where e.account = $1
+                and (t.provider_resource_id = any($2)
+                     or t.metadata->>'payment_id' = any($2))`,
+            [account, resourceIds],
+          );
+          return BigInt(r.s);
+        };
+
+        /** Every leg of the reversal for one refund id, by account. */
+        const reversalLegs = async (refundId) => scoped.unsafe(
+          `select e.account, e.amount_minor::text as amount, e.currency
+             from ${SCRATCH}.accounting_entries e
+             join ${SCRATCH}.accounting_transactions t
+               on t.transaction_id = e.transaction_id
+            where t.economic_event = 'revenue_split_reversed'
+              and t.provider_resource_id = $1
+            order by e.account`,
+          [refundId],
+        );
+
+        /* ---- 1. FULL REFUND WITH A FIXED FEE ---- */
+        await withFee(30, async () => {
+          const uid = "p12_full";
+          const paymentId = "pay_p12_full";
+          await seedEarning(uid, paymentId, 10000);
+
+          const before = await legSum("refund_absorbed_cost", "cliprewards");
+          const r = await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_full",
+            refundAmountMinor: BigInt(10000),
+          });
+          check("T19 P1-2: a full refund reverses", r.ok === true);
+
+          const legs = await reversalLegs("rf_p12_full");
+          const by = new Map(legs.map((l) => [l.account, BigInt(l.amount)]));
+
+          check("T19 P1-2: refund_absorbed_cost is DEBITED the fixed fee",
+            (await legSum("refund_absorbed_cost", "cliprewards")) - before === BigInt(30),
+            String(by.get("refund_absorbed_cost")));
+          check("T19 P1-2: platform_revenue returns only the percentage",
+            by.get("platform_revenue") === BigInt(2000), String(by.get("platform_revenue")));
+          check("T19 P1-2: the creator reversal is the full stored net",
+            by.get("creator_payable") === BigInt(7970), String(by.get("creator_payable")));
+          check("T19 P1-2: suspense is credited the WHOLE cash returned",
+            by.get("unallocated_customer_funds") === BigInt(-10000),
+            String(by.get("unallocated_customer_funds")));
+          check("T19 P1-2: and the reversal balances exactly",
+            legs.reduce((a, l) => a + BigInt(l.amount), BigInt(0)) === BigInt(0));
+          check("T19 P1-2: no tax_payable leg is created by the reversal",
+            !by.has("tax_payable"), legs.map((l) => l.account).join(","));
+
+          /* THE POLICY IS UNCHANGED: the fee stays earned. The absorbed cost is a
+           * SEPARATE expense, not a reduction of revenue. */
+          check("T19 P1-2: the fixed fee is retained, not returned",
+            BigInt(2030) - by.get("platform_revenue") === BigInt(30));
+
+          /* REPLAY: the same refund id again adds nothing. */
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_full",
+            refundAmountMinor: BigInt(10000),
+          });
+          check("T19 P1-2: replaying the refund does not double-book the cost",
+            (await legSum("refund_absorbed_cost", "cliprewards")) - before === BigInt(30));
+        });
+
+        /* ---- 2. NO FIXED FEE: NO ABSORBED LEG ON A FULL REFUND ---- */
+        await withFee(0, async () => {
+          const uid = "p12_nofee";
+          const paymentId = "pay_p12_nofee";
+          await seedEarning(uid, paymentId, 10000);
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_nofee",
+            refundAmountMinor: BigInt(10000),
+          });
+          const legs = await reversalLegs("rf_p12_nofee");
+          check("T19 P1-2: with no fixed fee a full refund posts NO absorbed leg",
+            !legs.some((l) => l.account === "refund_absorbed_cost"),
+            legs.map((l) => l.account).join(","));
+          check("T19 P1-2: and suspense still receives the whole gross",
+            legs.find((l) => l.account === "unallocated_customer_funds")?.amount === "-10000");
+        });
+
+        /* ---- 3. CUMULATIVE PARTIALS CONVERGE, WITHOUT DOUBLE BOOKING ---- */
+        await withFee(30, async () => {
+          const uid = "p12_split";
+          const paymentId = "pay_p12_split";
+          await seedEarning(uid, paymentId, 10000);
+          const before = await legSum("refund_absorbed_cost", "cliprewards");
+
+          // Awkward thirds, then the closing unit — where per-refund arithmetic
+          // drifts and where the absorbed delta must go NEGATIVE to converge.
+          for (const [i, part] of [3333, 3333, 3333, 1].entries()) {
+            await earnings.reverseForRefund({
+              whopPaymentId: paymentId,
+              refundId: `rf_p12_split_${i}`,
+              refundAmountMinor: BigInt(part),
+            });
+          }
+          const total = (await legSum("refund_absorbed_cost", "cliprewards")) - before;
+          check("T19 P1-2: four partials absorb exactly the fixed fee, no more",
+            total === BigInt(30), String(total));
+
+          const row = await readEarning(paymentId);
+          check("T19 P1-2: and the earning reaches the full gross, reversed",
+            row.refunded === "10000" && row.status === "reversed",
+            `${row.refunded}/${row.status}`);
+
+          /* EVERY reversal transaction balanced, including the one carrying the
+           * negative absorbed delta. */
+          const [bad] = await scoped.unsafe(
+            `select count(*)::int as n from (
+               select t.transaction_id
+                 from ${SCRATCH}.accounting_transactions t
+                 join ${SCRATCH}.accounting_entries e on e.transaction_id = t.transaction_id
+                where t.economic_event = 'revenue_split_reversed'
+                group by t.transaction_id
+               having sum(e.amount_minor) <> 0) x`,
+          );
+          check("T19 P1-2: every reversal transaction balances, signed deltas included",
+            bad.n === 0, `${bad.n} unbalanced`);
+        });
+
+        /* ---- 4. REFUND THEN DISPUTE CONVERGES ON THE SAME COST ---- */
+        await withFee(30, async () => {
+          const uid = "p12_mixed";
+          const paymentId = "pay_p12_mixed";
+          await seedEarning(uid, paymentId, 10000);
+          const before = await legSum("refund_absorbed_cost", "cliprewards");
+
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_mixed",
+            refundAmountMinor: BigInt(3000),
+          });
+          await earnings.reverseForDispute({
+            whopPaymentId: paymentId,
+            whopDisputeId: "dp_p12_mixed",
+          });
+          const total = (await legSum("refund_absorbed_cost", "cliprewards")) - before;
+          check("T19 P1-2: refund-then-dispute absorbs exactly the fixed fee",
+            total === BigInt(30), String(total));
+          check("T19 P1-2: and never exceeds the policy target",
+            total <= BigInt(30));
+        });
+
+        /* ---- 5. A TRANSFERRED EARNING IS STILL NEVER CLAWED BACK ---- */
+        await withFee(30, async () => {
+          const uid = "p12_transferred";
+          const paymentId = "pay_p12_transferred";
+          await seedEarning(uid, paymentId, 10000, { status: "transferred" });
+          const before = await legSum("refund_absorbed_cost", "cliprewards");
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_transferred",
+            refundAmountMinor: BigInt(10000),
+          });
+          check("T19 P1-2: a transferred earning absorbs nothing — policy unchanged",
+            (await legSum("refund_absorbed_cost", "cliprewards")) === before);
+          check("T19 P1-2: and posts no reversal at all",
+            (await reversalLegs("rf_p12_transferred")).length === 0);
+        });
+
+        /* ---- 6. NON-USD: THE EXPENSE IS IN THE SETTLEMENT'S CURRENCY ---- */
+        await withFee(30, async () => {
+          const uid = "p12_eur";
+          const paymentId = "pay_p12_eur";
+          const b = policy.computeEarningsBreakdown(BigInt(10000), "eur");
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+               on conflict (firebase_uid) do nothing`, [uid]);
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.creator_earnings
+               (firebase_uid, environment, whop_payment_id, gross_amount_minor,
+                platform_fee_minor, net_amount_minor, currency, platform_fee_bps,
+                status, hold_until, payment_settled_at)
+             values ($1,'sandbox',$2,${b.grossAmountMinor},${b.platformFeeMinor},
+                     ${b.netAmountMinor},'eur',${b.platformFeeBps},
+                     'available', now() - interval '1 day', now())`,
+            [uid, paymentId]);
+
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_eur",
+            refundAmountMinor: BigInt(10000),
+          });
+          const legs = await reversalLegs("rf_p12_eur");
+          const absorbed = legs.find((l) => l.account === "refund_absorbed_cost");
+          check("T19 P1-2: a EUR earning absorbs its cost IN EUR, with no USD default",
+            absorbed?.currency === "eur" && absorbed?.amount === "30",
+            JSON.stringify(absorbed));
+          check("T19 P1-2: every leg of the EUR reversal is in eur",
+            legs.length > 0 && legs.every((l) => l.currency === "eur"));
+          check("T19 P1-2: and it balances",
+            legs.reduce((a, l) => a + BigInt(l.amount), BigInt(0)) === BigInt(0));
+        });
+
+        /* ---- 7. ENVIRONMENT ISOLATION ---- */
+        await withFee(30, async () => {
+          const uid = "p12_env";
+          const paymentId = "pay_p12_env";
+          const b = policy.computeEarningsBreakdown(BigInt(10000), "usd");
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+               on conflict (firebase_uid) do nothing`, [uid]);
+          // PRODUCTION only. The module reads the trusted sandbox environment,
+          // so it must find nothing and absorb nothing.
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.creator_earnings
+               (firebase_uid, environment, whop_payment_id, gross_amount_minor,
+                platform_fee_minor, net_amount_minor, currency, platform_fee_bps,
+                status, hold_until, payment_settled_at)
+             values ($1,'production',$2,${b.grossAmountMinor},${b.platformFeeMinor},
+                     ${b.netAmountMinor},'usd',${b.platformFeeBps},
+                     'available', now() - interval '1 day', now())`,
+            [uid, paymentId]);
+          const before = await legSum("refund_absorbed_cost", "cliprewards");
+          await earnings.reverseForRefund({
+            whopPaymentId: paymentId,
+            refundId: "rf_p12_env",
+            refundAmountMinor: BigInt(10000),
+          });
+          check("T19 P1-2: a sandbox reversal cannot absorb a production earning's cost",
+            (await legSum("refund_absorbed_cost", "cliprewards")) === before);
+        });
+
+        /* ---- 8. THE COMPLETE LIFECYCLE LEAVES NO SUSPENSE RESIDUAL ---- */
+        await withFee(30, async () => {
+          const settled = await settledCase({ minor: 1080, feeMinor: 7, tax: 80 });
+          const uid = "p12_lifecycle";
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+               on conflict (firebase_uid) do nothing`, [uid]);
+
+          // Allocate from the settlement itself (Task #19 P1-4), so suspense is
+          // cleared by the real split rather than by a hand-built row.
+          const rec = await earnings.recordCreatorEarning({
+            firebaseUid: uid,
+            whopPaymentId: settled.paymentId,
+            environment: "sandbox",
+            paymentSettledAt: new Date(),
+          });
+          check("T19 P1-2: the taxed settlement allocates (total less tax)",
+            rec.ok === true, JSON.stringify(rec));
+
+          const ids = [settled.paymentId, "rf_p12life"];
+          const afterSplit = await acctFor([settled.paymentId], "unallocated_customer_funds");
+          check("T19 P1-2: suspense is flat after allocation",
+            afterSplit === BigInt(0), String(afterSplit));
+
+          // Refund the whole payment: the refund posting debits suspense by the
+          // non-tax cash, and the reversal must close it again.
+          settled.state.refunds["rf_p12life"] = {
+            id: "rf_p12life",
+            payment_id: settled.paymentId,
+            status: "succeeded",
+            amount: usd(1080),
+          };
+          settled.state.payments[settled.paymentId].refunded_amount = usd(1080);
+          settled.state.payments[settled.paymentId].tax_refunded_amount = usd(80);
+          FAKE_WHOP = fakeWhop(settled.state);
+
+          const postedRefund = await refundPosting.postWhopRefund("rf_p12life", {
+            environment: "sandbox",
+            orderId: settled.orderId,
+          });
+          check("T19 P1-2: the refund posts", postedRefund.ok === true,
+            JSON.stringify(postedRefund));
+
+          await earnings.reverseForRefund({
+            whopPaymentId: settled.paymentId,
+            refundId: "rf_p12life",
+            refundAmountMinor: BigInt(1080),
+          });
+
+          const suspense = await acctFor(ids, "unallocated_customer_funds");
+          check("T19 P1-2: RECONCILIATION — no unexplained suspense residual remains",
+            suspense === BigInt(0), String(suspense));
+          /* THE TAX TRACK RAN ITS OWN COURSE, and the absorbed cost played no
+           * part in it. Two separate statements, because netting to zero alone
+           * would not prove the second: the settlement credited 80 and the
+           * refund returned 80, while no reversal leg ever named the account. */
+          const tax = await acctFor(ids, "tax_payable");
+          check("T19 P1-2: the buyer's tax was credited and returned, netting to zero",
+            tax === BigInt(0), String(tax));
+          const [taxInReversal] = await scoped.unsafe(
+            `select count(*)::int as n
+               from ${SCRATCH}.accounting_entries e
+               join ${SCRATCH}.accounting_transactions t
+                 on t.transaction_id = e.transaction_id
+              where t.economic_event = 'revenue_split_reversed'
+                and e.account = 'tax_payable'`,
+          );
+          check("T19 P1-2: and NO reversal anywhere in this suite touched tax_payable",
+            taxInReversal.n === 0, `${taxInReversal.n} legs`);
+        });
+      }
+
     }
 
   } finally {
