@@ -73,7 +73,14 @@ export type ReconciliationReport = {
 
 export type ReconciliationResult =
   | { ok: true; report: ReconciliationReport }
-  | { ok: false; reason: "db_unavailable" };
+  /**
+   * `db_unavailable` — no database.
+   * `unconfigured` — the environment could not be resolved from server
+   * configuration, so there is no scope to reconcile within. Named separately
+   * because an operator reading "database unavailable" would go looking at the
+   * wrong thing entirely.
+   */
+  | { ok: false; reason: "db_unavailable" | "unconfigured" };
 
 /**
  * Runs every check for one environment.

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import {
   accountingEntries,
@@ -120,6 +120,22 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
   const db = getDb();
   if (!db) return EMPTY;
 
+  /* ENVIRONMENT-SCOPED, and it has to be.
+   *
+   * Both tables carry an `environment` column, and migration 0011 made the
+   * unique indexes environment-aware precisely so the same provider id can exist
+   * once per environment. Reading both unscoped therefore compares one
+   * environment's orders against the other's settlements, and the findings it
+   * manufactures are FALSE ONES: a production settlement has no sandbox order,
+   * so it reports `ledger_without_paid_order`, and the sandbox order it cannot
+   * see reports `missing_ledger`. A reconciler that cries wolf is worse than one
+   * that says nothing, because operators learn to close it.
+   *
+   * Fails closed: an unresolvable environment reconciles nothing rather than
+   * reconciling everything. */
+  const environment = getWhopEnvironment();
+  if (!environment) return EMPTY;
+
   const findings: Discrepancy[] = [];
 
   const orders = await db
@@ -132,6 +148,7 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
       updatedAt: paymentOrders.updatedAt,
     })
     .from(paymentOrders)
+    .where(eq(paymentOrders.environment, environment))
     .limit(limit);
 
   // Every settlement transaction, indexed by the payment it names.
@@ -145,7 +162,12 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
       idempotencyKey: accountingTransactions.idempotencyKey,
     })
     .from(accountingTransactions)
-    .where(eq(accountingTransactions.economicEvent, "payment_settled"));
+    .where(
+      and(
+        eq(accountingTransactions.economicEvent, "payment_settled"),
+        eq(accountingTransactions.environment, environment),
+      ),
+    );
 
   const byPayment = new Map<string, typeof transactions>();
   for (const t of transactions) {
@@ -165,6 +187,13 @@ export async function reconcileInternal(limit = 500): Promise<ReconciliationRepo
       total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
     })
     .from(accountingEntries)
+    .innerJoin(
+      accountingTransactions,
+      eq(accountingEntries.transactionId, accountingTransactions.transactionId),
+    )
+    // Scoped like everything else here: an imbalance in the other environment is
+    // real, but it is not this report's to raise.
+    .where(eq(accountingTransactions.environment, environment))
     .groupBy(accountingEntries.transactionId, accountingEntries.account);
 
   const residual = new Map<string, bigint>();
@@ -643,7 +672,18 @@ export async function reconcileRefundsInternal(limit = 500): Promise<RefundRecon
 
   const findings: RefundDiscrepancy[] = [];
 
-  const refunds = await db.select().from(paymentRefunds).limit(limit);
+  /* ENVIRONMENT-SCOPED, for the same reason as `reconcileInternal`: a refund id
+   * may exist once per environment after migration 0011, so an unscoped read
+   * compares one environment's refunds against the other's postings. Fails
+   * closed rather than reconciling across the boundary. */
+  const environment = getWhopEnvironment();
+  if (!environment) return EMPTY_REFUND_REPORT;
+
+  const refunds = await db
+    .select()
+    .from(paymentRefunds)
+    .where(eq(paymentRefunds.environment, environment))
+    .limit(limit);
 
   const transactions = await db
     .select({
@@ -1831,8 +1871,17 @@ export type FeeDriftFinding = {
   postedFeeMinor: bigint;
   /** The provider's own current fee total. */
   actualFeeMinor: bigint;
-  /** `actual - posted`. Non-zero by definition for a reported finding. */
+  /** `actual - posted` for FEES. May be zero when only tax drifted. */
   deltaMinor: bigint;
+  /** Tax principal already booked as remitted for this payment. */
+  taxRemittancePostedMinor: bigint;
+  /** The provider's current tax-remittance total. */
+  taxRemittanceActualMinor: bigint;
+  /**
+   * `actual - posted` for TAX PRINCIPAL. Non-zero means the provider has
+   * remitted (or reversed) sales tax the journal has not booked yet.
+   */
+  taxRemittanceDeltaMinor: bigint;
   /**
    * What `fees_are_actual` said at settlement. A HINT ONLY — it explains why a
    * settlement is likely to have drifted and decides nothing. `null` means the
@@ -1852,7 +1901,11 @@ export type FeeDriftUnresolved = {
 export type FeeDriftReport = {
   configured: boolean;
   settlementsScanned: number;
-  /** Settlements where the provider's fee total differs from the journal's. */
+  /**
+   * Settlements where the provider disagrees with the journal on FEES, on TAX
+   * REMITTANCE, or on both. A finding may carry a zero fee delta and a non-zero
+   * tax delta: tax is remitted when the provider files, long after settlement.
+   */
   driftCandidates: FeeDriftFinding[];
   /**
    * Candidates whose provider lookup failed. Reported rather than dropped: a
@@ -2059,8 +2112,21 @@ export async function reconcileFeeDrift(
       continue;
     }
 
-    // In agreement with the provider. Not drift, whatever the flag said.
-    if (inspection.deltaMinor === BigInt(0)) continue;
+    /* IN AGREEMENT ON BOTH CLASSES, OR IT IS DRIFT.
+     *
+     * Checking the fee delta alone made this scan blind to exactly the case
+     * Task #19 introduced and the corrector already handles: Whop remits sales
+     * tax when it FILES, days or weeks after settlement, so a payment routinely
+     * has a tax-remittance delta with no fee movement at all. The detector said
+     * "no drift" while `reconcileProviderFees` would have posted a correction —
+     * a detector and a corrector disagreeing about what drift means, which is
+     * the failure this whole pairing exists to prevent. */
+    if (
+      inspection.deltaMinor === BigInt(0) &&
+      inspection.taxRemittanceDeltaMinor === BigInt(0)
+    ) {
+      continue;
+    }
 
     driftCandidates.push({
       paymentId: candidate.paymentId,
@@ -2070,6 +2136,9 @@ export async function reconcileFeeDrift(
       postedFeeMinor: inspection.postedMinor,
       actualFeeMinor: inspection.actualMinor,
       deltaMinor: inspection.deltaMinor,
+      taxRemittancePostedMinor: inspection.taxRemittancePostedMinor,
+      taxRemittanceActualMinor: inspection.taxRemittanceActualMinor,
+      taxRemittanceDeltaMinor: inspection.taxRemittanceDeltaMinor,
       feesWereActualAtSettlement: candidate.feesWereActualAtSettlement,
     });
   }
@@ -2079,6 +2148,321 @@ export async function reconcileFeeDrift(
     settlementsScanned: page.candidates.length,
     driftCandidates,
     unresolved,
+  };
+}
+
+
+/* ==========================================================================
+   ALLOCATION AND REVERSAL RECONCILIATION.
+
+   Tasks #17, #18 and #19 established money rules that nothing watched:
+
+     #19 P1-4  a revenue split may move ONLY the suspense credit its settlement
+               created — economically `total - tax`
+     #19 P1-2  after a refund and its reversal, suspense must return to zero;
+               the retained processing fee belongs in `refund_absorbed_cost`
+     #19 P1-1  a sales-tax remittance belongs on `tax_payable`, never in fees
+     schema    a revenue split is "written once per payment settlement"
+
+   Each of those is an invariant the postings maintain. None had a detector, so
+   a violation — a double allocation, a split that moved more than it should, a
+   suspense balance stranded by a bad reversal — would sit in the ledger
+   indefinitely with every individual transaction balancing perfectly.
+
+   READ-ONLY. It posts nothing and repairs nothing; it names what is wrong.
+
+   TYING REVERSALS TO PAYMENTS. A settlement names its payment. A refund posting
+   names the REFUND and carries `metadata.payment_id`. A reversal names the
+   refund or dispute and carries no payment metadata at all — so no single
+   predicate reaches every transaction belonging to one payment. The operational
+   tables are what close that gap: `payment_refunds` and `payment_disputes` both
+   carry `whop_payment_id` alongside their own id. Resolved that way rather than
+   by adding metadata to new postings, because this has to work on the rows that
+   already exist, not only on future ones.
+   ========================================================================== */
+
+export type AllocationDiscrepancyCode =
+  /** More than one revenue_split posted for one payment. Double allocation. */
+  | "allocation_duplicate"
+  /** The split moved an amount the settlement's suspense credit does not justify. */
+  | "allocation_amount_mismatch"
+  /** The split was posted in a different currency than the settlement. */
+  | "allocation_currency_mismatch"
+  /** Suspense did not return to zero once every event for this payment landed. */
+  | "suspense_residual"
+  /** A refund_absorbed_cost leg outside a revenue_split_reversed transaction. */
+  | "absorbed_cost_misplaced"
+  /** An allocated payment whose settlement cannot be found at all. */
+  | "allocation_without_settlement";
+
+export type AllocationDiscrepancy = {
+  code: AllocationDiscrepancyCode;
+  paymentId: string;
+  transactionId: string | null;
+  detail: string;
+};
+
+export type AllocationReconciliationReport = {
+  configured: boolean;
+  environment: string | null;
+  paymentsChecked: number;
+  discrepancies: AllocationDiscrepancy[];
+};
+
+/**
+ * Checks the settlement → allocation → reversal chain for recent payments.
+ *
+ * Bounded by `limit` settlements, newest first, for the same reason the fee
+ * drift scan is bounded: a reconciliation pass must cost a predictable amount.
+ * Unlike that scan this one makes NO provider calls, so the bound is about query
+ * size rather than API spend.
+ */
+export async function reconcileAllocationInternal(
+  limit = 500,
+): Promise<AllocationReconciliationReport> {
+  const db = getDb();
+  if (!db) {
+    return { configured: false, environment: null, paymentsChecked: 0, discrepancies: [] };
+  }
+
+  /* ENVIRONMENT-SCOPED, and fails closed. Every query below carries it. */
+  const environment = getWhopEnvironment();
+  if (!environment) {
+    return { configured: false, environment: null, paymentsChecked: 0, discrepancies: [] };
+  }
+
+  const findings: AllocationDiscrepancy[] = [];
+
+  /* THE SETTLEMENTS IN SCOPE, newest first. */
+  const settlements = await db
+    .select({
+      transactionId: accountingTransactions.transactionId,
+      paymentId: accountingTransactions.providerResourceId,
+      currency: accountingTransactions.currency,
+    })
+    .from(accountingTransactions)
+    .where(
+      and(
+        eq(accountingTransactions.economicEvent, "payment_settled"),
+        eq(accountingTransactions.provider, "whop"),
+        eq(accountingTransactions.environment, environment),
+      ),
+    )
+    .orderBy(desc(accountingTransactions.postedAt), desc(accountingTransactions.transactionId))
+    .limit(limit);
+
+  const payments = settlements
+    .map((s) => s.paymentId)
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
+
+  if (payments.length === 0) {
+    return { configured: true, environment, paymentsChecked: 0, discrepancies: [] };
+  }
+
+  /* EVERY RESOURCE ID BELONGING TO THESE PAYMENTS: the payment itself, plus the
+   * refunds and disputes whose reversals are keyed by their own ids. */
+  const [refundRows, disputeRows] = await Promise.all([
+    db
+      .select({
+        paymentId: paymentRefunds.whopPaymentId,
+        resourceId: paymentRefunds.whopRefundId,
+      })
+      .from(paymentRefunds)
+      .where(
+        and(
+          inArray(paymentRefunds.whopPaymentId, payments),
+          eq(paymentRefunds.environment, environment),
+        ),
+      ),
+    db
+      .select({
+        paymentId: paymentDisputes.whopPaymentId,
+        resourceId: paymentDisputes.whopDisputeId,
+      })
+      .from(paymentDisputes)
+      .where(
+        and(
+          inArray(paymentDisputes.whopPaymentId, payments),
+          eq(paymentDisputes.environment, environment),
+        ),
+      ),
+  ]);
+
+  /** resource id → the payment it belongs to. */
+  const ownerOf = new Map<string, string>();
+  for (const p of payments) ownerOf.set(p, p);
+  for (const r of [...refundRows, ...disputeRows]) {
+    if (r.resourceId && r.paymentId) ownerOf.set(r.resourceId, r.paymentId);
+  }
+
+  /* EVERY LEG OF EVERY TRANSACTION NAMING ANY OF THOSE RESOURCES. One query,
+   * not one per payment. `metadata.payment_id` is matched too, which is how a
+   * refund posting attaches itself to its payment. */
+  const resourceIds = [...ownerOf.keys()];
+  const legs = await db
+    .select({
+      transactionId: accountingTransactions.transactionId,
+      economicEvent: accountingTransactions.economicEvent,
+      providerResourceId: accountingTransactions.providerResourceId,
+      metadataPaymentId: sql<string | null>`${accountingTransactions.metadata}->>'payment_id'`,
+      currency: accountingTransactions.currency,
+      account: accountingEntries.account,
+      amountMinor: accountingEntries.amountMinor,
+    })
+    .from(accountingEntries)
+    .innerJoin(
+      accountingTransactions,
+      eq(accountingEntries.transactionId, accountingTransactions.transactionId),
+    )
+    .where(
+      and(
+        eq(accountingTransactions.environment, environment),
+        /* MATCHED BY LIST, NOT BY `= any(...)`. Passing a JS array into a raw
+         * `sql` fragment does not bind as a Postgres array through this driver;
+         * `inArray` is what the rest of this file uses and it builds a real IN
+         * list. A settlement names its payment directly, while a refund posting
+         * names the refund and points at the payment through its metadata — so
+         * both routes have to be matched. */
+        or(
+          inArray(accountingTransactions.providerResourceId, resourceIds),
+          inArray(sql`${accountingTransactions.metadata}->>'payment_id'`, resourceIds),
+        ),
+      ),
+    );
+
+  type PerPayment = {
+    settlementSuspense: bigint;
+    settlementCurrency: string | null;
+    splitTransactions: Set<string>;
+    splitSuspense: bigint;
+    splitCurrencies: Set<string>;
+    suspenseNet: bigint;
+  };
+  const byPayment = new Map<string, PerPayment>();
+  const blank = (): PerPayment => ({
+    settlementSuspense: BigInt(0),
+    settlementCurrency: null,
+    splitTransactions: new Set(),
+    splitSuspense: BigInt(0),
+    splitCurrencies: new Set(),
+    suspenseNet: BigInt(0),
+  });
+
+  for (const leg of legs) {
+    // Which payment this leg belongs to: the resource it names, or the payment
+    // its metadata points at.
+    const owner =
+      (leg.providerResourceId && ownerOf.get(leg.providerResourceId)) ??
+      (leg.metadataPaymentId && ownerOf.get(leg.metadataPaymentId)) ??
+      null;
+    if (!owner) continue;
+
+    const state = byPayment.get(owner) ?? blank();
+
+    if (leg.account === "unallocated_customer_funds") {
+      state.suspenseNet += leg.amountMinor;
+      if (leg.economicEvent === "payment_settled") {
+        // Stored as a credit (negative); the allocatable amount is its negation.
+        state.settlementSuspense += -leg.amountMinor;
+        state.settlementCurrency = leg.currency;
+      }
+      if (leg.economicEvent === "revenue_split") {
+        state.splitSuspense += leg.amountMinor;
+        state.splitCurrencies.add(leg.currency);
+      }
+    }
+
+    if (leg.economicEvent === "revenue_split") state.splitTransactions.add(leg.transactionId);
+
+    /* `refund_absorbed_cost` HAS EXACTLY ONE LEGITIMATE HOME. It is the cost of
+     * a reversal, posted inside the reversal itself; anywhere else means some
+     * other code path started using an expense account it has no business in. */
+    if (leg.account === "refund_absorbed_cost" && leg.economicEvent !== "revenue_split_reversed") {
+      findings.push({
+        code: "absorbed_cost_misplaced",
+        paymentId: owner,
+        transactionId: leg.transactionId,
+        detail: `refund_absorbed_cost posted by ${leg.economicEvent}`,
+      });
+    }
+
+    byPayment.set(owner, state);
+  }
+
+  for (const paymentId of payments) {
+    const state = byPayment.get(paymentId);
+    if (!state) continue;
+
+    /* ONE SPLIT PER SETTLEMENT — the invariant the schema's own enum comment
+     * states. Two means the suspense was moved out twice. */
+    if (state.splitTransactions.size > 1) {
+      findings.push({
+        code: "allocation_duplicate",
+        paymentId,
+        transactionId: [...state.splitTransactions][0],
+        detail: `${state.splitTransactions.size} revenue_split transactions`,
+      });
+    }
+
+    if (state.splitTransactions.size > 0) {
+      if (state.settlementCurrency === null) {
+        findings.push({
+          code: "allocation_without_settlement",
+          paymentId,
+          transactionId: [...state.splitTransactions][0],
+          detail: "revenue_split with no settlement suspense credit",
+        });
+      } else {
+        /* THE SPLIT MOVED EXACTLY WHAT THE SETTLEMENT PUT THERE. Task #19 P1-4
+         * made the allocatable amount authoritative; this is the check that it
+         * stayed that way. A split debit larger than the credit is money taken
+         * out of suspense that no payment put in. */
+        if (state.splitSuspense !== state.settlementSuspense) {
+          findings.push({
+            code: "allocation_amount_mismatch",
+            paymentId,
+            transactionId: [...state.splitTransactions][0],
+            detail:
+              `split moved ${state.splitSuspense.toString()}, ` +
+              `settlement made ${state.settlementSuspense.toString()} allocatable`,
+          });
+        }
+
+        for (const c of state.splitCurrencies) {
+          if (c !== state.settlementCurrency) {
+            findings.push({
+              code: "allocation_currency_mismatch",
+              paymentId,
+              transactionId: [...state.splitTransactions][0],
+              detail: `split in ${c}, settlement in ${state.settlementCurrency}`,
+            });
+          }
+        }
+      }
+    }
+
+    /* SUSPENSE MUST CLOSE. Settlement credits it, the split clears it, a refund
+     * debits it and the reversal credits it back — including the absorbed cost
+     * (Task #19 P1-2). Anything left is money the books cannot explain, and
+     * before that fix the retained processing fee sat here as a debit.
+     *
+     * A payment that has settled but not yet been allocated legitimately holds
+     * its whole credit, so only an allocated payment is checked. */
+    if (state.splitTransactions.size > 0 && state.suspenseNet !== BigInt(0)) {
+      findings.push({
+        code: "suspense_residual",
+        paymentId,
+        transactionId: null,
+        detail: `unallocated_customer_funds nets to ${state.suspenseNet.toString()}`,
+      });
+    }
+  }
+
+  return {
+    configured: true,
+    environment,
+    paymentsChecked: payments.length,
+    discrepancies: findings,
   };
 }
 
@@ -2100,16 +2484,30 @@ export async function reconcileFeeDrift(
 
 export type TrialBalanceLine = {
   account: string;
+  /**
+   * THE DENOMINATION, and the line is meaningless without it. One account can
+   * hold balances in several currencies, and minor units from different
+   * currencies cannot be added — 1000 EUR-cents plus 1000 USD-cents is not 2000
+   * of anything.
+   */
+  currency: string;
   totalMinor: bigint;
   entryCount: number;
 };
 
 export type TrialBalance = {
   configured: boolean;
-  /** The sum of ALL entry legs. Must be zero if the journal is balanced. */
-  grandTotal: bigint;
+  /** The environment these lines describe. Never mixed. */
+  environment: string | null;
+  /**
+   * The sum of ALL entry legs, per currency. Each must be zero if the journal
+   * is balanced. Reported per currency rather than as one figure because a
+   * single total would be a sum across denominations — the exact arithmetic this
+   * type now refuses to do.
+   */
+  grandTotals: { currency: string; totalMinor: bigint }[];
   lines: TrialBalanceLine[];
-  /** True when grand_total is exactly zero. */
+  /** True when EVERY currency's grand total is exactly zero. */
   balanced: boolean;
 };
 
@@ -2122,31 +2520,62 @@ export type TrialBalance = {
  */
 export async function ledgerTrialBalance(): Promise<TrialBalance> {
   const db = getDb();
-  if (!db) return { configured: false, grandTotal: BigInt(0), lines: [], balanced: false };
+  if (!db) {
+    return { configured: false, environment: null, grandTotals: [], lines: [], balanced: false };
+  }
 
+  /* ENVIRONMENT-SCOPED. This is the figure an operator reads to answer "what
+   * does the ledger hold", and one that silently added sandbox test money to
+   * production balances would answer it wrongly in the most consequential place
+   * in the report. The environment lives on the transaction, so the join is not
+   * optional. Fails closed. */
+  const environment = getWhopEnvironment();
+  if (!environment) {
+    return { configured: false, environment: null, grandTotals: [], lines: [], balanced: false };
+  }
+
+  /* GROUPED BY CURRENCY AS WELL AS ACCOUNT. `getAccountBalances` in the journal
+   * already did this; this function did not, and produced one `totalMinor` per
+   * account by adding every denomination together. With non-USD settlements now
+   * allocatable (Task #19) that is a wrong number, not a theoretical one. */
   const rows = await db
     .select({
       account: accountingEntries.account,
+      currency: accountingEntries.currency,
       total: sql<string>`sum(${accountingEntries.amountMinor})::text`,
       count: sql<number>`count(*)::int`,
     })
     .from(accountingEntries)
-    .groupBy(accountingEntries.account)
-    .orderBy(accountingEntries.account);
+    .innerJoin(
+      accountingTransactions,
+      eq(accountingEntries.transactionId, accountingTransactions.transactionId),
+    )
+    .where(eq(accountingTransactions.environment, environment))
+    .groupBy(accountingEntries.account, accountingEntries.currency)
+    .orderBy(asc(accountingEntries.account), asc(accountingEntries.currency));
 
   const lines: TrialBalanceLine[] = rows.map((r) => ({
     account: r.account,
+    currency: r.currency,
     totalMinor: BigInt(r.total ?? "0"),
     entryCount: r.count,
   }));
 
-  const grandTotal = lines.reduce((sum, l) => sum + l.totalMinor, BigInt(0));
+  // One grand total per currency. Every one of them must be zero.
+  const byCurrency = new Map<string, bigint>();
+  for (const line of lines) {
+    byCurrency.set(line.currency, (byCurrency.get(line.currency) ?? BigInt(0)) + line.totalMinor);
+  }
+  const grandTotals = [...byCurrency.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([currency, totalMinor]) => ({ currency, totalMinor }));
 
   return {
     configured: true,
-    grandTotal,
+    environment,
+    grandTotals,
     lines,
-    balanced: grandTotal === BigInt(0),
+    balanced: grandTotals.every((g) => g.totalMinor === BigInt(0)),
   };
 }
 

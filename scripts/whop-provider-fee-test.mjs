@@ -598,6 +598,45 @@ async function run() {
       check("while a genuinely zero-fee settlement still is",
         inSyncFound.has("pay_drift_false"));
 
+      /* TASK #20: TAX-REMITTANCE DRIFT IS DRIFT TOO.
+       *
+       * Task #19 P1-1 taught `reconcileProviderFees` to post a sales-tax
+       * remittance against `tax_payable`, but this SCAN still filtered on the fee
+       * delta alone — so a payment whose fees match and whose tax has just been
+       * remitted read as "no drift" while the corrector would have posted a
+       * correction. Detector and corrector disagreeing about what drift means is
+       * the failure this pairing exists to prevent, and it is the COMMON case:
+       * Whop remits when it files, days or weeks after settlement. */
+      FAKE_WHOP = fakeWhop([
+        { origin: "stripe_fee", amount: "0.87" },
+        { origin: "sales_tax_remittance", amount: "0.80" },
+      ]);
+      const taxScan = await drift.reconcileFeeDrift();
+      const taxFound = new Map(taxScan.driftCandidates.map((c) => [c.paymentId, c]));
+
+      /* `pay_drift_insync` has 87 of fees posted and the provider still reports
+       * 87 — the FEE delta is zero. Only the remittance has moved. */
+      check("a settlement whose FEES agree but whose TAX has been remitted IS reported",
+        taxFound.has("pay_drift_insync"), [...taxFound.keys()].join(",") || "none");
+      const insync = taxFound.get("pay_drift_insync");
+      check("  with a zero fee delta, because no fee moved",
+        insync?.deltaMinor === BigInt(0), String(insync?.deltaMinor));
+      check("  and the tax delta the provider proves",
+        insync?.taxRemittanceDeltaMinor === BigInt(80),
+        String(insync?.taxRemittanceDeltaMinor));
+      check("  reporting both posted and actual tax totals, in minor units",
+        insync?.taxRemittancePostedMinor === BigInt(0) &&
+          insync?.taxRemittanceActualMinor === BigInt(80) &&
+          typeof insync?.taxRemittanceDeltaMinor === "bigint");
+
+      /* AND A PAYMENT IN AGREEMENT ON BOTH CLASSES IS STILL SILENT. Without this
+       * the check above would pass on a scan that simply reported everything. */
+      FAKE_WHOP = fakeWhop([{ origin: "stripe_fee", amount: "0.87" }]);
+      const bothAgree = await drift.reconcileFeeDrift();
+      check("a settlement agreeing on fees AND tax is still not reported",
+        !bothAgree.driftCandidates.some((c) => c.paymentId === "pay_drift_insync"),
+        bothAgree.driftCandidates.map((c) => c.paymentId).join(",") || "none");
+
       /* THE SCAN IS READ-ONLY. Nothing it does may post. */
       const txnsBefore = (await scoped.unsafe(
         `select count(*)::int as n from ${SCRATCH}.accounting_transactions`))[0].n;

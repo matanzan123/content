@@ -57,6 +57,19 @@ const TRIAL_BALANCE_COLS: (t: Copy) => Column<TrialBalanceLine>[] = (t) => [
     },
   },
   {
+    /* THE DENOMINATION. One account can hold a balance in several currencies,
+     * and the trial balance now reports one line per (account, currency) — so
+     * without this column two rows for the same account would be
+     * indistinguishable. */
+    key: "currency",
+    header: t.finance.currencyCol,
+    render: (row) => (
+      <span className="font-mono text-[11.5px] text-[color:var(--a-text-muted)]">
+        {row.currency.toUpperCase()}
+      </span>
+    ),
+  },
+  {
     key: "totalMinor",
     header: t.finance.totalMinorCol,
     numeric: true,
@@ -352,7 +365,15 @@ export async function FinanceBody({ t, locale }: { t: Copy; locale: string }) {
           />
           <KpiCard
             label={t.finance.grandTotal}
-            value={balance ? balance.grandTotal.toString() : null}
+            value={
+              balance
+                ? balance.grandTotals.length === 0
+                  ? "0"
+                  : balance.grandTotals
+                      .map((g) => `${g.totalMinor} ${g.currency.toUpperCase()}`)
+                      .join(" · ")
+                : null
+            }
             hint={t.finance.multiCurrencyNote}
             locale={locale as "en" | "he"}
             t={t}

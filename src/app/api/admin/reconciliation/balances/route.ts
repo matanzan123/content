@@ -34,10 +34,21 @@ export async function GET(request: Request) {
     const result = await ledgerTrialBalance();
     return {
       configured: result.configured,
+      /* THE ENVIRONMENT THESE FIGURES DESCRIBE, reported so a reader can never
+       * mistake one environment's ledger for the other's. It comes from server
+       * configuration; no request may choose it. */
+      environment: result.environment,
       balanced: result.balanced,
-      grand_total: result.grandTotal.toString(),
+      /* ONE TOTAL PER CURRENCY. A single `grand_total` was a sum across
+       * denominations, which is not a number. Every entry must be zero for the
+       * ledger to balance. */
+      grand_totals: result.grandTotals.map((g) => ({
+        currency: g.currency,
+        total_minor: g.totalMinor.toString(),
+      })),
       lines: result.lines.map((l) => ({
         account: l.account,
+        currency: l.currency,
         total_minor: l.totalMinor.toString(),
         entry_count: l.entryCount,
       })),

@@ -2579,6 +2579,262 @@ async function sequences() {
         });
       }
 
+      /* =================================================================
+         TASK #20 — THE ALLOCATION AND REVERSAL DETECTOR.
+
+         Tasks #17-#19 established invariants that nothing watched. Each check
+         below is proved twice: once on a HEALTHY chain, where it must stay
+         silent, and once on a deliberately broken one, where it must name the
+         fault. A detector that never fires and a detector that always fires are
+         equally useless, and only the pair distinguishes them.
+         ================================================================= */
+      {
+        const recon = loadTs("src/lib/server/accounting/reconcile.ts");
+
+        const codesFor = async (paymentId) => {
+          const r = await recon.reconcileAllocationInternal();
+          return r.discrepancies.filter((d) => d.paymentId === paymentId).map((d) => d.code);
+        };
+
+        /* ---- A HEALTHY FULL LIFECYCLE IS SILENT ---- */
+        {
+          const settled = await settledCase({ minor: 1000, feeMinor: 87 });
+          const uid = "t20_clean";
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+               on conflict (firebase_uid) do nothing`, [uid]);
+          const rec = await earnings.recordCreatorEarning({
+            firebaseUid: uid,
+            whopPaymentId: settled.paymentId,
+            environment: "sandbox",
+            paymentSettledAt: new Date(),
+          });
+          check("T20: the clean case allocates", rec.ok === true, JSON.stringify(rec));
+          check("T20: a settled-and-allocated payment raises NOTHING",
+            (await codesFor(settled.paymentId)).length === 0,
+            (await codesFor(settled.paymentId)).join(","));
+
+          /* A SETTLED BUT NOT-YET-ALLOCATED payment holds its whole suspense
+           * credit legitimately, and must not be reported as a residual. */
+          const unallocated = await settledCase({ minor: 500, feeMinor: 10 });
+          check("T20: a settled payment awaiting allocation is not a residual",
+            (await codesFor(unallocated.paymentId)).length === 0,
+            (await codesFor(unallocated.paymentId)).join(","));
+        }
+
+        /* ---- DOUBLE ALLOCATION IS CAUGHT ---- */
+        {
+          const settled = await settledCase({ minor: 1000, feeMinor: 0 });
+          const uid = "t20_double";
+          await scoped.unsafe(
+            `insert into ${SCRATCH}.users (firebase_uid) values ($1)
+               on conflict (firebase_uid) do nothing`, [uid]);
+          await earnings.recordCreatorEarning({
+            firebaseUid: uid, whopPaymentId: settled.paymentId,
+            environment: "sandbox", paymentSettledAt: new Date(),
+          });
+
+          /* A SECOND SPLIT, forced straight into the journal. `readSettlementAllocation`
+           * refuses this now (Task #19 P1-4 `already_allocated`), which is exactly
+           * why the detector matters: it has to find a double allocation that got
+           * in before that guard existed, or by any route that bypasses it. */
+          const j = loadTs("src/lib/server/accounting/journal.ts");
+          const second = await j.postTransaction({
+            economicEvent: "revenue_split",
+            provider: "whop",
+            providerResourceId: settled.paymentId,
+            environment: "sandbox",
+            currency: "usd",
+            idempotencyKey: `whop:revenue_split:${settled.paymentId}:t20_intruder`,
+            description: "second split",
+            legs: [
+              { account: "unallocated_customer_funds", amountMinor: BigInt(1000),
+                counterpartyType: "creator", counterpartyId: "t20_intruder" },
+              { account: "platform_revenue", amountMinor: BigInt(-200),
+                counterpartyType: "platform", counterpartyId: "cliprewards" },
+              { account: "creator_payable", amountMinor: BigInt(-800),
+                counterpartyType: "creator", counterpartyId: "t20_intruder" },
+            ],
+          });
+          check("T20: the intruding second split posted", second.ok === true,
+            JSON.stringify(second));
+
+          const codes = await codesFor(settled.paymentId);
+          check("T20: a DOUBLE allocation is reported",
+            codes.includes("allocation_duplicate"), codes.join(","));
+          /* AND the arithmetic consequence is reported too: twice the suspense
+           * was moved out, so the split total no longer matches the credit. */
+          check("T20: and so is the amount it moved beyond the settlement",
+            codes.includes("allocation_amount_mismatch"), codes.join(","));
+        }
+
+        /* ---- A SPLIT THAT MOVES MORE THAN THE SETTLEMENT ALLOWED ---- */
+        {
+          const settled = await settledCase({ minor: 1080, feeMinor: 0, tax: 80 });
+          /* The settlement made 1000 allocatable (1080 less 80 tax). This split
+           * takes the whole 1080 — the pre-Task-#19 bug, which paid creator and
+           * platform out of the tax authority's money. */
+          const j = loadTs("src/lib/server/accounting/journal.ts");
+          await j.postTransaction({
+            economicEvent: "revenue_split",
+            provider: "whop",
+            providerResourceId: settled.paymentId,
+            environment: "sandbox",
+            currency: "usd",
+            idempotencyKey: `whop:revenue_split:${settled.paymentId}:t20_greedy`,
+            description: "over-allocating split",
+            legs: [
+              { account: "unallocated_customer_funds", amountMinor: BigInt(1080),
+                counterpartyType: "creator", counterpartyId: "t20_greedy" },
+              { account: "platform_revenue", amountMinor: BigInt(-216),
+                counterpartyType: "platform", counterpartyId: "cliprewards" },
+              { account: "creator_payable", amountMinor: BigInt(-864),
+                counterpartyType: "creator", counterpartyId: "t20_greedy" },
+            ],
+          });
+          const codes = await codesFor(settled.paymentId);
+          check("T20: a split taking the TAX as well is reported",
+            codes.includes("allocation_amount_mismatch"), codes.join(","));
+          check("T20: and the suspense it strands is reported",
+            codes.includes("suspense_residual"), codes.join(","));
+          const r = await recon.reconcileAllocationInternal();
+          const d = r.discrepancies.find(
+            (x) => x.paymentId === settled.paymentId && x.code === "allocation_amount_mismatch");
+          check("T20: the finding names both figures, not just that they differ",
+            /1080/.test(d.detail) && /1000/.test(d.detail), d.detail);
+        }
+
+        /* ---- A MISPLACED ABSORBED-COST LEG ---- */
+        {
+          const settled = await settledCase({ minor: 1000, feeMinor: 0 });
+          const j = loadTs("src/lib/server/accounting/journal.ts");
+          // refund_absorbed_cost belongs only inside revenue_split_reversed.
+          await j.postTransaction({
+            economicEvent: "manual_adjustment",
+            provider: "whop",
+            providerResourceId: settled.paymentId,
+            environment: "sandbox",
+            currency: "usd",
+            idempotencyKey: `whop:manual_adjustment:${settled.paymentId}:t20_misplaced`,
+            description: "absorbed cost in the wrong event",
+            legs: [
+              { account: "refund_absorbed_cost", amountMinor: BigInt(30),
+                counterpartyType: "platform", counterpartyId: "cliprewards" },
+              { account: "provider_balance", amountMinor: BigInt(-30),
+                counterpartyType: "provider", counterpartyId: "whop" },
+            ],
+          });
+          const codes = await codesFor(settled.paymentId);
+          check("T20: refund_absorbed_cost outside a reversal is reported",
+            codes.includes("absorbed_cost_misplaced"), codes.join(","));
+        }
+
+        /* ---- ENVIRONMENT ISOLATION ---- */
+        {
+          const r = await recon.reconcileAllocationInternal();
+          check("T20: the report names the environment it describes",
+            r.environment === "sandbox", String(r.environment));
+          check("T20: and is configured", r.configured === true);
+          /* A PRODUCTION SETTLEMENT WITH A DELIBERATELY BROKEN CHAIN: its split
+           * moves more than its settlement allowed. A sandbox scan must not see
+           * it at all — not the payment, and not the fault. */
+          const j3 = loadTs("src/lib/server/accounting/journal.ts");
+          await j3.postTransaction({
+            economicEvent: "payment_settled", provider: "whop",
+            providerResourceId: "pay_t20_prod", environment: "production",
+            currency: "usd", idempotencyKey: "whop:payment_settled:pay_t20_prod",
+            description: "production settlement",
+            legs: [
+              { account: "provider_balance", amountMinor: BigInt(1000),
+                counterpartyType: "provider", counterpartyId: "whop" },
+              { account: "unallocated_customer_funds", amountMinor: BigInt(-1000),
+                counterpartyType: "customer" },
+            ],
+          });
+          await j3.postTransaction({
+            economicEvent: "revenue_split", provider: "whop",
+            providerResourceId: "pay_t20_prod", environment: "production",
+            currency: "usd", idempotencyKey: "whop:revenue_split:pay_t20_prod:x",
+            description: "over-allocating production split",
+            legs: [
+              { account: "unallocated_customer_funds", amountMinor: BigInt(1500),
+                counterpartyType: "creator", counterpartyId: "x" },
+              { account: "creator_payable", amountMinor: BigInt(-1500),
+                counterpartyType: "creator", counterpartyId: "x" },
+            ],
+          });
+          const after = await recon.reconcileAllocationInternal();
+          check("T20: a broken PRODUCTION chain never appears in a sandbox scan",
+            !after.discrepancies.some((d) => d.paymentId === "pay_t20_prod"),
+            after.discrepancies.map((d) => d.paymentId).join(",") || "none");
+          const [prodRows] = await scoped.unsafe(
+            `select count(*)::int as n from ${SCRATCH}.accounting_transactions
+               where environment = 'production'`);
+          check("T20: and the production rows really are there to have been ignored",
+            prodRows.n >= 2, String(prodRows.n));
+
+          /* THE PRODUCTION CHAIN IS BROKEN ON PURPOSE — its split moves 1500
+           * against a 1000 credit. So an unscoped scan would not merely include
+           * the payment, it would raise a FINDING for it. Asserting the absence
+           * of that specific finding is what makes the scope load-bearing, where
+           * asserting only the payment's absence left room for a second
+           * environment filter elsewhere to mask a missing one here. */
+          check("T20: and raises none of that production chain's faults",
+            !after.discrepancies.some(
+              (d) => d.code === "allocation_amount_mismatch" && d.paymentId === "pay_t20_prod"),
+            after.discrepancies.map((d) => `${d.paymentId}:${d.code}`).join(",") || "none");
+        }
+
+        /* ---- THE DETECTOR IS READ-ONLY ---- */
+        {
+          const before = (await scoped.unsafe(
+            `select count(*)::int as n from ${SCRATCH}.accounting_transactions`))[0].n;
+          await recon.reconcileAllocationInternal();
+          const after = (await scoped.unsafe(
+            `select count(*)::int as n from ${SCRATCH}.accounting_transactions`))[0].n;
+          check("T20: the allocation scan posts nothing", before === after,
+            `${before} -> ${after}`);
+        }
+
+        /* ---- THE TRIAL BALANCE IS SCOPED AND CURRENCY-AWARE ---- */
+        {
+          const tb = await recon.ledgerTrialBalance();
+          check("T20: the trial balance names its environment",
+            tb.environment === "sandbox", String(tb.environment));
+          check("T20: every line carries a currency",
+            tb.lines.length > 0 && tb.lines.every((l) => typeof l.currency === "string" && l.currency),
+            String(tb.lines.length));
+          check("T20: totals are reported PER CURRENCY, not as one sum",
+            Array.isArray(tb.grandTotals) && tb.grandTotals.every((g) => g.currency));
+          check("T20: and every currency balances to zero",
+            tb.balanced === true,
+            tb.grandTotals.map((g) => `${g.currency}:${g.totalMinor}`).join(","));
+
+          /* IT COUNTS ONLY THIS ENVIRONMENT'S LEGS, and this is the assertion
+           * that proves it. The four checks above all stayed true when the
+           * environment filter was deleted — a production transaction balances
+           * on its own, so including it changes neither `balanced` nor the
+           * per-currency totals nor the presence of a currency. Only a figure
+           * tied to HOW MANY legs were summed can tell the difference, and the
+           * production chain seeded earlier in this section is what makes the
+           * two numbers diverge. */
+          const summed = tb.lines.reduce((a, l) => a + l.entryCount, 0);
+          const [sandboxLegs] = await scoped.unsafe(
+            `select count(*)::int as n
+               from ${SCRATCH}.accounting_entries e
+               join ${SCRATCH}.accounting_transactions t
+                 on t.transaction_id = e.transaction_id
+              where t.environment = 'sandbox'`);
+          const [allLegs] = await scoped.unsafe(
+            `select count(*)::int as n from ${SCRATCH}.accounting_entries`);
+          check("T20: the trial balance sums ONLY this environment's legs",
+            summed === sandboxLegs.n, `${summed} vs ${sandboxLegs.n} sandbox`);
+          check("T20: and the ledger really does hold other-environment legs it left out",
+            allLegs.n > sandboxLegs.n, `${allLegs.n} total vs ${sandboxLegs.n} sandbox`);
+        }
+      }
+
+
     }
 
   } finally {

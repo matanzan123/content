@@ -5,7 +5,10 @@ import {
   reconcileRefundsInternal,
   reconcileDisputesInternal,
   reconcileFeeDrift,
+  reconcileAllocationInternal,
 } from "@/lib/server/accounting/reconcile";
+import { reconcileCreatorEarnings } from "@/lib/server/creator-earnings-reconcile";
+import { getWhopEnvironment } from "@/lib/server/whop-payments";
 
 /* ==========================================================================
    GET /api/admin/reconciliation/summary
@@ -33,17 +36,43 @@ export async function GET(request: Request) {
   }
 
   return withAdminApi(async () => {
-    const [payments, refunds, disputes, feeDrift] = await Promise.all([
+    /* THE EARNINGS RECONCILER IS INCLUDED HERE, and until now it was not.
+     *
+     * `reconcileCreatorEarnings` was fully implemented and wired to nothing: no
+     * route called it, so the entire creator-earnings and revenue-split
+     * dimension — unjournalled earnings, ledger-versus-rows payable mismatches,
+     * negative payables, mixed-currency positions, transfers with no journal —
+     * could not be run by anyone. A detector nobody can reach detects nothing.
+     *
+     * It takes the environment as a parameter, so the route resolves it from
+     * server configuration below and passes it in — never from the request. */
+    /* THE ENVIRONMENT COMES FROM SERVER CONFIGURATION. No query string, no body,
+     * no header. Fails closed: unresolvable means this dimension is reported as
+     * unconfigured rather than reconciled across the boundary. */
+    const environment = getWhopEnvironment();
+
+    const [payments, refunds, disputes, feeDrift, allocation, earnings] = await Promise.all([
       reconcileInternal(),
       reconcileRefundsInternal(),
       reconcileDisputesInternal(),
       reconcileFeeDrift(),
+      reconcileAllocationInternal(),
+      environment ? reconcileCreatorEarnings(environment) : Promise.resolve({ ok: false as const, reason: "unconfigured" as const }),
     ]);
 
     return {
       payments,
       refunds,
       disputes,
+      /* THE ALLOCATION AND REVERSAL CHAIN — the Task #17/#18/#19 invariants that
+       * had no detector: a double allocation, a split moving more than its
+       * settlement made allocatable, suspense left stranded by a reversal, or a
+       * refund_absorbed_cost leg somewhere it does not belong. */
+      allocation,
+      creator_earnings: earnings.ok
+        ? { configured: true, environment: earnings.report.environment,
+            checked_at: earnings.report.checkedAt, findings: earnings.report.findings }
+        : { configured: false, reason: earnings.reason },
       fee_drift: {
         configured: feeDrift.configured,
         settlements_scanned: feeDrift.settlementsScanned,
@@ -57,6 +86,12 @@ export async function GET(request: Request) {
           posted_fee_minor: c.postedFeeMinor.toString(),
           actual_fee_minor: c.actualFeeMinor.toString(),
           delta_minor: c.deltaMinor.toString(),
+          /* TAX PRINCIPAL, reported alongside the fee drift and separately from
+           * it. A finding may carry a zero fee delta and a non-zero tax delta:
+           * Whop remits sales tax when it files, long after settlement. */
+          tax_remittance_posted_minor: c.taxRemittancePostedMinor.toString(),
+          tax_remittance_actual_minor: c.taxRemittanceActualMinor.toString(),
+          tax_remittance_delta_minor: c.taxRemittanceDeltaMinor.toString(),
           // A hint about why this drifted, not a cause. Null for settlements
           // predating the flag.
           fees_were_actual_at_settlement: c.feesWereActualAtSettlement,
