@@ -41,7 +41,7 @@ export async function POST(request: Request) {
   const firebaseUid = gate.context.uid as string;
 
   const rl = await checkRateLimit(`whop:payout_portal:${firebaseUid}`, 20);
-  if (!rl.ok) return rateLimitResponse();
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   const platform = resolvePlatformConfig();
   if (!platform.ok) return json({ error: "unavailable", reason: platform.reason }, 503);

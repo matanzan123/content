@@ -69,7 +69,7 @@ export async function POST(
     // A REAL 429, with `retry-after`. The shared helper's response passes
     // through `withAdminApi` untouched, so the status the limiter chose is the
     // status the client sees.
-    if (!rl.ok) return rateLimitResponse();
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
     await writeAudit({
       adminUid: adminCtx.uid,

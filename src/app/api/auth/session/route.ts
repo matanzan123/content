@@ -9,7 +9,7 @@ import {
   userSessionCookieOptions,
 } from "@/lib/server/user-session";
 import { provisionUser } from "@/lib/server/users";
-import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/server/rate-limit";
+import { checkRateLimit, clientIdentity, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    ORDINARY-USER SESSION EXCHANGE
@@ -53,8 +53,16 @@ export async function POST(request: Request) {
   // able to trigger one on a visitor's behalf.
   if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
 
-  const rl = await checkRateLimit(`auth:session:${getClientIp(request.headers)}`, 10);
-  if (!rl.ok) return rateLimitResponse();
+  /* A COARSE PRE-FILTER, AND IT IS HONEST ABOUT BEING ONE.
+   *
+   * With no trusted proxy hops configured, `clientIdentity` cannot tell callers
+   * apart and returns one shared bucket — so this bounds total unauthenticated
+   * volume and nothing finer. It is deliberately NOT the only guard: the
+   * authoritative per-account limit below is keyed on a verified uid, which no
+   * header can forge. */
+  const who = clientIdentity(request.headers);
+  const coarse = await checkRateLimit(`auth:session:${who.key}`, who.trusted ? 10 : 200);
+  if (!coarse.ok) return rateLimitResponse(coarse.retryAfterSeconds);
 
   const auth = getAdminAuth();
   // Deny by default: with no service account the server can verify nobody.
@@ -75,6 +83,19 @@ export async function POST(request: Request) {
   try {
     // `true` = check revocation, so a disabled account cannot open a session.
     const decoded = await auth.verifyIdToken(idToken, true);
+
+    /* THE AUTHORITATIVE LIMIT, on an identity nobody can forge.
+     *
+     * The uid comes from a token Firebase has just verified, so this bounds how
+     * often ONE account can mint a session regardless of what headers the caller
+     * sent. It sits after verification because that is the first moment a real
+     * identity exists, and before the cookie is minted so a limited request
+     * establishes no session.
+     *
+     * Verification itself is the cheap part and Firebase rate-limits it; what
+     * this protects is the session-minting and user-provisioning work below. */
+    const perUser = await checkRateLimit(`auth:session:uid:${decoded.uid}`, 20);
+    if (!perUser.ok) return rateLimitResponse(perUser.retryAfterSeconds);
 
     const sessionCookie = await auth.createSessionCookie(idToken, {
       expiresIn: USER_SESSION_MAX_AGE_MS,

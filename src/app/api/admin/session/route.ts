@@ -5,7 +5,7 @@ import {
   getAdminCheck,
 } from "@/lib/server/admin-guard";
 import { getAdminAuth } from "@/lib/server/firebase-admin";
-import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/server/rate-limit";
+import { checkRateLimit, clientIdentity, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    ADMIN SESSION EXCHANGE
@@ -34,8 +34,12 @@ function readIdToken(value: unknown): string | null {
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function POST(request: Request) {
-  const rl = await checkRateLimit(`admin:session:${getClientIp(request.headers)}`, 10);
-  if (!rl.ok) return rateLimitResponse();
+  /* COARSE, for the same reason as the user session route: without trusted
+   * proxy hops there is no per-caller identity to key on. The authoritative
+   * per-admin limit is applied after the token is verified. */
+  const who = clientIdentity(request.headers);
+  const coarse = await checkRateLimit(`admin:session:${who.key}`, who.trusted ? 10 : 200);
+  if (!coarse.ok) return rateLimitResponse(coarse.retryAfterSeconds);
 
   const auth = getAdminAuth();
   // Deny by default: with no service account the server cannot verify anyone.

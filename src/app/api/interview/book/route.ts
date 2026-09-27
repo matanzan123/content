@@ -53,7 +53,7 @@ export async function POST(request: Request) {
   if (gate.denied) return gate.response;
 
   const rl = await checkRateLimit(`interview:book:${gate.context.uid as string}`, 5);
-  if (!rl.ok) return rateLimitResponse();
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   const length = Number(request.headers.get("content-length") ?? "0");
   if (length > MAX_BODY_BYTES) {

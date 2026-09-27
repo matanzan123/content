@@ -3,7 +3,7 @@ import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { writeAudit } from "@/lib/server/admin-audit";
 import { recordCreatorEarning } from "@/lib/server/creator-earnings";
 import { resolvePlatformConfig } from "@/lib/server/whop-accounts";
-import { checkRateLimit } from "@/lib/server/rate-limit";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /**
  * $1,000,000 in minor units.
@@ -73,7 +73,14 @@ export async function POST(request: Request) {
     // admin's runaway script exhaust everyone else's budget. Keyed the same
     // way as the transfer and withdrawal routes so the three read alike.
     const rl = await checkRateLimit(`admin:earnings_record:${adminCtx.uid}`, 60);
-    if (!rl.ok) return { error: "rate_limited" };
+    /* A REAL 429, not a 200 carrying an error.
+     *
+     * This returned a plain object, which `withAdminApi` serialises with status
+     * 200 — so a rate-limited allocation looked to any client like a request that
+     * had been accepted. Task #18 taught the wrapper to pass a `Response`
+     * through untouched precisely so the limiter could answer with its own
+     * status, and this was the one call site still not using it. */
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
     const firebaseUid = body.firebase_uid;
     const whopPaymentId = body.whop_payment_id;

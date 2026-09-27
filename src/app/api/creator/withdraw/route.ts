@@ -64,7 +64,7 @@ export async function POST(request: Request) {
   const firebaseUid = gate.context.uid as string;
 
   const rl = await checkRateLimit(`creator:withdraw:${firebaseUid}`, 5);
-  if (!rl.ok) return rateLimitResponse();
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   let body: Record<string, unknown>;
   try {

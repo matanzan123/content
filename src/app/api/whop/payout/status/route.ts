@@ -45,7 +45,7 @@ export async function GET(request: Request) {
   // Every call is TWO live provider reads (account + payout methods), so an
   // authenticated session must not be able to amplify into the provider.
   const rl = await checkRateLimit(`whop:payout_status:${firebaseUid}`, 30);
-  if (!rl.ok) return rateLimitResponse();
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   const account = await getConnectedAccount(firebaseUid, platform.config.environment);
   if (!account) return json({ ok: true, provisioned: false }, 200);

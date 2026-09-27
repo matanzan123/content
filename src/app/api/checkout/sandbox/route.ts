@@ -3,6 +3,7 @@ import { getPaymentOrder, isOrderId } from "@/lib/server/payment-orders";
 import { createSandboxTestOrder, isSandboxOrderingEnabled } from "@/lib/server/sandbox-orders";
 import { buildCheckoutSession, getCheckoutSession } from "@/lib/server/checkout-session";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
+import { checkRateLimit, clientIdentity, rateLimitResponse } from "@/lib/server/rate-limit";
 
 /* ==========================================================================
    SANDBOX CHECKOUT API — testing infrastructure, sandbox only.
@@ -62,6 +63,24 @@ export async function POST(request: Request) {
   // This action creates provider objects, so it must not be triggerable by a
   // page on another site.
   if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
+
+  /* A BOUND ON PROVIDER OBJECT CREATION.
+   *
+   * This route has no authentication — it is sandbox test infrastructure and
+   * answers 404 outside sandbox — but every `start` creates an order row AND a
+   * real Whop checkout in the sandbox environment. Unauthenticated and
+   * unbounded, it was a way for anyone who could reach the origin to spend
+   * provider quota indefinitely.
+   *
+   * There is no authenticated identity to key on, so this is the coarse shared
+   * bucket `clientIdentity` returns when no proxy hop is trusted. That is a
+   * weaker guard than a per-user limit and is not pretending otherwise: what it
+   * bounds is total sandbox checkout creation per hour, which is the actual
+   * resource at risk. Generous enough that ordinary manual testing never notices
+   * it. */
+  const who = clientIdentity(request.headers);
+  const rl = await checkRateLimit(`checkout:sandbox_start:${who.key}`, who.trusted ? 30 : 120);
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   if (request.headers.get("content-type")?.includes("application/json") !== true) {
     return json({ error: "invalid_request" }, 415);

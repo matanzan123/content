@@ -51,7 +51,7 @@ export async function POST(request: Request) {
 
   return withAdminApi(async (adminCtx) => {
     const rl = await checkRateLimit(`admin:withdrawal_sweep:${adminCtx.uid}`, 20);
-    if (!rl.ok) return rateLimitResponse();
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
     const requested = typeof body?.limit === "number" ? body.limit : 25;
     const limit =

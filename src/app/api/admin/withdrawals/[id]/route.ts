@@ -72,7 +72,7 @@ export async function POST(request: Request, { params }: Params) {
 
   return withAdminApi(async (adminCtx) => {
     const rl = await checkRateLimit(`admin:withdrawal:${adminCtx.uid}`, 30);
-    if (!rl.ok) return rateLimitResponse();
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
     await writeAudit({
       adminUid: adminCtx.uid,

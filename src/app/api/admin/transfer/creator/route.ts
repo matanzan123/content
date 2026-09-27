@@ -71,7 +71,7 @@ export async function POST(request: Request) {
 
   return withAdminApi(async (adminContext) => {
     const rl = await checkRateLimit(`admin:transfer:${adminContext.uid}`, 20);
-    if (!rl.ok) return rateLimitResponse();
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
     // Parse body
     let body: Record<string, unknown>;

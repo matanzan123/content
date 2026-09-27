@@ -1179,10 +1179,23 @@ async function run() {
         rlBody.error === "rate_limited", JSON.stringify(rlBody));
       check("and with a real 429, not a 200",
         rlRes.status === 429, String(rlRes.status));
-      check("carrying retry-after and no-store, as the shared helper set them",
-        rlRes.headers.get("retry-after") === "3600" &&
-          rlRes.headers.get("cache-control") === "no-store",
-        `retry-after=${rlRes.headers.get("retry-after")}`);
+      /* RE-BASELINED IN TASK #23. This asserted a flat `retry-after: 3600`,
+       * which is what the helper used to send regardless of how much of the
+       * fixed window actually remained — telling a client to wait an hour when
+       * the window had twelve seconds left. `retry-after` is now the real
+       * seconds-to-window-end, so the assertion became the stronger one: the
+       * header must agree with the limiter's own window arithmetic. That is
+       * false for a flat 3600 at every moment of the hour but the first
+       * second, so this still fails if the old behaviour returns. */
+      {
+        const expected = loadTs("src/lib/server/rate-limit.ts").windowRetryAfterSeconds();
+        const sent = Number(rlRes.headers.get("retry-after"));
+        check("carrying a retry-after that matches the real window end, and no-store",
+          Number.isInteger(sent) && sent >= 1 && sent <= 3600 &&
+            Math.abs(sent - expected) <= 3 &&
+            rlRes.headers.get("cache-control") === "no-store",
+          `retry-after=${sent} expected≈${expected}`);
+      }
       check("a rate-limited request makes ZERO provider calls",
         listCalls === 0 && retrieveCalls === 0,
         "listFees=" + listCalls + " retrieve=" + retrieveCalls);
@@ -1238,8 +1251,12 @@ async function run() {
       check("the route uses the SHARED limiter, not one of its own",
         /import \{ checkRateLimit, rateLimitResponse \} from "@\/lib\/server\/rate-limit";/.test(rlFull) &&
           !/rateLimitCounters|windowKey/.test(rlFull));
+      /* RE-BASELINED IN TASK #23: the route now forwards the limiter's own
+       * `retryAfterSeconds` to the helper instead of letting it recompute, so
+       * the call carries an argument. The point of the assertion is unchanged —
+       * the shared helper answers, and the route hand-rolls no error body. */
       check("and the shared 429 response, not a hand-rolled error object",
-        /if \(!rl\.ok\) return rateLimitResponse\(\);/.test(rlSrc) &&
+        /if \(!rl\.ok\) return rateLimitResponse\(rl\.retryAfterSeconds\);/.test(rlSrc) &&
           !/error: "rate_limited"/.test(rlSrc));
       check("keyed per ADMIN, in the same shape as the other finance routes",
         /checkRateLimit\(.admin:fee_reconcile:\$\{adminCtx\.uid\}., 60\)/.test(rlSrc));
@@ -1499,8 +1516,14 @@ async function run() {
         passed.status === 429, String(passed.status));
       check("and its BODY",
         passedBody.error === "rate_limited", JSON.stringify(passedBody));
+      /* RE-BASELINED IN TASK #23, for the same reason as Section K: the helper's
+       * default `retry-after` is now the time left in the window, not a
+       * constant. What this section is really about is that the header SURVIVES
+       * the wrapper, so it asserts the value the helper itself produced rather
+       * than a literal. */
       check("and its HEADERS, retry-after among them",
-        passed.headers.get("retry-after") === "3600" &&
+        passed.headers.get("retry-after") ===
+          String(limiter.windowRetryAfterSeconds()) &&
           passed.headers.get("cache-control") === "no-store",
         "retry-after=" + passed.headers.get("retry-after"));
 

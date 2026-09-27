@@ -68,7 +68,7 @@ export async function POST(request: Request) {
   const auth = { ok: true as const, user: { uid: gate.context.uid as string } };
 
   const rl = await checkRateLimit(`whop:connect:${auth.user.uid}`, 10);
-  if (!rl.ok) return rateLimitResponse();
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
 
   const config = resolveOAuthConfig();
   if (!config.ok) return json({ error: "unavailable" }, 503);

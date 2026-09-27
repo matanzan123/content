@@ -1,4 +1,5 @@
 import { withAdminApi } from "@/lib/server/admin-guard";
+import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import {
   reconcileInternal,
@@ -35,7 +36,26 @@ export async function GET(request: Request) {
     return Response.json({ error: "forbidden" }, { status: 403, headers: { "cache-control": "no-store" } });
   }
 
-  return withAdminApi(async () => {
+  return withAdminApi(async (adminCtx) => {
+    /* THIS READ IS EXPENSIVE, and that is why it is limited.
+     *
+     * `reconcileFeeDrift` asks the provider about every settlement in its page —
+     * up to FEE_DRIFT_MAX_PAGE, currently 200 — so ONE request to this endpoint
+     * can cost two hundred `listFees` calls, and the payouts and per-resource
+     * reconcilers add more. Nothing bounded how often it could be called, so an
+     * admin session left on a refreshing dashboard, a retry loop, or a stolen
+     * cookie could fan out provider traffic without limit.
+     *
+     * Rate limiting is the right tool here rather than tighter pagination: the
+     * page size is already bounded and deliberately so, and what was unbounded
+     * was the number of times that bounded page could be fetched.
+     *
+     * 30/hour per admin: comfortable for a person watching the dashboard,
+     * nowhere near enough for a loop. Keyed per admin, like every other admin
+     * limit, so one operator cannot spend another's budget. */
+    const rl = await checkRateLimit(`admin:reconciliation_summary:${adminCtx.uid}`, 30);
+    if (!rl.ok) return rateLimitResponse(rl.retryAfterSeconds);
+
     /* THE EARNINGS RECONCILER IS INCLUDED HERE, and until now it was not.
      *
      * `reconcileCreatorEarnings` was fully implemented and wired to nothing: no
