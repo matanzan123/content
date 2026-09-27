@@ -648,6 +648,16 @@ console.log("\n--- A. notification triggers ignore payload environment ---");
         return { creatorEarnings: earnings, creatorTransfers: transfers, whopAccounts: accounts };
       }
       if (spec.endsWith("whop-payments")) return { getWhopEnvironment: () => environment };
+      /* THE PROVIDER'S PAYOUT VOCABULARY, from the module that owns it. The
+       * triggers import `FAILURE_PAYOUT_STATUSES` so a failed payout notifies the
+       * creator using the same set the withdrawal reconciler acts on; re-listing
+       * the statuses here would let the test and production drift apart on what
+       * "failed" means, which is the drift the shared constant exists to stop. */
+      if (spec.endsWith("whop-payouts")) {
+        return {
+          FAILURE_PAYOUT_STATUSES: loadTs("src/lib/server/whop-payouts.ts").FAILURE_PAYOUT_STATUSES,
+        };
+      }
       if (spec.endsWith("notifications")) {
         return { writeNotification: async (n) => { log.notifications.push(n); } };
       }

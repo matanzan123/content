@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { creatorEarnings, creatorTransfers, whopAccounts } from "@/lib/db/schema";
 import { getWhopEnvironment } from "./whop-payments";
+import { FAILURE_PAYOUT_STATUSES } from "./whop-payouts";
 import { writeNotification } from "./notifications";
 
 /* ==========================================================================
@@ -18,8 +19,44 @@ import { writeNotification } from "./notifications";
    retry that reaches the same event produces the same key → ON CONFLICT
    DO NOTHING → exactly one notification per event.
 
-   KEY SCHEMA: "{type}:{resource_id}[:{state_discriminator}]"
+   KEY SCHEMA: "{type}:{environment}:{resource_id}[:{state_discriminator}]"
+
+   THE ENVIRONMENT IS PART OF THE KEY, and it has to be.
+
+   Every lookup below is already environment-scoped, for a reason these very
+   comments state: a Whop resource id "is not unique across environments", and
+   migration 0011 made our own unique indexes environment-aware so the same id
+   can legitimately exist once per environment.
+
+   The keys did not carry that. `earnings_held:pay_ABC` was the same string in
+   sandbox and production, and `idempotency_key` is globally unique — so
+   whichever environment fired first won and the other creator was NEVER
+   notified. Not a duplicate: a silently swallowed notification, which is the
+   harder failure to notice.
+
+   `notifyWithdrawalProcessing` is the one exception and needs no environment in
+   its key, because a withdrawal id is a uuid from our own table rather than a
+   provider id, and is therefore already unique across both environments.
    ========================================================================== */
+
+/**
+ * Builds an idempotency key that cannot collide across environments.
+ *
+ * Takes the environment as an argument rather than reading it, so the key and
+ * the lookup that resolved the recipient are always derived from the same value
+ * — if they could differ, a notification could be deduplicated against a key
+ * from the environment it does not belong to.
+ */
+function notificationKey(
+  type: string,
+  environment: "sandbox" | "production",
+  resourceId: string,
+  discriminator?: string,
+): string {
+  return discriminator
+    ? `${type}:${environment}:${resourceId}:${discriminator}`
+    : `${type}:${environment}:${resourceId}`;
+}
 
 /* --------------------------------------------------------------------------
    ACCOUNT / KYC
@@ -92,7 +129,7 @@ export async function notifyAccountUpdated(
       title: "Identity verified",
       body: "Your account is verified. You can now receive payouts.",
       actionUrl: "/dashboard/payouts",
-      idempotencyKey: `kyc_approved:${whopAccountId}`,
+      idempotencyKey: notificationKey("kyc_approved", environment, whopAccountId),
     });
   } else if (state === "restricted") {
     await writeNotification({
@@ -101,7 +138,7 @@ export async function notifyAccountUpdated(
       title: "Payout account restricted",
       body: "Your payout account has been restricted. Contact support for help.",
       actionUrl: "/dashboard/payouts",
-      idempotencyKey: `kyc_rejected:${whopAccountId}`,
+      idempotencyKey: notificationKey("kyc_rejected", environment, whopAccountId),
     });
   } else if (state === "action_required") {
     await writeNotification({
@@ -110,7 +147,7 @@ export async function notifyAccountUpdated(
       title: "Action required: complete verification",
       body: "Your payout account needs additional information before you can receive funds.",
       actionUrl: "/dashboard/payouts",
-      idempotencyKey: `kyc_required:${whopAccountId}:${newStatus}`,
+      idempotencyKey: notificationKey("kyc_required", environment, whopAccountId, newStatus),
     });
   }
 }
@@ -159,7 +196,7 @@ export async function notifyPaymentSettled(whopPaymentId: string): Promise<void>
     title: "New earnings",
     body: "A payment has been received. Your share will be released after the hold period.",
     actionUrl: "/dashboard/earnings",
-    idempotencyKey: `earnings_held:${whopPaymentId}`,
+    idempotencyKey: notificationKey("earnings_held", environment, whopPaymentId),
   });
 }
 
@@ -211,7 +248,7 @@ export async function notifyPayoutCompleted(
       title: "Payout sent",
       body: "Your payout has been sent and should arrive shortly.",
       actionUrl: "/dashboard/payouts",
-      idempotencyKey: `payout_succeeded:${providerTransferId}`,
+      idempotencyKey: notificationKey("payout_succeeded", environment, providerTransferId),
     });
   } else {
     await writeNotification({
@@ -220,7 +257,7 @@ export async function notifyPayoutCompleted(
       title: "Payout failed",
       body: "Your payout could not be completed. Check your payout account settings.",
       actionUrl: "/dashboard/payouts",
-      idempotencyKey: `payout_failed:${providerTransferId}`,
+      idempotencyKey: notificationKey("payout_failed", environment, providerTransferId),
     });
   }
 }
@@ -261,7 +298,7 @@ export async function notifyPayoutReversed(providerTransferId: string): Promise<
     title: "Payout reversed",
     body: "A previous payout was reversed. Please check your payout account.",
     actionUrl: "/dashboard/payouts",
-    idempotencyKey: `payout_reversed:${providerTransferId}`,
+    idempotencyKey: notificationKey("payout_reversed", environment, providerTransferId),
   });
 }
 
@@ -305,7 +342,7 @@ export async function notifyDisputeOpened(whopPaymentId: string, whopDisputeId: 
     title: "Dispute opened on a payment",
     body: "A customer has opened a dispute on a payment you earned from. Your earnings may be affected.",
     actionUrl: "/dashboard/earnings",
-    idempotencyKey: `dispute_opened:${whopDisputeId}`,
+    idempotencyKey: notificationKey("dispute_opened", environment, whopDisputeId),
     metadata: { whopPaymentId, whopDisputeId },
   });
 }
@@ -327,6 +364,9 @@ export async function notifyWithdrawalProcessing(
     title: "Withdrawal in progress",
     body: "Your withdrawal request is being processed. Funds will be sent to your payout account.",
     actionUrl: "/dashboard/payouts",
+    /* NO ENVIRONMENT IN THIS KEY, deliberately. `withdrawalId` is a uuid from
+     * our own `creator_withdrawals` table, not a provider id, so it is already
+     * unique across both environments and there is nothing to disambiguate. */
     idempotencyKey: `withdrawal_processing:${withdrawalId}`,
   });
 }
@@ -390,10 +430,28 @@ export async function fireWebhookNotifications(
       const isReversed = eventType === "payout.reversed" || payloadStatus === "reversed";
       const isCompleted = !isReversed && payloadStatus === "completed";
 
+      /* A PAYOUT THAT ENDED WITHOUT PAYING, which nothing told the creator about.
+       *
+       * `notifyPayoutCompleted(id, false)` builds a `payout_failed` notification
+       * and NOTHING ever passed `false` — this dispatcher only ever passed
+       * `true`, so the branch was unreachable and a creator whose payout failed,
+       * was denied or was canceled simply never heard. That is the case they most
+       * need to hear about: the money did not arrive and their payout account may
+       * need attention.
+       *
+       * `FAILURE_PAYOUT_STATUSES` is the provider vocabulary `whop-payouts.ts`
+       * already defines and the withdrawal reconciler already acts on, so the
+       * notification and the money agree on what "failed" means instead of
+       * keeping two lists that can drift. */
+      const isFailed = !isReversed && !isCompleted && payloadStatus !== null &&
+        FAILURE_PAYOUT_STATUSES.has(payloadStatus);
+
       if (isReversed) {
         await notifyPayoutReversed(payoutId);
       } else if (isCompleted) {
         await notifyPayoutCompleted(payoutId, true);
+      } else if (isFailed) {
+        await notifyPayoutCompleted(payoutId, false);
       }
       return;
     }
