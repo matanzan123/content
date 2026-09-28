@@ -6,6 +6,7 @@ import {
 } from "@/lib/server/admin-guard";
 import { getAdminAuth } from "@/lib/server/firebase-admin";
 import { checkRateLimit, clientIdentity, rateLimitResponse } from "@/lib/server/rate-limit";
+import { checkRequestOrigin } from "@/lib/server/request-origin";
 
 /* ==========================================================================
    ADMIN SESSION EXCHANGE
@@ -34,6 +35,22 @@ function readIdToken(value: unknown): string | null {
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function POST(request: Request) {
+  /* SAME-ORIGIN ONLY, which `POST /api/auth/session` already required and this
+   * route did not — an asymmetry with no reason behind it.
+   *
+   * WHAT IT PREVENTS IS LOGIN CSRF, not token theft. Minting a session needs an
+   * ID token in the body, and an attacker cannot read a victim's. What they CAN
+   * do is send their OWN admin token from a page the victim visits: the browser
+   * then receives `Set-Cookie` and the victim is signed in AS THE ATTACKER, in
+   * an admin panel, with every action they take landing in the attacker's
+   * account and every screen they read visible in the attacker's session.
+   *
+   * SameSite does not cover this. It governs which cookies a request SENDS, and
+   * this request needs none — the cookie is what it establishes. */
+  if (!checkRequestOrigin(request.headers).ok) {
+    return Response.json({ error: "forbidden" }, { status: 403, headers: NO_STORE });
+  }
+
   /* COARSE, for the same reason as the user session route: without trusted
    * proxy hops there is no per-caller identity to key on. The authoritative
    * per-admin limit is applied after the token is verified. */
@@ -93,7 +110,16 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  /* DEFENCE IN DEPTH, and honest about being only that. A cross-site DELETE is
+   * already unreachable — a form cannot issue one, and a fetch would need a
+   * CORS preflight this app answers no `Access-Control-Allow-*` to. The check is
+   * here so that sign-out matches sign-in rather than relying on two separate
+   * accidents, and so a future OPTIONS handler cannot quietly open it. */
+  if (!checkRequestOrigin(request.headers).ok) {
+    return Response.json({ error: "forbidden" }, { status: 403, headers: NO_STORE });
+  }
+
   const check = await getAdminCheck();
   const jar = await cookies();
 

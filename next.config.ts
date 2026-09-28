@@ -48,10 +48,25 @@ const CSP = [
   // googleusercontent: Google account avatars (Firebase photoURL).
   "img-src 'self' data: blob: https://i.pravatar.cc https://picsum.photos https://*.googleusercontent.com",
   `connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://accounts.google.com https://apis.google.com${isDev ? " ws: wss:" : ""}`,
-  // firebaseapp.com: Firebase Auth iframe. whop.com: checkout embed iframe.
+  // firebaseapp.com / accounts.google.com / apis.google.com: the Firebase Auth
+  // handler iframe behind signInWithPopup. Those are required today.
+  //
+  // whop.com: NOT required today. There is no iframe anywhere in this app —
+  // Whop checkout, OAuth and the payout portal are all top-level redirects via
+  // window.location.assign, which frame-src does not govern. The entries are
+  // kept for a checkout embed that has not been built; audited in Task #24 and
+  // left in place deliberately rather than removed on a guess, since the cost
+  // of allowing a provider page to be framed is close to nothing and a silent
+  // CSP break on a future embed is not.
   "frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://whop.com https://*.whop.com",
   "object-src 'none'",
   "base-uri 'self'",
+  // form-action does NOT fall back to default-src — omitting it leaves form
+  // submission entirely unrestricted, so injected markup could post a form
+  // (and whatever the user had typed into the page) to another origin. Every
+  // form in this app submits through fetch to our own API, so 'self' costs
+  // nothing.
+  "form-action 'self'",
   // Preferred over X-Frame-Options in modern browsers; both are set for compatibility.
   "frame-ancestors 'none'",
 ].join("; ");

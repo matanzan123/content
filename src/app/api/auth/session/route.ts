@@ -124,7 +124,15 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  /* SAME CHECK AS SIGN-IN, for symmetry rather than because a hole is open
+   * today. A cross-site DELETE is already unreachable: a form cannot issue one,
+   * and a fetch needs a CORS preflight this app grants nothing to. Relying on
+   * that alone means sign-out is protected by the ABSENCE of a feature, and the
+   * day an OPTIONS handler is added for some unrelated reason, forced sign-out
+   * (with a refresh-token revocation behind it) opens quietly. */
+  if (!checkRequestOrigin(request.headers).ok) return json({ error: "forbidden" }, 403);
+
   const session = await getUserSession();
   const jar = await cookies();
 

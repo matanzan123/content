@@ -450,6 +450,7 @@ async function sequences() {
   const beforeRealUsers = await client`select count(*)::int as n from public.users`;
   const beforeRealBookings = await client`select count(*)::int as n from public.interview_bookings`;
   const beforeTxns = await client`select count(*)::int as n from accounting_transactions`;
+  const beforeUa = await client`select count(*)::int as n from user_analytics`;
 
   let scoped = null;
 
@@ -950,11 +951,32 @@ async function sequences() {
       select count(*)::int as n, coalesce(sum(amount_minor),0)::text as s from accounting_entries`;
     check("the real ledger still balances", entries.s === "0", `${entries.n} legs`);
 
+    /* RE-BASELINED IN TASK #24. This asserted the real `user_analytics` table
+     * was EMPTY, which stopped being true the first time anyone signed in — it
+     * now holds two admin identity rows from real sign-ins in September, and
+     * that is the table working, not the table being abused.
+     *
+     * The property the name claims is "application state is not dumped in
+     * here", so that is what is asserted now: this suite adds no row of its own,
+     * and whatever rows exist carry only analytics identity — no financial
+     * amount, currency, balance or payout column has crept into the table. An
+     * emptiness check could never have shown either thing. */
     const [ua] = await client`select count(*)::int as n from user_analytics`;
     check(
+      "this suite added no user_analytics row",
+      ua.n === beforeUa[0].n,
+      `${beforeUa[0].n} -> ${ua.n}`,
+    );
+    const uaCols = await client`
+      select column_name from information_schema.columns
+       where table_schema = 'public' and table_name = 'user_analytics'`;
+    const names = uaCols.map((r) => r.column_name);
+    check(
       "user_analytics was not overloaded with application state",
-      ua.n === 0,
-      `${ua.n} rows`,
+      names.length > 0 &&
+        !names.some((c) => /amount|minor|currency|balance|payout|ledger|fee|withdraw/i.test(c)),
+      names.filter((c) => /amount|minor|currency|balance|payout|ledger|fee|withdraw/i.test(c)).join(",") ||
+        `${names.length} analytics-only columns`,
     );
 
     const [scratchGone] = await client`
