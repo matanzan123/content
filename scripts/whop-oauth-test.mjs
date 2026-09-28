@@ -61,7 +61,24 @@ const crypto_ = load("src/lib/server/token-crypto.ts", {
   createDecipheriv: require("node:crypto").createDecipheriv,
   randomBytes,
 });
-const oauth = load("src/lib/server/whop-oauth.ts", { createHash, randomBytes });
+/* THE REAL HOST RULES, not stand-ins.
+ *
+ * Task #26 made `resolveOAuthConfig` reject a production redirect URI pointing at
+ * localhost or a development tunnel, and require it to sit on APP_PUBLIC_URL's
+ * origin. Those rules live in `app-url.ts` so there is one list of hosts, and
+ * this loader strips imports — so the genuine functions are injected rather than
+ * faked. A fake here would let the suite pass while the rule was wrong. */
+const appUrl = load("src/lib/server/app-url.ts", {
+  getWhopEnvironment: (env = process.env) =>
+    env.WHOP_ENV === "sandbox" || env.WHOP_ENV === "production" ? env.WHOP_ENV : null,
+});
+const oauth = load("src/lib/server/whop-oauth.ts", {
+  createHash,
+  randomBytes,
+  getAppPublicUrl: appUrl.getAppPublicUrl,
+  isLocalHostname: appUrl.isLocalHostname,
+  isTunnelHostname: appUrl.isTunnelHostname,
+});
 
 /* ============================ PKCE ============================ */
 

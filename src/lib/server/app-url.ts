@@ -49,6 +49,30 @@ function isTunnel(hostname: string): boolean {
   return TUNNEL_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
 }
 
+/* ==========================================================================
+   THE SAME TWO RULES, EXPORTED.
+
+   `WHOP_REDIRECT_URI` is a second absolute URL an operator configures by hand,
+   and it has to obey the same host rules as this one: a production OAuth
+   callback pointed at a laptop or a tunnel is not a callback. Before Task #26 it
+   obeyed neither — `https://localhost:3000/api/whop/callback` and a stale ngrok
+   URL were both accepted with WHOP_ENV=production.
+
+   Exported rather than re-implemented in `whop-oauth.ts`, because two copies of
+   a host allow-list drift and only one of them has tests. The lists above stay
+   the single definition.
+   ========================================================================== */
+
+/** True for a hostname that is only ever a developer's own machine. */
+export function isLocalHostname(hostname: string): boolean {
+  return LOCAL_HOSTS.has(hostname.trim().toLowerCase());
+}
+
+/** True for a hostname served by a development tunnel provider. */
+export function isTunnelHostname(hostname: string): boolean {
+  return isTunnel(hostname.trim().toLowerCase());
+}
+
 /**
  * Resolves the public origin, or says exactly why it cannot.
  *

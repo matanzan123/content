@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash, randomBytes } from "node:crypto";
+import { getAppPublicUrl, isLocalHostname, isTunnelHostname } from "./app-url";
 
 /* ==========================================================================
    WHOP OAUTH 2.1 / OIDC — server only.
@@ -84,6 +85,12 @@ export type ConfigResult =
         | "missing_client_id"
         | "missing_redirect_uri"
         | "invalid_redirect_uri"
+        /** Production only: the callback points at a developer's own machine. */
+        | "local_redirect_uri"
+        /** Production only: the callback points at a development tunnel. */
+        | "tunnel_redirect_uri"
+        /** The callback is not on the app's own configured public origin. */
+        | "redirect_uri_origin_mismatch"
         | "missing_environment"
         | "invalid_environment";
     };
@@ -107,11 +114,12 @@ export function resolveOAuthConfig(env: Env = process.env): ConfigResult {
   const redirectUri = env.WHOP_REDIRECT_URI?.trim();
   if (!redirectUri) return { ok: false, reason: "missing_redirect_uri" };
 
+  let redirectUrl: URL;
   try {
-    const url = new URL(redirectUri);
+    redirectUrl = new URL(redirectUri);
     // Whop redirects a browser here after consent; http would strip the
     // authorization code's confidentiality in transit.
-    if (url.protocol !== "https:") return { ok: false, reason: "invalid_redirect_uri" };
+    if (redirectUrl.protocol !== "https:") return { ok: false, reason: "invalid_redirect_uri" };
   } catch {
     return { ok: false, reason: "invalid_redirect_uri" };
   }
@@ -126,6 +134,43 @@ export function resolveOAuthConfig(env: Env = process.env): ConfigResult {
   if (!environment) return { ok: false, reason: "missing_environment" };
   if (environment !== "sandbox" && environment !== "production") {
     return { ok: false, reason: "invalid_environment" };
+  }
+
+  /* HTTPS WAS NOT ENOUGH.
+   *
+   * `https://localhost:3000/api/whop/callback` is valid HTTPS, and so is a
+   * tunnel URL from last week. Either one, with WHOP_ENV=production, sends a
+   * real creator through Whop's consent screen and then hands the authorization
+   * code to a host that is not the application — at best the link silently never
+   * completes, at worst the code is delivered somewhere unintended.
+   *
+   * Only in production. A tunnel IS the right answer in sandbox, and localhost
+   * is how this is developed, so both stay allowed there. The host rules are
+   * imported from `app-url.ts` rather than restated, so there is one list. */
+  if (environment === "production") {
+    if (isLocalHostname(redirectUrl.hostname)) {
+      return { ok: false, reason: "local_redirect_uri" };
+    }
+    if (isTunnelHostname(redirectUrl.hostname)) {
+      return { ok: false, reason: "tunnel_redirect_uri" };
+    }
+  }
+
+  /* AND IT MUST BE THIS APP.
+   *
+   * `APP_PUBLIC_URL` and `WHOP_REDIRECT_URI` are configured separately and have
+   * to agree: the callback is a route on our own origin. Two independent URLs
+   * that must match is exactly the pair that drifts — a rotated tunnel updated in
+   * one variable and not the other is the everyday version, and a production
+   * domain change is the dangerous one.
+   *
+   * Compared only when `APP_PUBLIC_URL` resolves. It is deliberately absent in
+   * plain local development, and that must stay workable; when it IS configured
+   * it is authoritative, and `getAppPublicUrl` has already refused localhost,
+   * plaintext and production tunnels before we get here. */
+  const appOrigin = getAppPublicUrl(env);
+  if (appOrigin && redirectUrl.origin !== appOrigin) {
+    return { ok: false, reason: "redirect_uri_origin_mismatch" };
   }
 
   const clientSecret = env.WHOP_CLIENT_SECRET?.trim() || null;

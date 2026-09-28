@@ -635,7 +635,13 @@ async function run() {
 
     process.env.WHOP_API_KEY ??= "test-key";
     process.env.WHOP_COMPANY_ID ??= "biz_selftest";
-    process.env.WHOP_TOKEN_ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString("base64");
+    /* THE CORRECT VARIABLE NAME. This said WHOP_TOKEN_ENCRYPTION_KEY, which
+     * nothing reads — the real one is WHOP_OAUTH_TOKEN_ENCRYPTION_KEY. The suite
+     * passed anyway because the .env.local reader above had already supplied the
+     * developer's own key, so it was silently depending on local configuration
+     * and would have failed with `encryption_unavailable` on a machine without
+     * one. Found while inventorying variables in Task #26. */
+    process.env.WHOP_OAUTH_TOKEN_ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString("base64");
 
     const conns = loadTs("src/lib/server/whop-connections.ts");
 
