@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const postgres = require("postgres");
+import { sweepProbeTables } from "./lib/probe-sweep.mjs";
 
 for (const line of readFileSync(".env.local", "utf8").split("\n")) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
@@ -77,6 +78,12 @@ async function racyFindOrCreate(tag) {
 }
 
 try {
+  /* SWEEP FIRST. This suite's `finally` drops its own table, but a killed process
+   * never reaches a `finally` — Task #30 found five of these left behind. Clearing
+   * the prefix on the way in makes the litter self-healing instead of cumulative. */
+  const swept = await sweepProbeTables(sql, "concurrency_probe_");
+  if (swept.length) console.log(`swept ${swept.length} leftover probe table(s) from an earlier run`);
+
   await sql.unsafe(`
     create table ${TABLE} (
       order_id uuid primary key default gen_random_uuid(),

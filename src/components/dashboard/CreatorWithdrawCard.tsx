@@ -43,10 +43,33 @@ function minorToDisplay(minor: bigint): string {
   return (Number(minor) / 100).toFixed(2);
 }
 
+/**
+ * A typed dollar amount to minor units, WITHOUT going through a float.
+ *
+ * This used `parseFloat(dollars)` and then `Math.round(n * 100)`, which is the
+ * one thing this codebase forbids everywhere money is handled: `8.115 * 100` is
+ * `811.4999…`, so the creator would have been shown and charged a cent less than
+ * they typed. `parseFloat` also accepts things a money field should not —
+ * `"10abc"` silently becomes 10, `"1e5"` becomes 100000 — so a typo submitted a
+ * confident wrong number rather than being refused.
+ *
+ * The server validates the submitted integer independently (integer, safe,
+ * positive, within bounds, within the provider balance), so this was never a
+ * route to moving the wrong amount. It was a route to moving an amount the
+ * creator did not intend, which is its own kind of wrong.
+ *
+ * Parsed as a decimal STRING instead: at most two decimal places, digits only,
+ * no sign, no exponent. Anything else is refused rather than guessed at.
+ */
 function dollarsToMinor(dollars: string): bigint | null {
-  const n = parseFloat(dollars);
-  if (isNaN(n) || n <= 0) return null;
-  return BigInt(Math.round(n * 100));
+  const trimmed = dollars.trim();
+  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(trimmed);
+  if (!m) return null;
+  const whole = BigInt(m[1]);
+  // "5.1" is fifty-one tenths of a dollar, so a single decimal digit is padded.
+  const cents = BigInt((m[2] ?? "").padEnd(2, "0") || "0");
+  const minor = whole * BigInt(100) + cents;
+  return minor > BigInt(0) ? minor : null;
 }
 
 export function CreatorWithdrawCard() {
@@ -157,6 +180,13 @@ export function CreatorWithdrawCard() {
      * cleared only once the server has accepted it, below, because the next
      * press is then a genuinely new intent. */
     if (!requestIdRef.current) requestIdRef.current = newRequestId();
+    /* NO SAFE TOKEN, NO REQUEST. Submitting without one, or with a weak one, is
+     * how a retry either duplicates an intent or silently replays an old
+     * withdrawal — see `newRequestId`. Refusing is the safe answer. */
+    if (!requestIdRef.current) {
+      setFieldError((d.errors as Record<string, string>).db_unavailable ?? "db_unavailable");
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -194,10 +224,32 @@ export function CreatorWithdrawCard() {
    * nothing; the server derives the amount, the destination and the creator
    * itself from the session and its own records.
    */
-  function newRequestId(): string {
+  /**
+   * A fresh idempotency token for one intended withdrawal.
+   *
+   * THE FALLBACK USED `Math.random`, AND THAT WAS THE WRONG TRADE. This token is
+   * the withdrawal's logical identity: the server stores it under
+   * `uniq_withdrawal_request_creator_env` and a repeat RESOLVES TO THE EXISTING
+   * ROW. So a token that collides with one this creator used before does not
+   * create a duplicate payment — it silently returns the OLD withdrawal and the
+   * new one never happens. `Date.now()` plus `Math.random()` is weak enough for
+   * that to be a real if unlikely outcome, and a weak identity is worse than
+   * refusing to act.
+   *
+   * `crypto.randomUUID` is available in every secure context, which includes
+   * localhost, so the fallback was already unreachable in practice.
+   * `getRandomValues` has been available far longer and covers anything that
+   * somehow lacks `randomUUID`. If neither exists there is no safe token, and
+   * returning null refuses the request rather than inventing one.
+   */
+  function newRequestId(): string | null {
     const c = globalThis.crypto;
     if (c && typeof c.randomUUID === "function") return c.randomUUID();
-    return `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+    if (c && typeof c.getRandomValues === "function") {
+      const bytes = c.getRandomValues(new Uint8Array(16));
+      return `w-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+    }
+    return null;
   }
 
   const handleCancel = async () => {

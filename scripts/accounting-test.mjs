@@ -705,7 +705,22 @@ async function databaseInvariants() {
   }
 
   const postgres = require("postgres");
-  const db = postgres(process.env.DATABASE_URL, { max: 1, prepare: false, onnotice: () => {} });
+  /* THE DIRECT ENDPOINT, because this suite issues `SET search_path`.
+   *
+   * It used `process.env.DATABASE_URL`, which is the POOLED endpoint. A `SET` on
+   * a PgBouncer connection belongs to a server backend that is handed to whoever
+   * comes next, so the setting can outlive this process — `payment-lifecycle-test`
+   * documents having caused exactly that outage, where real `payment_orders`
+   * lookups stopped resolving until the backends were reset by hand.
+   *
+   * The normal path here was already safe: `max: 1`, every name
+   * schema-qualified anyway, and an explicit `set search_path = public` in the
+   * `finally`. But a crash between the SET and that restore would leak a path
+   * pointing at a schema this suite then drops. Stripping `-pooler` removes the
+   * whole class, which is the fix the other suite already made. */
+  const direct = new URL(process.env.DATABASE_URL);
+  direct.hostname = direct.hostname.replace("-pooler", "");
+  const db = postgres(direct.toString(), { max: 1, prepare: false, onnotice: () => {} });
 
   const before = await db`select count(*)::int as n from drizzle.__drizzle_migrations`;
 

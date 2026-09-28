@@ -17,6 +17,7 @@ import { createHash, randomBytes } from "node:crypto";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const postgres = require("postgres");
+import { sweepProbeTables } from "./lib/probe-sweep.mjs";
 
 for (const line of readFileSync(".env.local", "utf8").split("\n")) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
@@ -361,6 +362,9 @@ const oauth = load("src/lib/server/whop-oauth.ts", {
 
 if (process.env.DATABASE_URL) {
   const TABLE = `oauth_state_probe_${Math.random().toString(36).slice(2, 10)}`;
+  /* SWEEP FIRST — a killed process never reaches the `finally` that drops this
+   * table, and Task #30 found leftovers from exactly that. Clearing the prefix on
+   * the way in makes the litter self-healing rather than cumulative. */
   const sql = postgres(process.env.DATABASE_URL, { max: 6, prepare: false, onnotice: () => {} });
   // Real linked accounts exist in `whop_connections` once the flow has actually
   // been used, so the leak check below compares against the count captured
@@ -368,6 +372,8 @@ if (process.env.DATABASE_URL) {
   // would only assert that nobody has ever connected.
   const [{ n: connectionsBefore }] = await sql`select count(*)::int as n from whop_connections`;
   try {
+    const swept_ = await sweepProbeTables(sql, "oauth_state_probe_");
+    if (swept_.length) console.log(`swept ${swept_.length} leftover oauth_state_probe_table(s)`);
     await sql.unsafe(`
       create table ${TABLE} (
         state text primary key,
@@ -497,8 +503,13 @@ if (process.env.DATABASE_URL) {
  */
 if (process.env.DATABASE_URL) {
   const TABLE = `oauth_switch_probe_${Math.random().toString(36).slice(2, 10)}`;
+  /* SWEEP FIRST — a killed process never reaches the `finally` that drops this
+   * table, and Task #30 found leftovers from exactly that. Clearing the prefix on
+   * the way in makes the litter self-healing rather than cumulative. */
   const sql = postgres(process.env.DATABASE_URL, { max: 6, prepare: false, onnotice: () => {} });
   try {
+    const swept_ = await sweepProbeTables(sql, "oauth_switch_probe_");
+    if (swept_.length) console.log(`swept ${swept_.length} leftover oauth_switch_probe_table(s)`);
     await sql.unsafe(`
       create table ${TABLE} (
         state text primary key,
@@ -540,8 +551,13 @@ if (process.env.DATABASE_URL) {
 
 if (process.env.DATABASE_URL) {
   const TABLE = `oauth_refresh_probe_${Math.random().toString(36).slice(2, 10)}`;
+  /* SWEEP FIRST — a killed process never reaches the `finally` that drops this
+   * table, and Task #30 found leftovers from exactly that. Clearing the prefix on
+   * the way in makes the litter self-healing rather than cumulative. */
   const sql = postgres(process.env.DATABASE_URL, { max: 8, prepare: false, onnotice: () => {} });
   try {
+    const swept_ = await sweepProbeTables(sql, "oauth_refresh_probe_");
+    if (swept_.length) console.log(`swept ${swept_.length} leftover oauth_refresh_probe_table(s)`);
     await sql.unsafe(`
       create table ${TABLE} (
         id uuid primary key default gen_random_uuid(),
