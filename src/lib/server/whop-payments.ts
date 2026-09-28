@@ -79,10 +79,23 @@ function read(env: Env, name: string): string | null {
  * Pure and env-injectable so the rules below can be asserted without touching
  * the real process environment.
  *
- * `WHOP_ENV` is matched EXACTLY against the two known names. A typo like
- * "Production" or "sandbox " is rejected rather than normalised: guessing what
- * an operator meant is how a test key ends up pointed at a live company. An
- * absent value is likewise a refusal, never an implied production.
+ * `WHOP_ENV` is matched EXACTLY against the two known names, after surrounding
+ * whitespace is stripped by `read` — and the distinction matters, so it is
+ * stated precisely rather than approximately.
+ *
+ * TRIMMED: `"sandbox "`. An env file that picked up a trailing space still says
+ * sandbox unambiguously, and refusing it would be a puzzle, not a safeguard.
+ *
+ * NOT NORMALISED, and therefore REFUSED: `"Production"`, `"SANDBOX"`, `"prod"`,
+ * `"live"`, `"test"`, `"dev"`. Every one of those is a guess about what an
+ * operator meant, and guessing is how a test key ends up pointed at a live
+ * company. An absent or empty value is likewise a refusal, never an implied
+ * production and never an implied sandbox.
+ *
+ * (An earlier version of this comment claimed `"sandbox "` was rejected. It was
+ * not, and a comment asserting a safety property the code does not have is worse
+ * than no comment — Task #25 corrected the claim rather than the behaviour,
+ * because the behaviour was the right one.)
  */
 export function resolveWhopPayments(env: Env = process.env): WhopPaymentsState {
   const apiKey = read(env, "WHOP_API_KEY");

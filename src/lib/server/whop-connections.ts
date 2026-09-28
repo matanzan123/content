@@ -4,6 +4,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { whopConnections, whopOauthStates } from "@/lib/db/schema";
 import { decryptToken, encryptToken, isTokenEncryptionConfigured } from "./token-crypto";
+import { getWhopEnvironment } from "./whop-payments";
 
 /* ==========================================================================
    WHOP CONNECTION STORE — server only.
@@ -18,6 +19,34 @@ import { decryptToken, encryptToken, isTokenEncryptionConfigured } from "./token
 
 /** How long a person has to finish consenting. Short on purpose. */
 export const OAUTH_STATE_TTL_SECONDS = 10 * 60;
+
+/* ==========================================================================
+   EVERY READ AND WRITE BELOW IS SCOPED TO ONE ENVIRONMENT.
+
+   A Whop `sub` is issued by whichever Whop the OAuth app lives in, and sandbox
+   and production are separate issuers — so a row here means something in
+   exactly one of them. Until this was scoped, a link made in sandbox satisfied
+   the `whop_identity_required` gate on `POST /api/whop/account` after a cutover,
+   and that route then created a REAL production connected account, stamping the
+   sandbox subject into its provider metadata.
+
+   THE ENVIRONMENT IS NEVER A PARAMETER. It is resolved from server
+   configuration on every call, so no caller — route, component or test — can
+   ask for the other environment's rows. Where a function takes an `env` bag it
+   is only so the rules can be exercised without mutating the real process
+   environment; the value still comes from configuration, never from a request.
+
+   UNRESOLVED CONFIGURATION FAILS CLOSED. `getWhopEnvironment()` returns null
+   when WHOP_ENV is missing or malformed, and every function here then reports
+   "no connection" rather than falling back to a default. A missing environment
+   must never be read as sandbox: that is precisely the fallback this task
+   exists to remove.
+   ========================================================================== */
+function activeEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): "sandbox" | "production" | null {
+  return getWhopEnvironment(env);
+}
 
 export type PendingAuthorization = {
   state: string;
@@ -53,6 +82,11 @@ export async function createAuthorization(input: {
   const db = getDb();
   if (!db) return false;
 
+  // No resolved environment, no authorization: we could not tell which Whop to
+  // redeem the resulting code against.
+  const environment = activeEnvironment();
+  if (!environment) return false;
+
   const ciphertext = encryptToken(input.codeVerifier, input.firebaseUid);
   // No key, no flow. Starting an authorization we could not finish securely
   // would strand the user at a callback that has to refuse them.
@@ -64,6 +98,7 @@ export async function createAuthorization(input: {
       firebaseUid: input.firebaseUid,
       codeVerifierCiphertext: ciphertext,
       returnPath: input.returnPath,
+      environment,
       expiresAt: sql`now() + make_interval(secs => ${OAUTH_STATE_TTL_SECONDS})`,
     });
     return true;
@@ -87,9 +122,22 @@ export async function consumeAuthorization(state: string): Promise<PendingAuthor
   const db = getDb();
   if (!db || typeof state !== "string" || state.length < 20 || state.length > 200) return null;
 
+  /* A STATE IS REDEEMABLE ONLY IN THE ENVIRONMENT THAT MINTED IT. The code it
+   * accompanies can only be exchanged at the host that issued it, so a state
+   * from the other environment is not a state at all — refused here, where the
+   * answer is "unknown state", rather than deep inside the token exchange as an
+   * opaque provider error. It is still DELETED for the matching environment
+   * only, so a cross-environment arrival cannot consume a live state either. */
+  const environment = activeEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .delete(whopOauthStates)
-    .where(and(eq(whopOauthStates.state, state), sql`${whopOauthStates.expiresAt} > now()`))
+    .where(and(
+      eq(whopOauthStates.state, state),
+      eq(whopOauthStates.environment, environment),
+      sql`${whopOauthStates.expiresAt} > now()`,
+    ))
     .returning();
 
   if (!row) return null;
@@ -154,6 +202,12 @@ export async function linkWhopIdentity(input: {
   if (!db) return { ok: false, reason: "storage_unavailable" };
   if (!isTokenEncryptionConfigured()) return { ok: false, reason: "encryption_unavailable" };
 
+  // Reported as storage being unavailable rather than inventing a new reason: to
+  // a caller, an unresolved environment and an unreachable database are the same
+  // thing — the link cannot be recorded, and no partial state was created.
+  const environment = activeEnvironment();
+  if (!environment) return { ok: false, reason: "storage_unavailable" };
+
   const accessCiphertext = encryptToken(input.accessToken, input.firebaseUid);
   const refreshCiphertext = input.refreshToken
     ? encryptToken(input.refreshToken, input.firebaseUid)
@@ -172,7 +226,16 @@ export async function linkWhopIdentity(input: {
       const [claimedElsewhere] = await tx
         .select({ firebaseUid: whopConnections.firebaseUid })
         .from(whopConnections)
-        .where(and(eq(whopConnections.whopUserId, input.whopUserId), isNull(whopConnections.revokedAt)));
+        .where(and(
+          eq(whopConnections.whopUserId, input.whopUserId),
+          // WITHIN THIS ENVIRONMENT. A sandbox subject naming some other user is
+          // not a production takeover, and refusing a legitimate production link
+          // because of a sandbox row would be a self-inflicted outage. Matches
+          // `uniq_whop_connection_active_whop_user_env`, which is what actually
+          // settles a race.
+          eq(whopConnections.environment, environment),
+          isNull(whopConnections.revokedAt),
+        ));
 
       if (claimedElsewhere && claimedElsewhere.firebaseUid !== input.firebaseUid) {
         return { ok: false, reason: "whop_identity_taken" } as LinkResult;
@@ -184,7 +247,13 @@ export async function linkWhopIdentity(input: {
       const retired = await tx
         .update(whopConnections)
         .set({ revokedAt: sql`now()`, accessTokenCiphertext: null, refreshTokenCiphertext: null })
-        .where(and(eq(whopConnections.firebaseUid, input.firebaseUid), isNull(whopConnections.revokedAt)))
+        .where(and(
+          eq(whopConnections.firebaseUid, input.firebaseUid),
+          // Only this environment's link is retired. A creator's sandbox link is
+          // not history to be closed by a production reconnection.
+          eq(whopConnections.environment, environment),
+          isNull(whopConnections.revokedAt),
+        ))
         .returning({ id: whopConnections.id });
 
       const [created] = await tx
@@ -194,6 +263,7 @@ export async function linkWhopIdentity(input: {
           whopUserId: input.whopUserId,
           whopUsername: input.whopUsername,
           scopes: input.scopes,
+          environment,
           accessTokenCiphertext: accessCiphertext,
           refreshTokenCiphertext: refreshCiphertext,
           tokenExpiresAt: expiresAt,
@@ -216,10 +286,23 @@ export async function linkWhopIdentity(input: {
 export async function getActiveConnection(firebaseUid: string): Promise<WhopConnection | null> {
   const db = getDb();
   if (!db) return null;
+
+  /* THE GATE THIS FUNCTION IS. `POST /api/whop/account` treats a non-null result
+   * as proof of provider identity and goes on to create a real connected
+   * account, so an environment-blind answer here was the whole defect: a
+   * sandbox-era link read as production identity. Null when the environment
+   * cannot be resolved — an unprovable identity is not an identity. */
+  const environment = activeEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(whopConnections)
-    .where(and(eq(whopConnections.firebaseUid, firebaseUid), isNull(whopConnections.revokedAt)));
+    .where(and(
+      eq(whopConnections.firebaseUid, firebaseUid),
+      eq(whopConnections.environment, environment),
+      isNull(whopConnections.revokedAt),
+    ));
   return row ? toConnection(row) : null;
 }
 
@@ -233,10 +316,22 @@ export async function getActiveConnection(firebaseUid: string): Promise<WhopConn
 export async function getAccessTokenFor(firebaseUid: string): Promise<string | null> {
   const db = getDb();
   if (!db) return null;
+
+  /* A TOKEN IS ONLY USABLE AT THE HOST THAT ISSUED IT. Handing a sandbox access
+   * token to production code does not merely fail — it fails as an
+   * authentication error against a live host, which reads like a revoked grant
+   * rather than a configuration mistake. */
+  const environment = activeEnvironment();
+  if (!environment) return null;
+
   const [row] = await db
     .select()
     .from(whopConnections)
-    .where(and(eq(whopConnections.firebaseUid, firebaseUid), isNull(whopConnections.revokedAt)));
+    .where(and(
+      eq(whopConnections.firebaseUid, firebaseUid),
+      eq(whopConnections.environment, environment),
+      isNull(whopConnections.revokedAt),
+    ));
   if (!row?.accessTokenCiphertext) return null;
   return decryptToken(row.accessTokenCiphertext, firebaseUid);
 }
@@ -259,10 +354,20 @@ export async function disconnectWhop(firebaseUid: string): Promise<DisconnectRes
   const db = getDb();
   if (!db) return { ok: false, reason: "storage_unavailable" };
 
+  // Disconnect means "this environment's link", matching what the status surface
+  // reported as connected. Revoking the other environment's link from here would
+  // be an action the person did not ask for and cannot see.
+  const environment = activeEnvironment();
+  if (!environment) return { ok: false, reason: "storage_unavailable" };
+
   const [row] = await db
     .update(whopConnections)
     .set({ revokedAt: sql`now()`, accessTokenCiphertext: null, refreshTokenCiphertext: null })
-    .where(and(eq(whopConnections.firebaseUid, firebaseUid), isNull(whopConnections.revokedAt)))
+    .where(and(
+      eq(whopConnections.firebaseUid, firebaseUid),
+      eq(whopConnections.environment, environment),
+      isNull(whopConnections.revokedAt),
+    ))
     .returning();
 
   if (!row) return { ok: false, reason: "not_connected" };
@@ -324,6 +429,14 @@ export async function getUsableAccessToken(
   const db = getDb();
   if (!db) return { ok: false, reason: "unavailable" };
 
+  /* THE REFRESH IS ENVIRONMENT-SPECIFIC TOO, and here the cost of getting it
+   * wrong is the worst in this file: refreshing against the wrong host burns a
+   * single-use rotating refresh token, and Whop retires the old one on every
+   * exchange. Presenting a sandbox refresh token to production would spend it
+   * for nothing and leave the connection unrecoverable without a full reconnect. */
+  const environment = activeEnvironment();
+  if (!environment) return { ok: false, reason: "unavailable" };
+
   try {
     return await db.transaction(async (tx) => {
       // The lock is taken before anything is read, so the decision to refresh
@@ -331,7 +444,11 @@ export async function getUsableAccessToken(
       const [row] = await tx
         .select()
         .from(whopConnections)
-        .where(and(eq(whopConnections.firebaseUid, firebaseUid), isNull(whopConnections.revokedAt)))
+        .where(and(
+          eq(whopConnections.firebaseUid, firebaseUid),
+          eq(whopConnections.environment, environment),
+          isNull(whopConnections.revokedAt),
+        ))
         .for("update");
 
       if (!row) return { ok: false, reason: "not_connected" } as RefreshOutcome;

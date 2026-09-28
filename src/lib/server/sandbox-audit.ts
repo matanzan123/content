@@ -3,6 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
 import { getWhopEnvironment } from "./whop-payments";
+import { isSandboxOrderingEnabled } from "./sandbox-orders";
 
 /* ==========================================================================
    SANDBOX AUDIT — pre-production migration data report.
@@ -29,9 +30,15 @@ export async function querySandboxAudit(): Promise<SandboxAuditData | null> {
   const db = getDb();
 
   const currentEnvironment = getWhopEnvironment();
-  const sandboxCheckoutEnabled =
-    process.env.ENABLE_SANDBOX_CHECKOUT_TEST_UI === "true" &&
-    process.env.WHOP_ENV === "sandbox";
+  /* ASKS THE GATE, RATHER THAN RE-DERIVING IT.
+   *
+   * This used to test `process.env.WHOP_ENV === "sandbox"` directly, which is a
+   * second, slightly different copy of the rule: the real gate resolves the
+   * environment through `getWhopEnvironment`, which TRIMS the value, so a
+   * `WHOP_ENV=" sandbox "` made this screen report the sandbox checkout as
+   * DISABLED while the checkout page was in fact live. A pre-cutover audit
+   * screen that disagrees with the thing it audits is worse than no screen. */
+  const sandboxCheckoutEnabled = isSandboxOrderingEnabled();
 
   const staleThreshold = Math.floor(Date.now() / 3_600_000) - 24;
 

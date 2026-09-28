@@ -483,6 +483,16 @@ export const whopOauthStates = pgTable(
     // verification step that does not exist.
     /** Where to send the person afterwards. Server-built, never accepted. */
     returnPath: text("return_path").notNull(),
+    /**
+     * WHICH WHOP THIS AUTHORIZATION WAS STARTED AGAINST.
+     *
+     * `whop-oauth.ts` resolves the authorize, token and userinfo hosts from
+     * WHOP_ENV, and an app exists at exactly one of them. A state minted in
+     * sandbox and redeemed after a cutover is therefore not redeemable at all —
+     * recording the environment lets the callback say so instead of failing
+     * somewhere inside the token exchange.
+     */
+    environment: whopEnvironmentEnum("environment").notNull(),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     /** Short. An authorization the user walked away from must not stay usable. */
@@ -530,6 +540,18 @@ export const whopConnections = pgTable(
     whopUsername: text("whop_username"),
     /** Exactly what was granted, so a later scope change is detectable. */
     scopes: text("scopes").notNull(),
+    /**
+     * WHICH WHOP THIS IDENTITY CAME FROM.
+     *
+     * Not a formality. `whop_user_id` is an OIDC subject issued by whichever
+     * Whop the OAuth app lives in, and sandbox and production are separate
+     * issuers — so the subject, the scopes and the encrypted tokens in this row
+     * are all meaningful in exactly one environment. Without this column a
+     * sandbox link satisfied the `whop_identity_required` gate on
+     * `POST /api/whop/account`, which then created a real production connected
+     * account and stamped the sandbox subject into its provider metadata.
+     */
+    environment: whopEnvironmentEnum("environment").notNull(),
 
     /** AES-256-GCM envelopes. Null once revoked. */
     accessTokenCiphertext: text("access_token_ciphertext"),
@@ -545,13 +567,17 @@ export const whopConnections = pgTable(
   (t) => [
     index("idx_whop_connections_uid").on(t.firebaseUid),
     index("idx_whop_connections_whop_user").on(t.whopUserId),
-    // One ACTIVE link per ClipRewards user.
-    uniqueIndex("uniq_whop_connection_active_user")
-      .on(t.firebaseUid)
+    index("idx_whop_connections_env").on(t.environment),
+    // One ACTIVE link per ClipRewards user, PER ENVIRONMENT — a sandbox link
+    // must not occupy the slot a production link needs.
+    uniqueIndex("uniq_whop_connection_active_user_env")
+      .on(t.firebaseUid, t.environment)
       .where(sql`revoked_at is null`),
-    // One ACTIVE link per Whop identity — the anti-takeover constraint.
-    uniqueIndex("uniq_whop_connection_active_whop_user")
-      .on(t.whopUserId)
+    // One ACTIVE link per Whop identity, PER ENVIRONMENT. The anti-takeover
+    // rule still holds inside an environment, which is the only scope in which
+    // a Whop subject identifies anyone.
+    uniqueIndex("uniq_whop_connection_active_whop_user_env")
+      .on(t.whopUserId, t.environment)
       .where(sql`revoked_at is null`),
   ],
 );

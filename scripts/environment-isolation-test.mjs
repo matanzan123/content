@@ -97,6 +97,17 @@ const MUST_BE_ENV_SCOPED = [
   "creatorEarnings", "paymentRefunds", "paymentDisputes",
   "paymentOrders", "creatorTransfers", "whopAccounts",
   "disputeAlerts", "resolutionCenterCases", "accountingTransactions",
+  /* ADDED IN TASK #25. `whop_connections` stores a Whop OIDC subject and the
+   * tokens issued with it, and had no environment column — so a link made in
+   * sandbox satisfied the `whop_identity_required` gate on
+   * `POST /api/whop/account` after a cutover, and that route went on to create a
+   * real production connected account stamped with the sandbox subject. Listed
+   * here so the column cannot quietly go away again; the sweep below then covers
+   * its `whopUserId` lookups automatically. */
+  "whopConnections",
+  /* Same family: a state minted against one Whop cannot be redeemed at the
+   * other, and `googleOauthStates` already carried the column. */
+  "whopOauthStates",
 ];
 for (const t of MUST_BE_ENV_SCOPED) {
   check(`${t} still carries an environment column`, TABLES[t]?.hasEnv === true);
