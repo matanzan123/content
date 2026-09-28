@@ -47,7 +47,13 @@ export async function POST(request: Request) {
   if (!platform.ok) return json({ error: "unavailable", reason: platform.reason }, 503);
 
   const account = await getConnectedAccount(firebaseUid, platform.config.environment);
-  if (!account) return json({ error: "account_not_provisioned" }, 400);
+  // 409, matching `kyc/start`, which refuses the identical condition. This said
+  // 400, and the two disagreed about the same fact: nothing is wrong with the
+  // REQUEST — it is well formed and properly authenticated — the creator simply
+  // has no connected account in this environment yet. A client cannot treat
+  // "provision an account first" uniformly if one route calls it a bad request
+  // and the other a conflict.
+  if (!account) return json({ error: "account_not_provisioned" }, 409);
 
   // Both redirect URLs are built server-side inside whop-account-links.ts,
   // from APP_PUBLIC_URL and the validated locale cookie — never from input.

@@ -1,7 +1,7 @@
 import { requireWhopEligible } from "@/lib/server/access";
 import { DEFAULT_LOCALE, isLocale, localePath } from "@/i18n/config";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
-import { createAuthorization } from "@/lib/server/whop-connections";
+import { createAuthorization, OAUTH_STATE_COOKIE_PATH } from "@/lib/server/whop-connections";
 import { isTokenEncryptionConfigured } from "@/lib/server/token-crypto";
 import {
   buildAuthorizeUrl,
@@ -11,6 +11,7 @@ import {
   resolveOAuthConfig,
 } from "@/lib/server/whop-oauth";
 import { checkRateLimit, rateLimitResponse } from "@/lib/server/rate-limit";
+import { getAppPublicUrl } from "@/lib/server/app-url";
 
 /* ==========================================================================
    START "CONNECT WHOP".
@@ -38,6 +39,12 @@ const NO_STORE = { "cache-control": "no-store" };
 
 /** Matches the state row's TTL, so cookie and row expire together. */
 const LINK_COOKIE_MAX_AGE = 600;
+
+/**
+ * The path attribute, built from the shared constant the callback also clears
+ * with — see `OAUTH_STATE_COOKIE_PATH` for why the two must agree.
+ */
+const LINK_COOKIE_PATH_ATTR = `Path=${OAUTH_STATE_COOKIE_PATH}`;
 
 /** Return destinations, as a closed set. An arbitrary path is an open redirect. */
 const RETURN_PATHS: Record<string, string> = {
@@ -130,13 +137,30 @@ export async function POST(request: Request) {
   // whop.com, and Strict would withhold the cookie on exactly that request —
   // every link would fail as a mismatch.
   //
-  // Secure follows the actual scheme. Always setting it looks stricter but is
-  // worse: a browser silently DROPS a Secure cookie on http://localhost, so
-  // local development would fail at the callback with no cookie and no clue.
-  const isHttps = new URL(request.url).protocol === "https:";
+  // Secure is decided from CONFIGURATION, not from the request.
+  //
+  // This read `new URL(request.url).protocol`, and behind a reverse proxy that
+  // is not our scheme — Next reconstructs `request.url` from the forwarded
+  // scheme and the upstream host, which is exactly the value this repository
+  // refuses to trust elsewhere (see `whop/callback`, which stopped building its
+  // redirect from it for the same reason). A proxy terminating TLS and
+  // forwarding plain http would therefore have shipped this cookie WITHOUT
+  // Secure in production, and the cookie is what binds the callback to the
+  // browser that started the flow.
+  //
+  // `getAppPublicUrl()` is HTTPS-only by construction, refuses localhost and
+  // refuses a tunnel in production, and consults no forwarded header. The
+  // sibling Google flow already derived the flag this way; this is the same
+  // rule, so the two agree.
+  //
+  // The original concern still holds and is still handled: a browser silently
+  // DROPS a Secure cookie on http://localhost, so local development — where
+  // APP_PUBLIC_URL is unset or not https — correctly omits it. Unset defaults to
+  // Secure rather than open.
+  const isHttps = (getAppPublicUrl() ?? "https://").startsWith("https://");
   const attributes = [
     `cr_whop_link=${state}`,
-    "Path=/api/whop",
+    LINK_COOKIE_PATH_ATTR,
     "HttpOnly",
     "SameSite=Lax",
     `Max-Age=${LINK_COOKIE_MAX_AGE}`,

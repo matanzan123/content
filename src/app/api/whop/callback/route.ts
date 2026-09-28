@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { consumeAuthorization, linkWhopIdentity } from "@/lib/server/whop-connections";
+import {
+  consumeAuthorization,
+  linkWhopIdentity,
+  OAUTH_STATE_COOKIE_PATH,
+} from "@/lib/server/whop-connections";
 import { exchangeCode, fetchUserinfo, resolveOAuthConfig } from "@/lib/server/whop-oauth";
 import { DEFAULT_LOCALE, LOCALE_COOKIE, isLocale, localePath } from "@/i18n/config";
 import { getAppPublicUrl } from "@/lib/server/app-url";
@@ -68,7 +72,16 @@ function back(request: Request, path: string, outcome: Outcome) {
   const url = new URL(safePath, configured ?? request.url);
   url.searchParams.set("whop", outcome);
   const response = NextResponse.redirect(url);
-  response.cookies.set(LINK_COOKIE, "", { path: "/", maxAge: 0 });
+  /* CLEARED AT THE PATH IT WAS SET ON.
+   *
+   * A browser keys a cookie on (name, domain, path), so clearing `cr_whop_link`
+   * at `/` did not remove the one `whop/connect` set at `/api/whop` — it wrote a
+   * second, empty cookie at the root and left the original in place until its
+   * ten-minute Max-Age ran out. Nothing was exploitable, because the state ROW is
+   * consumed by a single `DELETE … RETURNING` and a replay finds nothing, but a
+   * flow that says it cleans up after itself should actually do so. The path is
+   * the shared constant `whop/connect` sets with, so the two cannot drift. */
+  response.cookies.set(LINK_COOKIE, "", { path: OAUTH_STATE_COOKIE_PATH, maxAge: 0 });
   return response;
 }
 

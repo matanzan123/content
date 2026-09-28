@@ -20,6 +20,21 @@ import { getWhopEnvironment } from "./whop-payments";
 /** How long a person has to finish consenting. Short on purpose. */
 export const OAUTH_STATE_TTL_SECONDS = 10 * 60;
 
+/**
+ * The path the browser-side half of the state lives on.
+ *
+ * `whop/connect` sets `cr_whop_link` here and `whop/callback` clears it, and a
+ * browser keys a cookie on (name, domain, path) — so a clear at `/` does not
+ * remove one set at `/api/whop`. It wrote a second empty cookie at the root and
+ * left the original until its Max-Age expired. Nothing was exploitable, since the
+ * state ROW is consumed by a single `DELETE … RETURNING` and a replay finds
+ * nothing, but a flow that claims to clean up should.
+ *
+ * It lives beside the TTL it is matched to, rather than in either route, so
+ * neither route has to import the other.
+ */
+export const OAUTH_STATE_COOKIE_PATH = "/api/whop";
+
 /* ==========================================================================
    EVERY READ AND WRITE BELOW IS SCOPED TO ONE ENVIRONMENT.
 

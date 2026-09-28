@@ -621,8 +621,28 @@ if (process.env.DATABASE_URL) {
   const connect = readFileSync("src/app/api/whop/connect/route.ts", "utf8");
   check("COOKIE: HttpOnly", connect.includes('"HttpOnly"'));
   check("COOKIE: SameSite=Lax (Strict would break the top-level callback)", connect.includes('"SameSite=Lax"') && connect.includes("SameSite=Strict") === false);
-  check("COOKIE: Secure follows the request scheme", connect.includes('new URL(request.url).protocol === "https:"') && connect.includes('isHttps ? ["Secure"] : []'));
-  check("COOKIE: scoped Path, not site-wide", connect.includes('"Path=/api/whop"'));
+  /* RE-BASELINED IN TASK #28. This required `new URL(request.url).protocol` —
+   * it asserted the defect. Behind a reverse proxy `request.url` is rebuilt from
+   * the forwarded scheme and upstream host, the same value this flow's own
+   * callback refuses to trust for its redirect, so a proxy terminating TLS and
+   * forwarding plain http shipped this cookie WITHOUT Secure in production. The
+   * cookie is what binds the callback to the browser that began the flow.
+   * `getAppPublicUrl()` is https-only, refuses localhost and production tunnels,
+   * and reads no header — and an unresolved value defaults to Secure. */
+  /* ASSERTED OVER CODE, NOT PROSE: the comment above the fix necessarily quotes
+   * the expression it replaced, so a raw-text search reports the explanation as
+   * the offence. */
+  const connectCode = connect.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  check("COOKIE: Secure is decided from configuration, not from the request",
+    connectCode.includes('const isHttps = (getAppPublicUrl() ?? "https://").startsWith("https://")') &&
+    connectCode.includes('isHttps ? ["Secure"] : []') &&
+    connectCode.includes("new URL(request.url).protocol") === false);
+  /* RE-BASELINED: the path is now a shared constant so the callback clears the
+   * cookie it was actually set on — the literal moved, the property did not. */
+  check("COOKIE: scoped Path, not site-wide",
+    connect.includes("Path=${OAUTH_STATE_COOKIE_PATH}") &&
+    readFileSync("src/lib/server/whop-connections.ts", "utf8")
+      .includes('export const OAUTH_STATE_COOKIE_PATH = "/api/whop"'));
   check("COOKIE: short lifetime matching the state row", connect.includes("LINK_COOKIE_MAX_AGE = 600"));
   check("COOKIE: value is the CSPRNG state", connect.includes("cr_whop_link=${state}"));
   const callback = readFileSync("src/app/api/whop/callback/route.ts", "utf8");
