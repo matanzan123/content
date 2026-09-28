@@ -591,8 +591,17 @@ console.log("\n--- C. properties true by absence ---");
     transfers.includes("return getWhopEnvironment();"));
   check("the refresh accepts no environment argument from its caller",
     /export async function refreshTransferFromProvider\(\s*providerTransferId: string,\s*\)/.test(transfers));
+  /* RE-BASELINED IN TASK #27. This pinned the exact literal `return { ok: false };`.
+   * The refresher now also reports WHY it failed — `unavailable`, `not_ours` or
+   * `unreadable` — because the webhook handler must tell "not ours" (acknowledge,
+   * never retry) from "could not read" (retry), and conflating them either loses
+   * an event or retries it forever. The property here is unchanged and is what is
+   * asserted: no resolved environment, no query at all. */
   check("an unresolvable environment fails CLOSED — no unscoped update happens",
-    /const environment = resolveTransferEnvironment\(\);\s*if \(!environment\) return \{ ok: false \};/.test(transfers));
+    /const environment = resolveTransferEnvironment\(\);\s*if \(!environment\) return \{ ok: false(, reason: "unavailable")? \};/.test(transfers));
+  check("and the refusal happens before any select is built",
+    transfers.indexOf("if (!environment) return { ok: false, reason: \"unavailable\" }") <
+      transfers.indexOf("eq(schema.creatorTransfers.providerTransferId, providerTransferId)"));
 
   // The notification lookups resolve a firebaseUid from the same table and had
   // the same defect: an id collision would have notified the wrong creator.

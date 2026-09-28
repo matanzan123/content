@@ -456,6 +456,47 @@ export async function fireWebhookNotifications(
       return;
     }
 
+    /* TRANSFERS — and this branch is why Task #27 touched this file.
+     *
+     * `notifyPayoutCompleted` resolves `creator_transfers` by
+     * `provider_transfer_id`: it is the CREATOR TRANSFER notification, not the
+     * withdrawal one. It was reachable only from the `payout.*` branch above,
+     * whose ids are `wdrl_` and live in the withdrawal id space — so the lookup
+     * could never match and no creator was ever told a transfer had landed or
+     * failed. The same unreachable-branch shape Task #22 found in the payout
+     * failure path, one level further out.
+     *
+     * Now that `transfer.*` is subscribed, the branch has a caller.
+     *
+     * READING THE PAYLOAD STATUS IS SAFE HERE, and only here: this decides what a
+     * creator is TOLD. The books come from `transfers.retrieve` through
+     * `refreshTransferFromProvider`, so a wrong guess sends a wrong message
+     * rather than moving a wrong amount. A transfer has exactly three statuses —
+     * `processing`, `succeeded`, `failed` — and `processing` deliberately tells
+     * nobody anything: it is not an outcome. */
+    if (
+      eventType === "transfer.created" ||
+      eventType === "transfer.completed" ||
+      eventType === "transfer.failed"
+    ) {
+      const transferId = resourceId ?? (typeof data.id === "string" ? data.id : null);
+      if (!transferId) return;
+
+      const payloadStatus = typeof data.status === "string" ? data.status : null;
+      // The event NAME is trusted no further than the payload: `transfer.failed`
+      // and a `failed` status agree, and either alone is enough to say so.
+      const failed = eventType === "transfer.failed" || payloadStatus === "failed";
+      const succeeded = !failed &&
+        (eventType === "transfer.completed" || payloadStatus === "succeeded");
+
+      if (succeeded) {
+        await notifyPayoutCompleted(transferId, true);
+      } else if (failed) {
+        await notifyPayoutCompleted(transferId, false);
+      }
+      return;
+    }
+
     if (eventType === "account.updated") {
       const accountId = typeof data.id === "string" ? data.id : null;
       const status = typeof data.status === "string" ? data.status : null;

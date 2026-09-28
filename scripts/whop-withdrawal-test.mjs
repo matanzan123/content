@@ -701,7 +701,16 @@ section("M. Webhook routing");
 
 {
   const hooks = src("src/lib/server/whop-webhooks.ts");
-  const handler = hooks.slice(hooks.indexOf("handleWhopPayoutUpdated"));
+  /* ANCHORED ON THE DECLARATION, not on the name.
+   *
+   * `indexOf("handleWhopPayoutUpdated")` found whichever mention came first in
+   * the file, so the moment a comment elsewhere referred to the handler by name
+   * this slice silently captured the wrong region and every assertion below
+   * became vacuous — which is exactly what happened when Task #27 documented the
+   * transfer families in SUPPORTED_EVENTS. The declaration is unique. */
+  const declAt = hooks.indexOf("export async function handleWhopPayoutUpdated");
+  check("the payout handler declaration was located", declAt > 0, String(declAt));
+  const handler = hooks.slice(declAt);
   const body = handler.slice(0, handler.indexOf("\n/**", 100));
 
   /* THE BUG THIS FIXES. `payout.*` events carry `wdrl_` ids — the PAYOUTS
@@ -709,9 +718,14 @@ section("M. Webhook routing");
    * against creator_transfers.provider_transfer_id. The two id spaces never
    * intersect, so every payout delivery fell through and the withdrawal
    * lifecycle received nothing. */
+  /* THE LOOKUP MUST BE CALLED, not merely named. Comparing positions of the two
+   * NAMES was satisfied by a mutant that replaced the call with `null as
+   * { withdrawalId: string } | null` — the name survived in a type annotation and
+   * the withdrawal branch became unreachable while this check still passed. */
   check("payout events route to withdrawals FIRST",
-    body.indexOf("findWithdrawalByProviderPayoutId") <
-    body.indexOf("refreshTransferFromProvider"));
+    /const withdrawal = await findWithdrawalByProviderPayoutId\(payoutId\);/.test(body) &&
+    body.indexOf("await findWithdrawalByProviderPayoutId") <
+    body.indexOf("await refreshTransferFromProvider"));
   check("a matched withdrawal is reconciled against the provider",
     /await reconcileWithdrawal\(withdrawal\.withdrawalId\)/.test(body));
   check("Task #13 transfer handling is preserved as the fallback",

@@ -870,10 +870,18 @@ async function run() {
     const [afterMig] = await client`select count(*)::int as n from drizzle.__drizzle_migrations`;
     check("no migration was applied to the real database",
       afterMig.n === beforeMig.n, `${beforeMig.n} applied`);
-    /* 0015 IS DELIBERATELY NOT APPLIED. The task forbids it; the chain is
-     * registered and proven to apply, and running it is a separate decision. */
-    check("0015 in particular is registered but NOT applied",
-      afterMig.n === 14, `${afterMig.n} applied, 16 registered`);
+    /* RE-BASELINED IN TASK #27. Task #25 wrote 0015 but was forbidden to apply it,
+     * so this asserted 14 applied against 16 registered — a deliberate snapshot of
+     * a blocked state, not a property. The migrations have since been applied, and
+     * that is the state the code requires: `whop_connections.environment` is what
+     * every OAuth query now filters on, so an unapplied 0015 would make those
+     * paths throw rather than merely lag. Asserted as the invariant instead —
+     * registered and applied agree, whatever the number. */
+    const registeredCount = JSON.parse(src("drizzle/meta/_journal.json")).entries.length;
+    check("every registered migration is applied",
+      afterMig.n === registeredCount, `${afterMig.n} applied, ${registeredCount} registered`);
+    check("and this suite applied none of them itself",
+      afterMig.n === beforeMig.n, `${beforeMig.n} -> ${afterMig.n}`);
     const [gone] = await client`
       select count(*)::int as n from information_schema.schemata where schema_name = ${SCRATCH}`;
     check("the throwaway schema is gone", gone.n === 0);

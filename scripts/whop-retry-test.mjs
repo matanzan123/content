@@ -52,6 +52,10 @@ function load(file, injected) {
 const schema = load("src/lib/db/schema.ts", { sql: drizzleOrm.sql, ...pgCore });
 
 const client = postgres(process.env.DATABASE_URL, { max: 3, prepare: false, onnotice: () => {} });
+
+/* Captured BEFORE anything runs, so the audit-trail check below can assert a
+ * delta rather than an absolute count that only held on an untouched database. */
+const [{ n: auditBefore }] = await client`select count(*)::int as n from admin_audit_log`;
 const db = drizzle(client, { schema });
 
 const COMPANY = process.env.WHOP_COMPANY_ID;
@@ -71,6 +75,21 @@ const webhooks = load("src/lib/server/whop-webhooks.ts", {
   getWhopCompanyId: () => COMPANY,
   getWhopEnvironment: () => "sandbox",
   getWhopWebhookSecret: () => null,
+  /* THIS SUITE HAD STOPPED RUNNING AT ALL.
+   *
+   * The envelope gate calls `resolveChildAccount` to decide whether an event
+   * from an unexpected company belongs to a known connected account. This
+   * loader strips imports and injects names, and that one was never added when
+   * the child router arrived — so every run of this file died with
+   * "resolveChildAccount is not defined" before a single check executed, and a
+   * crash reports no failures. The suite that proves delivery idempotency, the
+   * processing lease and retry convergence was silently contributing nothing.
+   * Found in Task #27; child-account routing itself is proved in
+   * whop-child-webhook-test.mjs.
+   *
+   * Returns null: every delivery here carries the PLATFORM company, so the gate
+   * must take the platform path and never the child path. */
+  resolveChildAccount: async () => null,
   // Ownership is proved in whop-resources-test.mjs; here it is stubbed so the
   // retry/lease semantics are what is under test.
   verifyPaymentOwnership: async () => ({ kind: "verified", accountId: COMPANY }),
@@ -241,8 +260,21 @@ try {
   {
     const [{ n: ledger }] = await client`select count(*)::int as n from financial_ledger`;
     check("I. financial_ledger is still empty", ledger === 0, `${ledger} rows`);
+    /* RE-BASELINED IN TASK #27, the same way `whop-webhook-test.mjs` already
+     * re-baselined its copy of this check — this one was never reached, because
+     * the suite crashed at load. An empty `admin_audit_log` stopped being the
+     * expected state the moment the admin surface began writing audit rows, so
+     * "still empty" would fail for a perfectly correct system.
+     *
+     * The property being protected is that NO WEBHOOK writes the audit trail.
+     * That is asserted directly: the count is unchanged across everything this
+     * suite drove through the receiver, and the webhook module names no audit
+     * writer at all. */
     const [{ n: audit }] = await client`select count(*)::int as n from admin_audit_log`;
-    check("J. admin_audit_log is still empty", audit === 0, `${audit} rows`);
+    check("J. no webhook wrote an audit row", audit === auditBefore,
+      `${auditBefore} -> ${audit}`);
+    check("J. and the webhook module cannot write one",
+      !/writeAudit|adminAuditLog/.test(readFileSync("src/lib/server/whop-webhooks.ts", "utf8")));
   }
 
   /* ------------ the shipped acquisition path has not drifted -------------- */

@@ -353,7 +353,7 @@ check("the webhook receiver does not touch OAuth", readFileSync("src/lib/server/
 
 /* ------------- E, F: durable dedup — needs the unapplied migration -------- */
 
-skip("E/F. durable dedup against the real table", "proved against Postgres in whop-retry-test.mjs; re-run there after applying 0001");
+skip("E/F. durable dedup against the real table", "proved against Postgres in whop-retry-test.mjs, which runs green as of Task #27 — it had been crashing at load since the child router arrived");
 
 /* ---------- J, K: the money tables must be untouched by this phase -------- */
 

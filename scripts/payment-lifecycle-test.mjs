@@ -205,9 +205,31 @@ check("all six documented payment lifecycle events are supported",
   paymentEvents.sort().join(",") ===
     "payment.authorized,payment.canceled,payment.created,payment.failed,payment.pending,payment.succeeded",
   paymentEvents.join("|"));
-check("every supported event exists in the SDK's WebhookEvent enum",
-  supported.every((e) => sdkEvents.includes(e)),
-  supported.filter((e) => !sdkEvents.includes(e)).join(",") || "all present");
+/* RE-BASELINED IN TASK #27: the SDK has TWO lists, and they disagree.
+ *
+ * `WebhookEvent` enumerates event names that exist.
+ * `CreateWebhooksRequest.Events.Item` enumerates what an endpoint can actually be
+ * SUBSCRIBED to. Neither contains the other: `withdrawal.*` is only in the first
+ * (so a handler for it could never run — those entries were added and removed
+ * again during this task), and `resolution.*` is only in the second (so it CAN be
+ * delivered and previously had no handler).
+ *
+ * The property worth asserting is the one that decides whether a handler can ever
+ * be reached: every event we subscribe to must be subscribable. Checking only the
+ * enum was both too weak, missing the unhandled `resolution.*`, and wrong, since
+ * it fails for a name that is legitimately subscribable. */
+const subscribableEvents = [...readFileSync(
+  "node_modules/@whop/sdk/dist/cjs/api/resources/webhooks/client/requests/CreateWebhooksRequest.d.ts",
+  "utf8").matchAll(/readonly \w+:\s*"([^"]+)"/g)].map((m) => m[1]);
+check("every supported event is one an endpoint can be subscribed to",
+  supported.every((e) => subscribableEvents.includes(e)),
+  supported.filter((e) => !subscribableEvents.includes(e)).join(",") || "all subscribable");
+check("and every one is a real name in one of the two SDK lists",
+  supported.every((e) => sdkEvents.includes(e) || subscribableEvents.includes(e)),
+  supported.filter((e) => !sdkEvents.includes(e) && !subscribableEvents.includes(e)).join(",") || "all real");
+check("withdrawal.* is not subscribed, because it is not subscribable",
+  !supported.some((e) => e.startsWith("withdrawal.")) &&
+    !subscribableEvents.some((e) => e.startsWith("withdrawal.")));
 check("`payment.completed` is NOT accepted — it is not a webhook event",
   webhooks.isSupportedEvent("payment.completed") === false);
 check("`app_payment.succeeded` is NOT accepted — different subject",
@@ -317,8 +339,52 @@ check("GAP A CLOSED: the payout path proves ownership by retrieving the resource
   !/markTransfer(Completed|Reversed)/.test(source) &&
   /retrieveTransfer\(/.test(readFileSync("src/lib/server/creator-transfers.ts", "utf8")));
 
-check("no transfer or withdrawal event was enabled",
-  supported.some((e) => /transfer|withdrawal/.test(e)) === false);
+/* RE-BASELINED IN TASK #27.
+ *
+ * This asserted that NO transfer or withdrawal event was enabled. That recorded
+ * a state of the world rather than a safety property, and the state was wrong:
+ * the installed SDK's `WebhookEvent` enum carries `transfer.created/completed/
+ * failed` and `withdrawal.created/updated/reversed`, the app moves real money
+ * through both resources, and with no scheduler a completed transfer became
+ * visible only when an administrator ran a reconcile by hand.
+ *
+ * The property the check was standing in for is the one asserted above it —
+ * a money-moving delivery must prove ownership and read the provider rather than
+ * trusting the event. So that is what is asserted now, for every member of both
+ * families: each routes to a resolver, and neither resolver reads a status from
+ * the payload. An event enabled without a resolver would fail here. */
+{
+  const moneyEvents = supported.filter((e) => /^(transfer|withdrawal|payout)\./.test(e));
+  /* SIX, not nine. `payout.*` carries the withdrawal resource and `transfer.*`
+   * the transfer resource; `withdrawal.*` is not subscribable and is deliberately
+   * absent, so a count of nine would mean dead entries were back. */
+  check("the payout and transfer families are enabled, and only those",
+    moneyEvents.length === 6 &&
+      moneyEvents.filter((e) => e.startsWith("payout.")).length === 3 &&
+      moneyEvents.filter((e) => e.startsWith("transfer.")).length === 3,
+    moneyEvents.join(" "));
+  const table = source.slice(source.indexOf("const HANDLERS"));
+  const unrouted = moneyEvents.filter((e) => !table.includes(`"${e}":`));
+  check("every one of them routes to a handler", unrouted.length === 0, unrouted.join(" "));
+  const resolvers = new Set(
+    moneyEvents.map((e) => (table.match(new RegExp(`"${e}": \\(.*?\\) => (\\w+)\\(`)) ?? [, "?"])[1]));
+  check("they share the two authority-based resolvers, not one per event",
+    [...resolvers].sort().join(",") === "handleWhopPayoutUpdated,handleWhopTransferUpdated",
+    [...resolvers].join(","));
+  /* AND NEITHER RESOLVER TRUSTS THE PAYLOAD. The event name claims an outcome —
+   * `transfer.completed`, `withdrawal.reversed` — and that claim must not become
+   * a ledger write. */
+  for (const fn of ["handleWhopPayoutUpdated", "handleWhopTransferUpdated"]) {
+    const at = source.indexOf(`export async function ${fn}`);
+    const body = source.slice(at, source.indexOf("\n/**", at + 100));
+    check(`  ${fn} reads no status from the payload`,
+      at > 0 && !/data, "status"|data\.status/.test(body));
+    check(`  ${fn} writes no money state itself`,
+      !/\.insert\(|\.update\(|accountingEntries|reverseTransaction/.test(body));
+    check(`  ${fn} resolves the id against our own rows first`,
+      /findWithdrawalByProviderPayoutId|refreshTransferFromProvider/.test(body));
+  }
+}
 
 console.log("\n--- A. the event name never decides the state ---");
 

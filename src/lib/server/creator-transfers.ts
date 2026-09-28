@@ -1006,12 +1006,28 @@ function resolveTransferEnvironment(): "sandbox" | "production" | null {
  */
 export async function refreshTransferFromProvider(
   providerTransferId: string,
-): Promise<{ ok: boolean; status?: CreatorTransferStatus }> {
+): Promise<{
+  ok: boolean;
+  status?: CreatorTransferStatus;
+  /**
+   * WHY it was not ok — added so a caller can tell "not ours" from "could not
+   * read", which decides whether a webhook delivery is acknowledged or retried.
+   *
+   * `not_ours` is terminal: no number of redeliveries will make an id from
+   * another environment or another system become one of ours.
+   * `unreadable` is transient: the row is ours and the provider read or the
+   * reconcile did not complete, so a later attempt can genuinely succeed.
+   *
+   * Additive on purpose. `ok` and `status` keep their exact previous meaning,
+   * because several suites assert this function's shape and arity.
+   */
+  reason?: "unavailable" | "not_ours" | "unreadable";
+}> {
   const db = getDb();
-  if (!db) return { ok: false };
+  if (!db) return { ok: false, reason: "unavailable" };
 
   const environment = resolveTransferEnvironment();
-  if (!environment) return { ok: false };
+  if (!environment) return { ok: false, reason: "unavailable" };
 
   // Ours, in THIS environment, or not ours at all. A provider id is Whop's
   // namespace and is not unique across environments, so the id alone could
@@ -1030,10 +1046,12 @@ export async function refreshTransferFromProvider(
   // Not a transfer we created. Acknowledged and ignored — it belongs to
   // another environment, another system, or is a payout resource that is not
   // a ledger transfer at all.
-  if (!row) return { ok: false };
+  if (!row) return { ok: false, reason: "not_ours" };
 
   const reconciled = await reconcileTransfer(row.transferId);
-  return reconciled.ok ? { ok: true, status: reconciled.status } : { ok: false };
+  return reconciled.ok
+    ? { ok: true, status: reconciled.status }
+    : { ok: false, reason: "unreadable" };
 }
 
 

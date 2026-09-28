@@ -100,9 +100,47 @@ export const SUPPORTED_EVENTS = [
   "resolution_center_case.created",
   "resolution_center_case.updated",
   "resolution_center_case.decided",
+  // THE SAME SUBJECT UNDER A SECOND NAME, and unlike `withdrawal.*` this one is
+  // genuinely subscribable: `CreateWebhooksRequest.Events.Item` lists
+  // `resolution.created`, `resolution.updated` and `resolution.decided`
+  // alongside the three `resolution_center_case.*` names, with no indication of
+  // which an endpoint will actually receive.
+  //
+  // Both are taken, routed to the same resolver. The alternative is the failure
+  // this file has already had twice — an event family arriving under a name
+  // nothing recognised, recorded `unsupported`, with the lifecycle behind it
+  // receiving nothing. Taking a name that never fires costs a dead map entry;
+  // missing the one that does costs every dispute resolution.
+  "resolution.created",
+  "resolution.updated",
+  "resolution.decided",
+  // WITHDRAWALS — creator balance out to their own bank destination.
+  //
+  // `payout.*` IS THE RIGHT FAMILY, and the SDK settles it. `client.payouts.create`
+  // returns a `wdrl_` id, and `WebhookEvent` carries both `payout.created/updated/
+  // reversed` and `withdrawal.created/updated/reversed`, which makes the naming
+  // look ambiguous. It is not: `CreateWebhooksRequest.Events.Item` — the list of
+  // events an endpoint can actually be SUBSCRIBED to — contains the three
+  // `payout.*` names and no `withdrawal.*` name at all. An event that cannot be
+  // subscribed cannot be delivered, so `withdrawal.*` was briefly added here
+  // during Task #27 and removed again: dead entries that would have implied an
+  // open question the contract already answers.
   "payout.created",
   "payout.updated",
   "payout.reversed",
+  // TRANSFERS — platform balance to a creator's Whop balance. A different
+  // resource from the above in every way: `tr_`-shaped ids, three statuses, no
+  // reversal, and `creator_transfers` rather than `creator_withdrawals`.
+  //
+  // These are in the SDK enum too, and were not subscribed. The omission was
+  // justified in `handleWhopPayoutUpdated` by the claim that transfers "have no
+  // webhook of their own in the installed SDK"; the enum contradicts it, so the
+  // claim has been corrected there. Until now a completed transfer only became
+  // visible when an administrator ran a reconcile by hand — and there is no
+  // scheduler to do it for them.
+  "transfer.created",
+  "transfer.completed",
+  "transfer.failed",
   // Connected account KYC / onboarding status changes.
   "account.updated",
 ] as const;
@@ -592,10 +630,17 @@ export async function handleWhopPayoutUpdated(
   // The two never intersect, so every payout delivery fell through
   // unrecognised and the withdrawal lifecycle received nothing at all.
   //
-  // The transfer path is still tried second and unchanged. Task #13 transfers
-  // have no webhook of their own in the installed SDK and are reconciled by
-  // polling, but if a `payout.*` delivery ever does name one of ours, the
-  // existing behaviour still applies.
+  // The transfer path is still tried second, so a delivery in this family that
+  // names one of our transfers is still resolved.
+  //
+  // CORRECTED IN TASK #27. This said transfers "have no webhook of their own in
+  // the installed SDK and are reconciled by polling". The first half is false:
+  // `@whop/sdk`'s `WebhookEvent` enum carries `transfer.created`,
+  // `transfer.completed` and `transfer.failed`. They were simply not subscribed,
+  // which made the second half true as a consequence rather than by design — and
+  // with no scheduler, "reconciled by polling" meant "reconciled when an
+  // administrator remembers". All three are now in SUPPORTED_EVENTS and route to
+  // `handleWhopTransferUpdated` below.
   const withdrawal = await findWithdrawalByProviderPayoutId(payoutId);
   if (withdrawal) {
     const reconciled = await reconcileWithdrawal(withdrawal.withdrawalId);
@@ -613,6 +658,64 @@ export async function handleWhopPayoutUpdated(
     return { kind: "business_mapping_not_implemented" };
   }
   return { kind: "handled" };
+}
+
+/**
+ * A `transfer.*` delivery: platform balance to a creator's Whop balance.
+ *
+ * THE MIRROR OF `handleWhopPayoutUpdated`, and it shares that handler's two
+ * rules because they are the ones that make either safe.
+ *
+ * THE PAYLOAD'S STATUS IS NOT READ. A transfer has exactly `processing`,
+ * `succeeded` and `failed`, and the event name already claims an outcome —
+ * `transfer.completed` — which is precisely the sort of claim that must not
+ * become a ledger write on its own. `refreshTransferFromProvider` retrieves the
+ * resource and reconciles from what the provider says, so a redelivery, a
+ * late-arriving event and an out-of-order pair all converge on the same state.
+ * That is also what makes a stale event harmless: it cannot regress anything,
+ * because it contributes no state of its own.
+ *
+ * OWNERSHIP IS PROVED BY LOCAL POSSESSION, in this environment, before the
+ * provider is contacted at all — `refreshTransferFromProvider` resolves the id
+ * against `creator_transfers` scoped to the active environment and stops if it
+ * finds nothing. So a sandbox delivery cannot reach a production transfer, and an
+ * id belonging to somebody else never becomes a request. That is why `transfer.*`
+ * is not in OWNERSHIP_GATED: the gate would be a second, weaker copy of a check
+ * the reconciler already does better.
+ *
+ * An id we do not hold is acknowledged and ignored rather than retried — it
+ * belongs to another environment or another system, and no number of
+ * redeliveries will change that. A provider read we could not complete IS
+ * retried, because a later attempt can genuinely succeed.
+ */
+export async function handleWhopTransferUpdated(
+  resourceId: string | null,
+  _webhookId: string,
+  body: unknown,
+): Promise<HandlerResult> {
+  const root = (body ?? {}) as Record<string, unknown>;
+  const data = (root.data ?? root.object ?? root) as Record<string, unknown>;
+
+  const transferId =
+    resourceId ??
+    readString(data, "id") ??
+    readString(data, "transfer_id");
+
+  if (!transferId) return { kind: "business_mapping_not_implemented" };
+
+  const refreshed = await refreshTransferFromProvider(transferId);
+  if (refreshed.ok) return { kind: "handled" };
+
+  /* NOT OURS, OR NOT READABLE — and the two must never be conflated.
+   *
+   * Acknowledging an unreadable provider as "unmapped" is the one outcome that
+   * silently loses an event: the receipt reaches a terminal status and Whop stops
+   * redelivering, while the transfer's real state was never learned. So the
+   * reconciler reports which it was, and only a genuinely foreign id is
+   * acknowledged. */
+  return refreshed.reason === "not_ours"
+    ? { kind: "business_mapping_not_implemented" }
+    : { kind: "failed", category: "transfer_reconcile_failed" };
 }
 
 /**
@@ -749,6 +852,11 @@ const OWNERSHIP_GATED: Record<string, (id: string | null) => Promise<OwnershipOu
   "resolution_center_case.created": verifyCaseOwnership,
   "resolution_center_case.updated": verifyCaseOwnership,
   "resolution_center_case.decided": verifyCaseOwnership,
+  // The alias family is gated identically. A second name for a resource must not
+  // become a second, weaker path to it.
+  "resolution.created": verifyCaseOwnership,
+  "resolution.updated": verifyCaseOwnership,
+  "resolution.decided": verifyCaseOwnership,
 };
 
 /**
@@ -801,9 +909,22 @@ const HANDLERS: Record<SupportedEvent, Handler> = {
   "resolution_center_case.created": handleWhopResolutionCase,
   "resolution_center_case.updated": handleWhopResolutionCase,
   "resolution_center_case.decided": handleWhopResolutionCase,
+  // The second name for the same subject — see SUPPORTED_EVENTS.
+  "resolution.created": handleWhopResolutionCase,
+  "resolution.updated": handleWhopResolutionCase,
+  "resolution.decided": handleWhopResolutionCase,
+  // Both withdrawal families route to the same resolver. Neither name is trusted
+  // to carry an outcome — the resolver looks the id up among our own withdrawals
+  // for this environment and then asks the provider.
   "payout.created": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
   "payout.updated": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
   "payout.reversed": (id, wid, body) => handleWhopPayoutUpdated(id, wid, body),
+  // Transfers are the other resource and get the mirror resolver. All three
+  // route to one handler for the same reason the refund and dispute families do:
+  // the event name is a trigger, and the provider's own status decides.
+  "transfer.created": (id, wid, body) => handleWhopTransferUpdated(id, wid, body),
+  "transfer.completed": (id, wid, body) => handleWhopTransferUpdated(id, wid, body),
+  "transfer.failed": (id, wid, body) => handleWhopTransferUpdated(id, wid, body),
   "account.updated": (_id, _wid, body) => handleWhopAccountUpdated(body),
 };
 
