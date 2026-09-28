@@ -156,6 +156,10 @@ const payoutCode = codeOnly("src/lib/server/whop-payouts.ts");
 /* ---------------------------------------------------------------- B ---- */
 section("B. Provider status vocabulary and mapping");
 
+/* The genuine constraint classifier, loaded rather than faked — see the note at
+ * its injection sites below. It imports nothing but `server-only`. */
+const dbErrors = loadModule("src/lib/server/db-errors.ts", {});
+
 const payouts = loadModule("src/lib/server/whop-payouts.ts", {
   "@whop/sdk": { WhopError: class WhopError extends Error {} },
   "./whop-payments": { getWhopPaymentsClient: () => null },
@@ -310,6 +314,12 @@ section("E. Request idempotency");
     "./accounting/journal": { reverseTransaction: async () => ({ ok: true }) },
     "./accounting/accounts": { economicKey: (a, b, c) => `${a}:${b}:${c}` },
     "./whop-payouts": payouts,
+    // THE REAL HELPER, not a stub. Task #29 found both unique-violation
+    // branches in requestWithdrawal unreachable: they matched on the error
+    // MESSAGE, which drizzle renders as the SQL, while the constraint name
+    // sits in `cause`. A stub here would let this suite pass whatever the
+    // helper did, which is how the original defect survived 234 checks.
+    "./db-errors": dbErrors,
   });
 
   check("a too-short token is refused", valid.isValidWithdrawalRequestId("abc") === false);
@@ -547,6 +557,12 @@ section("I. Reconciliation is the authority");
     "./accounting/journal": { reverseTransaction: async () => ({ ok: true }) },
     "./accounting/accounts": { economicKey: (a, b, c) => `${a}:${b}:${c}` },
     "./whop-payouts": payouts,
+    // THE REAL HELPER, not a stub. Task #29 found both unique-violation
+    // branches in requestWithdrawal unreachable: they matched on the error
+    // MESSAGE, which drizzle renders as the SQL, while the constraint name
+    // sits in `cause`. A stub here would let this suite pass whatever the
+    // helper did, which is how the original defect survived 234 checks.
+    "./db-errors": dbErrors,
   });
 
   check("requested maps to provider_pending", wd.mapProviderStatus("requested") === "provider_pending");
@@ -623,6 +639,12 @@ section("K. The withdrawal state machine");
     "./accounting/journal": { reverseTransaction: async () => ({ ok: true }) },
     "./accounting/accounts": { economicKey: (a, b, c) => `${a}:${b}:${c}` },
     "./whop-payouts": payouts,
+    // THE REAL HELPER, not a stub. Task #29 found both unique-violation
+    // branches in requestWithdrawal unreachable: they matched on the error
+    // MESSAGE, which drizzle renders as the SQL, while the constraint name
+    // sits in `cause`. A stub here would let this suite pass whatever the
+    // helper did, which is how the original defect survived 234 checks.
+    "./db-errors": dbErrors,
   });
   const allowed = wd.isAllowedWithdrawalTransition;
 

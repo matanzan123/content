@@ -282,9 +282,27 @@ function decimalStringToMinor(
   if (typeof value !== "string") return { ok: false };
 
   const trimmed = value.trim();
-  // Digits with at most one decimal point. No exponents, no signs, no spaces:
-  // a money string that needs any of those is not one we should guess at.
-  if (!/^d+(.d+)?$/.test(trimmed)) return { ok: false };
+  /* Digits with at most one decimal point. No exponents, no signs, no spaces:
+   * a money string that needs any of those is not one we should guess at.
+   *
+   * THE BACKSLASHES ARE THE WHOLE POINT, and they were missing: this read
+   * `/^d+(.d+)?$/`, which matches a literal letter "d" rather than a digit. No
+   * decimal string could satisfy it, so `decimalStringToMinor` failed for every
+   * value the payout resource actually returns.
+   *
+   * That made `readPayout` return null for EVERY payout — and it is the only
+   * reader for both the create response and the retrieve. A successful payout
+   * therefore read as an unreadable 2xx, which is classified as `ambiguous`, so
+   * the withdrawal went to `provider_pending`; and because reconciliation reads
+   * the payout through this same function, it could not resolve it either. The
+   * creator's money would have left their Whop balance with the withdrawal stuck
+   * in a non-terminal state that nothing could clear — the exact failure the
+   * comment above this function describes having already fixed once.
+   *
+   * It survived 234 passing withdrawal checks because no suite ever drove this
+   * parser with a string: the fixtures use numbers, which take the fast path
+   * above, and the rest asserted the source rather than the behaviour. */
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return { ok: false };
 
   const asNumber = Number(trimmed);
   if (!Number.isFinite(asNumber)) return { ok: false };

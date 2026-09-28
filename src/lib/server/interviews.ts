@@ -6,6 +6,7 @@ import { interviewBookings } from "@/lib/db/schema";
 import { isBookableSlot, resolveAvailabilityConfig } from "./interview-availability";
 import { isFirebaseUid, refreshProgress, getUser } from "./users";
 import { isDecided } from "./user-lifecycle";
+import { violatesConstraint } from "./db-errors";
 
 /* ==========================================================================
    INTERVIEW BOOKINGS — server only.
@@ -139,19 +140,13 @@ export async function bookInterview(
     // the Postgres error — which carries `constraint_name` — is one level down
     // in `cause`. Reading only `message` silently turned both collisions into
     // `storage_error`.
-    const cause = (error as { cause?: unknown })?.cause;
-    const constraint =
-      (cause as { constraint_name?: string })?.constraint_name ??
-      (error as { constraint_name?: string })?.constraint_name ??
-      "";
-    const text = `${constraint} ${error instanceof Error ? error.message : ""} ${
-      cause instanceof Error ? cause.message : ""
-    }`;
-
-    if (text.includes("uniq_bookings_active_user")) {
+    // This module discovered the rule and is now the shared helper's caller
+    // rather than its own copy — two money modules had the broken version, and
+    // Task #29 extracted the working one so there is a single place to be right.
+    if (violatesConstraint(error, "uniq_bookings_active_user")) {
       return { ok: false, reason: "already_booked" };
     }
-    if (text.includes("uniq_bookings_active_slot")) {
+    if (violatesConstraint(error, "uniq_bookings_active_slot")) {
       return { ok: false, reason: "slot_taken" };
     }
     return { ok: false, reason: "storage_error" };

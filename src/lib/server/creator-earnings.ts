@@ -9,6 +9,7 @@ import {
 import { postRevenueSplit, postRevenueSplitReversal } from "./accounting/revenue-split-posting";
 import { readSettlementAllocation } from "./accounting/settlement-allocation";
 import { getWhopEnvironment } from "./whop-payments";
+import { violatesConstraint } from "./db-errors";
 import {
   capRefundedGross,
   computeCumulativeRefundDelta,
@@ -255,8 +256,13 @@ export async function recordCreatorEarning(
       .returning({ earningId: schema.creatorEarnings.earningId });
     earningId = inserted.earningId;
   } catch (err) {
-    // Unique constraint race (concurrent insert)
-    const isConflict = err instanceof Error && err.message.includes("uniq_creator_earnings_payment_creator");
+    /* Unique constraint race (concurrent insert).
+     *
+     * READ FROM THE CAUSE, not from this error's message: drizzle's own message
+     * is the rendered SQL, so `err.message.includes(...)` was never true and this
+     * race could not resolve to the earning that already existed — a concurrent
+     * duplicate reported a storage failure instead of the idempotent answer. */
+    const isConflict = violatesConstraint(err, "uniq_creator_earnings_payment_creator");
     if (isConflict) {
       const [row] = await db
         .select({ earningId: schema.creatorEarnings.earningId })

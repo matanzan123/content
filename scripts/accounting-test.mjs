@@ -1043,10 +1043,88 @@ async function databaseInvariants() {
         group by transaction_id having sum(amount_minor) <> 0) x`;
     check("and every individual transaction in it balances", perTxn.n === 0,
       `${perTxn.n} unbalanced`);
+    /* THE STRICT RULE STANDS, WITH ONE NAMED INCIDENT CARVED OUT.
+     *
+     * The real ledger should contain settlement, fee and suspense legs and
+     * nothing else: no creator payable has ever been discharged here, no refund
+     * or dispute movement posted. That invariant is worth keeping strict, so it
+     * is NOT relaxed to "anything is fine as long as it nets to zero".
+     *
+     * TASK #29 CONTAMINATION. The `production-payout-e2e` suite wrote one
+     * synthetic `revenue_split` into this database: it raised its scoped client's
+     * pool to `max: 4` to drive genuinely simultaneous withdrawal requests, and
+     * `SET search_path` binds to a single connection — so queries served by the
+     * other connections ran against `public`. Every other DB-backed suite uses
+     * `max: 1`, which is why it had never happened before.
+     *
+     * WHY IT WAS NOT DELETED. `accounting_append_only()` guards both tables with
+     * BEFORE DELETE and BEFORE UPDATE triggers and refuses outright, naming the
+     * remedy in its own message. That control is correct and stays intact, so the
+     * contamination was corrected the way the ledger demands: a compensating
+     * `reversal` posted through `reverseTransaction`, which flips every leg's sign
+     * and links the pair by `reverses_transaction_id`.
+     *
+     * So exactly four legs outside the normal set may exist — the synthetic pair
+     * and its reversal — they must net to zero, and nothing else may appear. */
+    const INCIDENT_KEY = "whop:revenue_split:pay_seed_1";
+    const incidentIds = await db`
+      select transaction_id from accounting_transactions
+       where idempotency_key = ${INCIDENT_KEY}
+          or reverses_transaction_id in (
+               select transaction_id from accounting_transactions
+                where idempotency_key = ${INCIDENT_KEY})`;
+    const incidentSet = incidentIds.map((r) => r.transaction_id);
+
+    /* The strict rule, evaluated over everything EXCEPT the known incident. A
+     * new creator_payable leg from any other source still fails here. */
     const [forbidden] = await db`
       select count(*)::int as n from accounting_entries
-      where account not in ('provider_balance','provider_fee_expense','unallocated_customer_funds')`;
-    check("no revenue, creator-payable, refund or dispute legs exist", forbidden.n === 0);
+      where account not in ('provider_balance','provider_fee_expense','unallocated_customer_funds')
+        and transaction_id <> all(${incidentSet})`;
+    check("no revenue, creator-payable, refund or dispute legs exist outside the known incident",
+      forbidden.n === 0, `${forbidden.n} unexplained`);
+
+    /* AND THE INCIDENT ITSELF IS BOUNDED AND NEUTRALISED. */
+    check("the Task #29 incident is exactly two transactions — the synthetic one and its reversal",
+      incidentSet.length === 2, `${incidentSet.length} transactions`);
+    if (incidentSet.length === 2) {
+      const [incidentNet] = await db`
+        select count(*)::int as legs, coalesce(sum(amount_minor),0)::text as s
+          from accounting_entries where transaction_id = any(${incidentSet})`;
+      check("it is four legs and nets to exactly zero",
+        incidentNet.legs === 4 && incidentNet.s === "0",
+        `${incidentNet.legs} legs, net ${incidentNet.s}`);
+      const perAccount = await db`
+        select account, counterparty_id, coalesce(sum(amount_minor),0)::text as s
+          from accounting_entries where transaction_id = any(${incidentSet})
+         group by account, counterparty_id`;
+      check("and nets to zero per account and counterparty, not merely in total",
+        perAccount.every((r) => r.s === "0"),
+        perAccount.map((r) => `${r.account}:${r.s}`).join(" "));
+      const [reversalLink] = await db`
+        select count(*)::int as n from accounting_transactions
+         where reverses_transaction_id is not null
+           and transaction_id = any(${incidentSet})`;
+      check("the correction is a linked reversal, not a second independent posting",
+        reversalLink.n === 1, `${reversalLink.n} linked`);
+      const [origIntact] = await db`
+        select count(*)::int as n from accounting_transactions
+         where idempotency_key = ${INCIDENT_KEY} and reverses_transaction_id is null`;
+      check("and the original was preserved rather than deleted — accounting is append-only",
+        origIntact.n === 1);
+    }
+    /* NO OTHER creator_payable POSITION EXISTS. The incident nets to zero, so a
+     * non-zero total would mean a real discharge happened, which it has not. */
+    const [payableTotal] = await db`
+      select coalesce(sum(amount_minor),0)::text as s, count(*)::int as n
+        from accounting_entries where account = 'creator_payable'`;
+    check("creator_payable nets to zero across the whole real ledger",
+      payableTotal.s === "0", `${payableTotal.n} legs, net ${payableTotal.s}`);
+    const [otherAccounts] = await db`
+      select count(*)::int as n from accounting_entries
+       where account in ('refund_absorbed_cost','platform_revenue','tax_payable')`;
+    check("no refund-absorbed-cost, platform-revenue or tax leg exists at all",
+      otherAccounts.n === 0, `${otherAccounts.n} legs`);
     const [orderTime] = await db`
       select paid_at from payment_orders where order_id = '591bd306-dbb9-441b-9412-227cf79e3f4d'`;
     check("the settled order kept its original paid_at",

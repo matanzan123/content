@@ -6,6 +6,7 @@ import { fetchPayoutStatus } from "./whop-payout-status";
 import { getConnectedAccount } from "./connected-accounts";
 import { getWhopEnvironment, type WhopEnvironmentName } from "./whop-payments";
 import { notifyWithdrawalProcessing } from "./notification-triggers";
+import { violatesConstraint } from "./db-errors";
 import {
   createPayout,
   createPayoutQuote,
@@ -439,11 +440,19 @@ export async function requestWithdrawal(
       .returning({ withdrawalId: schema.creatorWithdrawals.withdrawalId });
     withdrawalId = inserted.withdrawalId;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("uniq_withdrawal_active_creator")) {
+    /* THE CONSTRAINT NAME IS IN THE CAUSE, not in this error's own message.
+     *
+     * This read `err.message`, which drizzle renders as "Failed query: insert
+     * into …" — so NEITHER branch below could ever be taken. A creator with an
+     * active withdrawal got `db_unavailable`, which reads as an outage rather
+     * than the true "you already have one"; and the same-request-id replay never
+     * ran, so a genuinely retried request reported a database failure for a
+     * withdrawal that had actually been created. The unique indexes still kept
+     * the money safe — they simply could not be told apart. */
+    if (violatesConstraint(err, "uniq_withdrawal_active_creator")) {
       return { ok: false, reason: "withdrawal_already_pending" };
     }
-    if (msg.includes("uniq_withdrawal_request_creator_env")) {
+    if (violatesConstraint(err, "uniq_withdrawal_request_creator_env")) {
       // A concurrent request with the same token won. Both describe the same
       // intent, so this is a successful replay rather than a failure.
       const raced = await findWithdrawalByRequestId(db, firebaseUid, environment, requestId);
