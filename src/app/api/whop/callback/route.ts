@@ -126,13 +126,19 @@ export async function GET(request: Request) {
     code,
     codeVerifier: pending.codeVerifier,
   });
-  if (!exchanged.ok) return back(request, pending.returnPath, "failed");
+  if (!exchanged.ok) {
+  console.error("[whop-oauth] exchange failed", exchanged.reason);
+  return back(request, pending.returnPath, "failed");
+}
 
   const identity = await fetchUserinfo({
     config: config.config,
     accessToken: exchanged.tokens.accessToken,
   });
-  if (!identity.ok) return back(request, pending.returnPath, "failed");
+  if (!identity.ok) {
+  console.error("[whop-oauth] userinfo failed", identity.reason);
+  return back(request, pending.returnPath, "failed");
+}
 
   // The join key is the OIDC subject. No email is read, stored or compared.
   const linked = await linkWhopIdentity({
