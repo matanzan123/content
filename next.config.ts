@@ -49,11 +49,28 @@ const CSP = [
   "img-src 'self' data: blob: https://i.pravatar.cc https://picsum.photos https://*.googleusercontent.com",
   `connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://accounts.google.com https://apis.google.com${isDev ? " ws: wss:" : ""}`,
   // firebaseapp.com: Firebase Auth iframe. whop.com: checkout embed iframe.
-  "frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://whop.com https://*.whop.com",
+  // tiktok.com / youtube.com / instagram.com: video embeds in submission review.
+  "frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://whop.com https://*.whop.com https://www.tiktok.com https://www.youtube.com https://www.instagram.com",
   "object-src 'none'",
   "base-uri 'self'",
   // Preferred over X-Frame-Options in modern browsers; both are set for compatibility.
   "frame-ancestors 'none'",
+].join("; ");
+
+// CSP for /whop-app routes: allows Whop to embed our iframe while keeping
+// the rest of the site protected. frame-src expands to include media embeds.
+const WHOP_APP_CSP = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline' https://apis.google.com${isDev ? " 'unsafe-eval'" : ""}`,
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: blob: https: https://*.googleusercontent.com",
+  `connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://accounts.google.com https://apis.google.com https://api.whop.com https://sandbox-api.whop.com${isDev ? " ws: wss:" : ""}`,
+  "frame-src https://*.firebaseapp.com https://accounts.google.com https://whop.com https://*.whop.com https://www.tiktok.com https://www.youtube.com https://www.instagram.com",
+  "object-src 'none'",
+  "base-uri 'self'",
+  // Allow Whop to embed /whop-app in their community iframe.
+  "frame-ancestors https://whop.com https://*.whop.com",
 ].join("; ");
 
 const nextConfig: NextConfig = {
@@ -65,23 +82,32 @@ const nextConfig: NextConfig = {
     ],
   },
   async headers() {
+    const sharedHeaders = [
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+      { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+      ...(process.env.NODE_ENV === "production"
+        ? [{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" }]
+        : []),
+    ];
+
     return [
+      // /whop-app routes: allow Whop to embed this page; no X-Frame-Options DENY.
       {
-        source: "/(.*)",
+        source: "/whop-app(.*)",
         headers: [
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          // Belt-and-suspenders with frame-ancestors in CSP; covers older browsers.
+          ...sharedHeaders,
+          { key: "Content-Security-Policy", value: WHOP_APP_CSP },
+        ],
+      },
+      // All other routes: block framing entirely.
+      {
+        source: "/((?!whop-app).*)",
+        headers: [
+          ...sharedHeaders,
           { key: "X-Frame-Options", value: "DENY" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
-          // Allows the Firebase Auth Google Sign-In popup to communicate back.
-          // same-origin would silently break the Google popup flow.
-          { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
           { key: "Content-Security-Policy", value: CSP },
-          // HSTS: only meaningful over HTTPS, so skip in dev where secure: false.
-          ...(process.env.NODE_ENV === "production"
-            ? [{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" }]
-            : []),
         ],
       },
     ];

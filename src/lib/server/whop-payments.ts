@@ -181,6 +181,32 @@ export function isWhopWebhookConfigured(env: Env = process.env): boolean {
 }
 
 /**
+ * The Whop App ID (app_xxxxx) used for iframe token verification.
+ *
+ * Distinct from the company API key: the app id identifies which Whop App we
+ * are, and is used to validate the `aud` claim in iframe tokens so a token
+ * minted for another app is rejected rather than accepted.
+ */
+export function getWhopAppId(env: Env = process.env): string | null {
+  return read(env, "WHOP_APP_ID");
+}
+
+/**
+ * The Whop App secret used to verify iframe token signatures.
+ *
+ * Never logs, never surfaces in client bundles. Null means every token
+ * verification must fail — there is no way to verify without the secret.
+ */
+export function getWhopAppSecret(env: Env = process.env): string | null {
+  return read(env, "WHOP_APP_SECRET");
+}
+
+/** Whether iframe authentication is possible at all. Report-only. */
+export function isWhopAppConfigured(env: Env = process.env): boolean {
+  return getWhopAppId(env) !== null && getWhopAppSecret(env) !== null;
+}
+
+/**
  * Removes every Whop credential from any text before it is logged or surfaced.
  *
  * An SDK error can quote a request, and a request carries an Authorization
@@ -190,7 +216,7 @@ export function isWhopWebhookConfigured(env: Env = process.env): boolean {
  */
 export function redactWhopSecrets(text: string, env: Env = process.env): string {
   let out = text;
-  for (const name of ["WHOP_API_KEY", "WHOP_WEBHOOK_SECRET"]) {
+  for (const name of ["WHOP_API_KEY", "WHOP_WEBHOOK_SECRET", "WHOP_APP_SECRET"]) {
     const secret = read(env, name);
     if (secret) out = out.split(secret).join("[redacted]");
   }
