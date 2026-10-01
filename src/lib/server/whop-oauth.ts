@@ -331,8 +331,27 @@ export async function exchangeCode(input: {
     return { ok: false, reason: "network_error" };
   }
 
-  if (!response.ok) return { ok: false, reason: "provider_rejected" };
+if (!response.ok) {
+  let providerError = "unknown";
 
+  try {
+    const errorBody = (await response.clone().json()) as Record<string, unknown>;
+    const rawError = typeof errorBody.error === "string" ? errorBody.error : "";
+
+    if (/^[A-Za-z0-9_.:-]{1,80}$/.test(rawError)) {
+      providerError = rawError;
+    }
+  } catch {
+    // Ignore malformed provider error responses.
+  }
+
+  console.error("[whop-oauth] token endpoint rejected", {
+    status: response.status,
+    error: providerError,
+  });
+
+  return { ok: false, reason: "provider_rejected" };
+}
   let body: unknown;
   try {
     body = await response.json();
