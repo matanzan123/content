@@ -2,6 +2,7 @@ import "server-only";
 
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db";
+import { isIsoCountryCode } from "@/lib/country-codes";
 import { interviewBookings, userProfiles, users } from "@/lib/db/schema";
 import {
   computeProgressStatus,
@@ -57,6 +58,7 @@ export type ClipRewardsUser = {
 export type UserProfile = {
   firebaseUid: string;
   fullName: string | null;
+  countryCode: string | null;
   bio: string | null;
   photoUrl: string | null;
   languages: string[] | null;
@@ -133,6 +135,41 @@ export async function getProfile(firebaseUid: string): Promise<UserProfile | nul
     .from(userProfiles)
     .where(eq(userProfiles.firebaseUid, firebaseUid));
   return (row as UserProfile | undefined) ?? null;
+}
+
+export type PayoutCountryResult =
+  | { ok: true; countryCode: string }
+  | {
+      ok: false;
+      reason: "unconfigured" | "invalid_uid" | "invalid_country" | "profile_not_found" | "storage_error";
+    };
+
+/** Updates only the country used for payout/KYC provisioning. */
+export async function setPayoutCountry(
+  firebaseUid: string,
+  countryCode: string,
+): Promise<PayoutCountryResult> {
+  const db = getDb();
+  if (!db) return { ok: false, reason: "unconfigured" };
+  if (!isFirebaseUid(firebaseUid)) return { ok: false, reason: "invalid_uid" };
+
+  const normalized = countryCode.trim().toUpperCase();
+  if (!isIsoCountryCode(normalized)) {
+    return { ok: false, reason: "invalid_country" };
+  }
+
+  try {
+    const [row] = await db
+      .update(userProfiles)
+      .set({ countryCode: normalized, updatedAt: sql`now()` })
+      .where(eq(userProfiles.firebaseUid, firebaseUid))
+      .returning({ countryCode: userProfiles.countryCode });
+
+    if (!row?.countryCode) return { ok: false, reason: "profile_not_found" };
+    return { ok: true, countryCode: row.countryCode };
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
 }
 
 /* -------------------------------------------------------------------------

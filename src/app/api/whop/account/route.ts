@@ -1,6 +1,8 @@
 import { requireWhopEligible } from "@/lib/server/access";
+import { isIsoCountryCode } from "@/lib/country-codes";
 import { checkRequestOrigin } from "@/lib/server/request-origin";
 import { getAdminAuth } from "@/lib/server/firebase-admin";
+import { getProfile } from "@/lib/server/users";
 import { getActiveConnection } from "@/lib/server/whop-connections";
 import { getConnectedAccount, recordConnectedAccount } from "@/lib/server/connected-accounts";
 import {
@@ -40,13 +42,6 @@ const NO_STORE = { "cache-control": "no-store" };
 
 function json(body: Record<string, unknown>, status: number) {
   return Response.json(body, { status, headers: NO_STORE });
-}
-
-/** ISO 3166-1 alpha-2, and nothing else. Optional — see below. */
-function readConfiguredCountry(): string | null {
-  const raw = process.env.WHOP_CONNECTED_ACCOUNT_COUNTRY?.trim();
-  if (!raw) return null;
-  return /^[A-Za-z]{2}$/.test(raw) ? raw.toUpperCase() : null;
 }
 
 export async function POST(request: Request) {
@@ -138,18 +133,15 @@ export async function POST(request: Request) {
   // trustworthy source is Firebase — never a request body.
   if (!email) return json({ error: "email_unavailable" }, 409);
 
-  /*
-   * COUNTRY IS NOT INVENTED. No profile field records one today, so rather
-   * than guessing a jurisdiction for a financial account, this sends the value
-   * only when an operator has configured one and otherwise omits the field —
-   * Whop then inherits the parent account's country, which is its documented
-   * behaviour for connected accounts.
-   */
-  const country = readConfiguredCountry();
+  const profile = await getProfile(firebaseUid);
+  const country = profile?.countryCode?.trim().toUpperCase() ?? null;
+  if (!country || !isIsoCountryCode(country)) {
+    return json({ error: "country_required" }, 409);
+  }
 
   // Display name from data the server already holds. Omitted when nothing
   // trustworthy exists; Whop falls back to the owner's email.
-  const title = gate.context.profile?.fullName?.trim() || connection.whopUsername || undefined;
+  const title = profile?.fullName?.trim() || connection.whopUsername || undefined;
 
   /* --- 6. Create, with a key stable for this creator and environment. -- */
   const created = await createConnectedAccount(platform.config, parent.account.id, {

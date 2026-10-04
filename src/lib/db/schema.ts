@@ -1226,6 +1226,8 @@ export const userProfiles = pgTable(
 
     /** Display name as typed. Not an identity, and not unique. */
     fullName: text("full_name"),
+    /** ISO 3166-1 alpha-2 country selected by the user for payout/KYC purposes. */
+    countryCode: char("country_code", { length: 2 }),
     bio: text("bio"),
     /** A URL Firebase or the user supplied. No image bytes are stored. */
     photoUrl: text("photo_url"),
@@ -1533,7 +1535,7 @@ export const creatorEarnings = pgTable(
      */
     refundedGrossMinor: bigint("refunded_gross_minor", { mode: "bigint" })
       .notNull()
-      .default(BigInt(0)),
+      .default(sql`0`),
     /** Lowercase ISO 4217. Currently always "usd". */
     currency: char("currency", { length: 3 }).notNull(),
 

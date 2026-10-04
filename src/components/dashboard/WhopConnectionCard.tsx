@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { useT } from "@/i18n/provider";
+import { WhopPayoutSetup } from "@/components/dashboard/WhopPayoutSetup";
 
 /* ==========================================================================
    WHOP CONNECTION.
@@ -213,6 +214,7 @@ export function WhopConnectionCard({ locale, notice }: { locale: string; notice:
 
         {shown.phase === "connected" && (
           <>
+            <WhopPayoutSetup locale={locale} />
             <dl className="grid gap-4 sm:grid-cols-2">
               <Fact label={t.accountLabel}>
                 {shown.username ? (

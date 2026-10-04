@@ -113,6 +113,13 @@
       "when": 1790446296329,
       "tag": "0015_whop_connection_environment",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791105940148,
+      "tag": "0016_add_profile_country",
+      "breakpoints": true
     }
   ]
 }
