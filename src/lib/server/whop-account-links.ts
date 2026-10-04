@@ -9,7 +9,7 @@ import {
   localePath,
   type Locale,
 } from "@/i18n/config";
-import { getWhopPaymentsClient, redactWhopSecrets } from "./whop-payments";
+import { getWhopAppClient, redactWhopSecrets } from "./whop-payments";
 import { isWhopAccountId } from "./whop-accounts";
 
 /* ==========================================================================
@@ -172,7 +172,7 @@ export async function createAccountLink(
   // walks a real person through identity verification.
   if (!isWhopAccountId(companyId)) return { ok: false, reason: "invalid_account_id" };
 
-  const client = getWhopPaymentsClient();
+  const client = getWhopAppClient();
   if (!client) return { ok: false, reason: "unconfigured" };
 
   const origin = resolveAppOrigin();

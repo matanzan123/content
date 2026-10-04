@@ -176,6 +176,38 @@ export function getWhopPaymentsClient(env: Env = process.env): WhopClient | null
   return client;
 }
 
+
+let appClientCached: { baseUrl: string; client: WhopClient } | null = null;
+
+/**
+ * Dedicated App API client for Whop-hosted account links.
+ * WHOP_API_KEY remains the Company API key for money operations.
+ * WHOP_APP_API_KEY is used only for account links.
+ */
+export function getWhopAppClient(env: Env = process.env): WhopClient | null {
+  const apiKey = read(env, "WHOP_APP_API_KEY");
+  const environment = read(env, "WHOP_ENV");
+
+  if (!apiKey || !environment) return null;
+
+  if (environment !== "sandbox" && environment !== "production") {
+    return null;
+  }
+
+  const baseUrl = WHOP_API_BASE_URLS[environment];
+
+  if (appClientCached && appClientCached.baseUrl === baseUrl) {
+    return appClientCached.client;
+  }
+
+  const client = new WhopClient({
+    token: apiKey,
+    baseUrl,
+  });
+
+  appClientCached = { baseUrl, client };
+  return client;
+}
 /**
  * The endpoint signing secret for inbound webhooks, or null.
  *
@@ -203,7 +235,7 @@ export function isWhopWebhookConfigured(env: Env = process.env): boolean {
  */
 export function redactWhopSecrets(text: string, env: Env = process.env): string {
   let out = text;
-  for (const name of ["WHOP_API_KEY", "WHOP_WEBHOOK_SECRET"]) {
+  for (const name of ["WHOP_API_KEY", "WHOP_APP_API_KEY", "WHOP_WEBHOOK_SECRET"]) {
     const secret = read(env, name);
     if (secret) out = out.split(secret).join("[redacted]");
   }
