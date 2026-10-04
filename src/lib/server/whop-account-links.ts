@@ -9,17 +9,17 @@ import {
   localePath,
   type Locale,
 } from "@/i18n/config";
-import { getWhopAppClient, redactWhopSecrets } from "./whop-payments";
+import { getWhopPaymentsClient, redactWhopSecrets } from "./whop-payments";
 import { isWhopAccountId } from "./whop-accounts";
 
 /* ==========================================================================
-   WHOP ACCOUNT LINKS ג€” the ONE place a hosted account link is minted.
+   WHOP ACCOUNT LINKS ׳’ג‚¬ג€ the ONE place a hosted account link is minted.
 
    Whop mints two kinds of hosted link for a sub-merchant, and they are the
    same API call with a different `use_case`:
 
-     - `account_onboarding` ג€” the hosted KYC / identity flow.
-     - `payouts_portal`     ג€” the hosted bank-account / payout settings UI.
+     - `account_onboarding` ׳’ג‚¬ג€ the hosted KYC / identity flow.
+     - `payouts_portal`     ׳’ג‚¬ג€ the hosted bank-account / payout settings UI.
 
    THEY ARE NOT INTERCHANGEABLE. Sending a creator to the payouts portal when
    they still need to prove their identity is a dead end, and vice versa. The
@@ -45,7 +45,7 @@ import { isWhopAccountId } from "./whop-accounts";
    client with `baseUrl` set from `WHOP_API_BASE_URLS[environment]`. The SDK's
    own default is production, so a client built without that would quietly send
    sandbox traffic to the live API. Reusing that constructor is what keeps
-   environment isolation intact here ג€” this module never builds its own client.
+   environment isolation intact here ׳’ג‚¬ג€ this module never builds its own client.
 
    THE COMPANY ID IS NEVER THE CALLER'S. Routes resolve it from the database
    with the session uid AND the trusted environment before calling in. This
@@ -64,7 +64,7 @@ export type AccountLinkFailure =
   | "provider_rejected"
   /** The account id names nothing Whop can see. */
   | "not_found"
-  /** Network, 5xx, timeout ג€” retryable. */
+  /** Network, 5xx, timeout ׳’ג‚¬ג€ retryable. */
   | "provider_error"
   /** Whop answered 2xx with something that is not a usable link. */
   | "malformed_response"
@@ -78,7 +78,7 @@ export type AccountLinkResult =
   | { ok: false; reason: AccountLinkFailure };
 
 /* -------------------------------------------------------------------------
-   Redirect URLs ג€” built here, never accepted from a caller
+   Redirect URLs ׳’ג‚¬ג€ built here, never accepted from a caller
    ------------------------------------------------------------------------- */
 
 /**
@@ -87,8 +87,8 @@ export type AccountLinkResult =
  * Read from the locale cookie the middleware already maintains, and validated
  * against the supported set before use. That matters: this value becomes part
  * of a URL we hand to a third party to redirect a browser to, so the only
- * acceptable inputs are the two we ship. Anything else ג€” absent cookie,
- * tampered cookie, a locale we dropped ג€” falls back to the default rather
+ * acceptable inputs are the two we ship. Anything else ׳’ג‚¬ג€ absent cookie,
+ * tampered cookie, a locale we dropped ׳’ג‚¬ג€ falls back to the default rather
  * than being echoed into a redirect.
  */
 async function resolveLocale(): Promise<Locale> {
@@ -105,7 +105,7 @@ async function resolveLocale(): Promise<Locale> {
  * The app's public origin, proved to be an absolute HTTPS URL.
  *
  * Whop redirects a browser to these, so http:// or a relative path is not
- * merely untidy ג€” a hosted flow cannot return the creator anywhere useful.
+ * merely untidy ׳’ג‚¬ג€ a hosted flow cannot return the creator anywhere useful.
  * Returning null makes the caller fail closed with `unconfigured` instead of
  * minting a link that strands them.
  */
@@ -137,7 +137,7 @@ function resolveAppOrigin(env: NodeJS.ProcessEnv = process.env): string | null {
  *   - `refresh_url` is "the hosted session expired before they finished".
  *     Whop sends the browser here to be issued a fresh link. Landing on the
  *     dashboard shows the card in its real state with its start button, which
- *     mints a new link on click ג€” so the restart path is the button that is
+ *     mints a new link on click ׳’ג‚¬ג€ so the restart path is the button that is
  *     already there, and no extra route is needed.
  */
 function redirectUrls(origin: string, locale: Locale, useCase: AccountLinkUseCase) {
@@ -156,7 +156,7 @@ function redirectUrls(origin: string, locale: Locale, useCase: AccountLinkUseCas
 /**
  * Mints one short-lived hosted account link for a connected sub-merchant.
  *
- * `companyId` MUST be the creator's own connected `biz_ג€¦` account, resolved
+ * `companyId` MUST be the creator's own connected `biz_׳’ג‚¬ֲ¦` account, resolved
  * server-side from their session and the running environment. Passing the
  * platform's own company id here would onboard the platform account.
  *
@@ -172,7 +172,7 @@ export async function createAccountLink(
   // walks a real person through identity verification.
   if (!isWhopAccountId(companyId)) return { ok: false, reason: "invalid_account_id" };
 
-  const client = getWhopAppClient();
+  const client = getWhopPaymentsClient();
   if (!client) return { ok: false, reason: "unconfigured" };
 
   const origin = resolveAppOrigin();
@@ -234,7 +234,7 @@ function classify(error: unknown): AccountLinkFailure {
  * WHY THIS EXISTS AND WHY IT IS SHAPED LIKE THIS.
  *
  * A real sandbox call returned 502 `provider_rejected` and the server log said
- * only `POST /api/whop/kyc/start 502` ג€” Whop's own explanation was being
+ * only `POST /api/whop/kyc/start 502` ׳’ג‚¬ג€ Whop's own explanation was being
  * thrown away by the catch above. Without it there is nothing to act on.
  *
  * WHAT MUST NOT BE LOGGED, and why each is a real hazard here:
@@ -264,7 +264,7 @@ type SafeProviderDetail = {
 
 const MAX_LEN = 300;
 
-/** A short, scrubbed scalar ג€” or null. Anything non-scalar is dropped. */
+/** A short, scrubbed scalar ׳’ג‚¬ג€ or null. Anything non-scalar is dropped. */
 function safeString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -277,7 +277,7 @@ function readAllowlisted(body: unknown): Omit<SafeProviderDetail, "status" | "re
   // Whop has used both a top-level error object and a flat envelope.
   const err = (root.error && typeof root.error === "object" ? root.error : root) as Record<string, unknown>;
 
-  // Per-field validation failures ג€” the detail that actually names what Whop
+  // Per-field validation failures ׳’ג‚¬ג€ the detail that actually names what Whop
   // disliked. Only `field`/`param`/`code`/`message` are read off each entry.
   const validation: string[] = [];
   const list = Array.isArray(root.errors) ? root.errors : Array.isArray(err.errors) ? err.errors : [];
@@ -309,8 +309,8 @@ export function describeProviderRejection(error: unknown): SafeProviderDetail {
   return {
     status: typeof whopError?.statusCode === "number" ? whopError.statusCode : null,
     // Read through the SDK getter, which pulls `x-request-id` off the RESPONSE
-    // headers. This is Whop's own correlation id ג€” the one to quote in a
-    // support ticket ג€” and never anything we sent.
+    // headers. This is Whop's own correlation id ׳’ג‚¬ג€ the one to quote in a
+    // support ticket ׳’ג‚¬ג€ and never anything we sent.
     requestId: safeString(whopError?.requestId),
     ...readAllowlisted(whopError?.body),
   };
@@ -338,7 +338,7 @@ function logProviderRejection(useCase: AccountLinkUseCase, error: unknown): void
       d.validation.length ? `validation=[${d.validation.join("; ")}]` : null,
     ].filter(Boolean);
 
-    console.error(`[whop:account_links] rejected ג€” ${parts.join(" ")}`);
+    console.error(`[whop:account_links] rejected ׳’ג‚¬ג€ ${parts.join(" ")}`);
     return;
   }
 
@@ -353,8 +353,8 @@ function logProviderRejection(useCase: AccountLinkUseCase, error: unknown): void
     d.validation.length ? `validation=[${d.validation.join("; ")}]` : null,
   ].filter(Boolean);
 
-  console.error(`[whop:account_links] rejected ג€” ${parts.join(" ")}`);
+  console.error(`[whop:account_links] rejected ׳’ג‚¬ג€ ${parts.join(" ")}`);
 }
 
-/** @internal ג€” URL construction, asserted directly by whop-kyc-test. */
+/** @internal ׳’ג‚¬ג€ URL construction, asserted directly by whop-kyc-test. */
 export const __testing = { resolveAppOrigin, redirectUrls };
