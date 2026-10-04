@@ -324,9 +324,19 @@ export function describeProviderRejection(error: unknown): SafeProviderDetail {
  * provider body should not accumulate.
  */
 function logProviderRejection(useCase: AccountLinkUseCase, error: unknown): void {
-  if (process.env.NODE_ENV === "production") return;
-
   const d = describeProviderRejection(error);
+
+  if (process.env.NODE_ENV === "production") {
+    const parts = [
+      `use_case=${useCase}`,
+      `status=${d.status ?? "?"}`,
+      d.requestId ? `request_id=${d.requestId}` : null,
+    ].filter(Boolean);
+
+    console.error(`[whop:account_links] rejected — ${parts.join(" ")}`);
+    return;
+  }
+
   const parts = [
     `use_case=${useCase}`,
     `status=${d.status ?? "?"}`,
