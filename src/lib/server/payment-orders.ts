@@ -347,3 +347,76 @@ export async function findOrCreateSandboxOrder(match: {
     return { ok: false, reason: "storage_error" };
   }
 }
+
+/* -------------------------------------------------------------------------
+   Production E2E test order — ONE SHOT
+   ------------------------------------------------------------------------- */
+
+const PRODUCTION_E2E_ORDER_LOCK = BigInt("724103991002");
+
+/**
+ * Returns the single production E2E order.
+ *
+ * Unlike the sandbox helper, this deliberately reuses ANY existing matching
+ * order, including a paid one. This makes the production money test one-shot:
+ * a later retry can never create a second $1.07 production order.
+ */
+export async function findOrCreateProductionE2EOrder(): Promise<CreateOrderResult> {
+  const db = getDb();
+  const environment = getWhopEnvironment();
+
+  if (!db || environment !== "production") {
+    return { ok: false, reason: "unconfigured" };
+  }
+
+  const amountMinor = BigInt(107);
+  const currency = "usd";
+  const purpose = "production_e2e_test";
+
+  try {
+    return await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(${PRODUCTION_E2E_ORDER_LOCK})`,
+      );
+
+      const [existing] = await tx
+        .select()
+        .from(paymentOrders)
+        .where(
+          and(
+            eq(paymentOrders.environment, "production"),
+            eq(paymentOrders.purpose, purpose),
+            eq(paymentOrders.currency, currency),
+            eq(paymentOrders.amountMinor, amountMinor),
+          ),
+        )
+        .orderBy(asc(paymentOrders.createdAt))
+        .limit(1);
+
+      if (existing) {
+        return {
+          ok: true,
+          order: existing as PaymentOrder,
+        } as CreateOrderResult;
+      }
+
+      const [created] = await tx
+        .insert(paymentOrders)
+        .values({
+          environment,
+          amountMinor,
+          currency,
+          purpose,
+          status: "created",
+        })
+        .returning();
+
+      return {
+        ok: true,
+        order: created as PaymentOrder,
+      } as CreateOrderResult;
+    });
+  } catch {
+    return { ok: false, reason: "storage_error" };
+  }
+}
