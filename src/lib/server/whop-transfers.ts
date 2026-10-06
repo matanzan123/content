@@ -341,6 +341,15 @@ function classify(
         const nested = nestedError as Record<string, unknown>;
         diagnostic.error_keys = Object.keys(nested).slice(0, 20);
 
+        const message = nested.message;
+        if (typeof message === "string") {
+          diagnostic.error_message = message
+            .replace(/\b(?:biz|user|ldgr|pay|wdrl|acct|trn)_[A-Za-z0-9_-]+\b/g, "[redacted-id]")
+            .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted-uuid]")
+            .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+            .slice(0, 240);
+        }
+
         for (const key of ["code", "reason", "type", "error_code"]) {
           const value = nested[key];
           if (
