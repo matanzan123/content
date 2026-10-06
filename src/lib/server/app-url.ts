@@ -142,3 +142,20 @@ export function buildCheckoutReturnUrl(
   const safeLocale = LOCALES.has(locale) ? locale : "en";
   return `${origin}/${safeLocale}/checkout/sandbox/complete?order_id=${encodeURIComponent(orderId)}`;
 }
+
+/**
+ * Temporary production E2E return URL.
+ * Used only by the exact `production_e2e_test` payment order.
+ */
+export function buildProductionE2EReturnUrl(
+  orderId: string,
+  locale: string,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const origin = getAppPublicUrl(env);
+  if (!origin) return null;
+
+  const safeLocale = LOCALES.has(locale) ? locale : "en";
+
+  return `${origin}/${safeLocale}/checkout/production-e2e/complete?order_id=${encodeURIComponent(orderId)}`;
+}

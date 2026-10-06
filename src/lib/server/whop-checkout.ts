@@ -7,7 +7,7 @@ import {
   getWhopPaymentsClient,
 } from "./whop-payments";
 import { currencyDecimals, minorToDecimal } from "./money";
-import { buildCheckoutReturnUrl } from "./app-url";
+import { buildCheckoutReturnUrl, buildProductionE2EReturnUrl } from "./app-url";
 import {
   attachCheckout,
   getPaymentOrder,
@@ -17,12 +17,12 @@ import {
 } from "./payment-orders";
 
 /* ==========================================================================
-   WHOP CHECKOUT CREATION — server only.
+   WHOP CHECKOUT CREATION ג€” server only.
 
    A checkout is built FROM an internal order. The price is read out of the
    database, converted exactly, and handed to Whop; it is never taken from the
    request that asked for the checkout. A browser can say "pay for order X" and
-   nothing else — not how much, not in what currency, not for whose company.
+   nothing else ג€” not how much, not in what currency, not for whose company.
 
    `metadata.order_id` is a CORRELATION identifier only. It travels to the
    payment so a webhook can find its way back to this order, and the webhook
@@ -58,7 +58,7 @@ export type CheckoutResult =
     };
 
 /**
- * Creates — or safely reuses — a Whop checkout for an internal order.
+ * Creates ג€” or safely reuses ג€” a Whop checkout for an internal order.
  *
  * IDEMPOTENCY, on two levels:
  *
@@ -101,7 +101,7 @@ export async function createWhopCheckoutForOrder(
   const decimals = currencyDecimals(order.currency);
   if (decimals === null) return { ok: false, reason: "unsupported_currency" };
 
-  // Exact string conversion — no float touches a price on its way to Whop.
+  // Exact string conversion ג€” no float touches a price on its way to Whop.
   const price = minorToDecimal(order.amountMinor, decimals);
   if (price === null) return { ok: false, reason: "invalid_amount" };
 
@@ -109,7 +109,10 @@ export async function createWhopCheckoutForOrder(
   // this, and a buyer stranded after paying is the worst outcome available.
   // Refused BEFORE the provider object is created, so a broken configuration
   // cannot leave a dangling checkout behind.
-  const redirectUrl = buildCheckoutReturnUrl(order.orderId, locale);
+  const redirectUrl =
+    order.purpose === "production_e2e_test"
+      ? buildProductionE2EReturnUrl(order.orderId, locale)
+      : buildCheckoutReturnUrl(order.orderId, locale);
   if (!redirectUrl) return { ok: false, reason: "missing_public_url" };
 
   try {
@@ -141,7 +144,7 @@ export async function createWhopCheckoutForOrder(
 
     const attached = await attachCheckout(order.orderId, { checkoutId, planId });
     if (!attached) {
-      // The order moved underneath us — most likely it settled. Refuse rather
+      // The order moved underneath us ג€” most likely it settled. Refuse rather
       // than hand back a checkout for an order that no longer wants one.
       return { ok: false, reason: "not_eligible" };
     }
