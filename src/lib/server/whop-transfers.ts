@@ -308,6 +308,55 @@ function classify(
 ): { outcome: "definite"; reason: DefiniteFailure } | { outcome: "ambiguous"; reason: AmbiguousFailure } {
   const status = error instanceof WhopError ? error.statusCode : undefined;
 
+  // TEMP E2E DIAGNOSTIC: never log the full provider body/message because it
+  // may contain request details. Only expose structural keys and closed-form
+  // error identifiers.
+  if (error instanceof WhopError && (status === 400 || status === 422)) {
+    const body = error.body;
+    const diagnostic: Record<string, unknown> = {
+      status,
+    };
+
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const top = body as Record<string, unknown>;
+      diagnostic.keys = Object.keys(top).slice(0, 20);
+
+      for (const key of ["code", "reason", "type", "error_code"]) {
+        const value = top[key];
+        if (
+          typeof value === "string" ||
+          typeof value === "number" ||
+          typeof value === "boolean"
+        ) {
+          diagnostic[key] = value;
+        }
+      }
+
+      const nestedError = top.error;
+      if (
+        nestedError &&
+        typeof nestedError === "object" &&
+        !Array.isArray(nestedError)
+      ) {
+        const nested = nestedError as Record<string, unknown>;
+        diagnostic.error_keys = Object.keys(nested).slice(0, 20);
+
+        for (const key of ["code", "reason", "type", "error_code"]) {
+          const value = nested[key];
+          if (
+            typeof value === "string" ||
+            typeof value === "number" ||
+            typeof value === "boolean"
+          ) {
+            diagnostic[`error.${key}`] = value;
+          }
+        }
+      }
+    }
+
+    console.error("[whop-transfer-4xx]", diagnostic);
+  }
+
   if (status === 403) return { outcome: "definite", reason: "platforms_access_required" };
   if (status === 404) return { outcome: "definite", reason: "account_not_found" };
   if (status === 402) return { outcome: "definite", reason: "insufficient_funds" };
